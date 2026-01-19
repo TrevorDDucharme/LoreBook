@@ -1,0 +1,41 @@
+{
+	"dependencies": [
+		"physfs",
+		"zstd",
+		"glfw3",
+		"glm",
+		{
+			"name": "imgui",
+			"features": [
+				"freetype",
+				"glfw-binding",
+				"opengl3-binding",
+				"docking-experimental",
+				"wchar32"
+			]
+		},
+		"glew",
+		"freeglut",
+		"opengl",
+		"freetype",
+		"stb",
+		"nlohmann-json",
+		"openssl",
+		"curl",
+		{
+			"name": "lua",
+			"features": [
+				"tools",
+				"cpp"
+			]
+		},
+		"boost-dll",
+		"ffmpeg",
+		"plog",
+		"boost-beast",
+		"cli11",
+		"sqlite3",
+		"implot",
+		"implot3d"
+	]
+}
