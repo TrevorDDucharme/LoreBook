@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <stb_image.h>
+#include <plog/Log.h>
 
 // Minimal single-file shader helpers
 static GLuint compileShader(GLenum type, const char* src){
@@ -73,6 +74,8 @@ struct ModelViewer::Impl {
     GLuint prog = 0;
     GLuint fbo = 0, fboTex = 0, rbo = 0;
     int fbW=0, fbH=0;
+    // Whether GL resources (shaders, VAO/VBO/IBO) have been created lazily
+    bool glInitialized = false;
 
     // Textures for basic PBR (albedo, normal, metallic-roughness+ao)
     GLuint albedoTex = 0, normalTex = 0, mraoTex = 0;
@@ -88,7 +91,19 @@ struct ModelViewer::Impl {
     std::string name;
     glm::vec3 color{0.8f,0.8f,0.9f};
 
+    // Diagnostics: whether the last load attempt failed
+    bool lastLoadFailed = false;
+
     Impl(){
+        // Defer GL resource creation to avoid blocking the UI when many ModelViewer objects
+        // are created (shader compile and glGen* can be somewhat expensive).
+        // Resources will be created lazily in ensureGLInitialized() on the main thread when needed.
+        glInitialized = false;
+    }
+
+    void ensureGLInitialized(){
+        if(glInitialized) return;
+        PLOGV << "mv:ensureGLInitialized";
         GLuint vs = compileShader(GL_VERTEX_SHADER, vs_src);
         GLuint fs = compileShader(GL_FRAGMENT_SHADER, fs_src);
         prog = linkProgram(vs, fs);
@@ -96,6 +111,7 @@ struct ModelViewer::Impl {
         glGenVertexArrays(1, &vao);
         glGenBuffers(1, &vbo);
         glGenBuffers(1, &ibo);
+        glInitialized = true;
     }
     ~Impl(){ if(prog) glDeleteProgram(prog); if(vbo) glDeleteBuffers(1,&vbo); if(ibo) glDeleteBuffers(1,&ibo); if(vao) glDeleteVertexArrays(1,&vao); if(fbo) glDeleteFramebuffers(1,&fbo); if(fboTex) glDeleteTextures(1,&fboTex); if(rbo) glDeleteRenderbuffers(1,&rbo); if(albedoTex) glDeleteTextures(1,&albedoTex); if(normalTex) glDeleteTextures(1,&normalTex); if(mraoTex) glDeleteTextures(1,&mraoTex); }
 
@@ -135,9 +151,11 @@ struct ModelViewer::Impl {
     }
 
     void drawGL(int w,int h){
+        PLOGV << "drawGL:enter hasModel=" << hasModel << " indexCount=" << indexCount << " vao=" << vao << " vbo=" << vbo << " ibo=" << ibo << " fbo=" << fbo << " fboTex=" << fboTex;
         if(!hasModel) return;
         ensureFBOSize(w,h);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        GLint bound=0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound); PLOGV << "drawGL:bound_fb=" << bound;
         glViewport(0,0,w,h);
         glEnable(GL_DEPTH_TEST);
         glClearColor(0.07f,0.07f,0.08f,1.0f);
@@ -167,12 +185,25 @@ struct ModelViewer::Impl {
         GLint hasMraoLoc = glGetUniformLocation(prog, "uHasMRAO"); if(hasMraoLoc>=0) glUniform1i(hasMraoLoc, hasMrao?1:0);
         if(hasMrao){ glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, mraoTex); GLint tloc = glGetUniformLocation(prog, "uMRAO"); if(tloc>=0) glUniform1i(tloc, 2); }
 
-        glBindVertexArray(vao);
-        glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0);
-        glBindVertexArray(0);
-        glUseProgram(0);
+        if(indexCount > 0){
+            glBindVertexArray(vao);
+            glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0);
+            glBindVertexArray(0);
+        } else {
+            PLOGW << "drawGL:warning indexCount==0 (nothing to draw)";
+        }
 
-        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        GLenum err = glGetError();
+        if(err != GL_NO_ERROR) PLOGW << "drawGL glError=0x" << std::hex << err;
+
+        // Unbind textures/program/FBO and restore state
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgram(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_DEPTH_TEST);
+        PLOGV << "drawGL:exit final_fb=0";
     }
 };
 
@@ -184,11 +215,15 @@ void ModelViewer::setTextureLoader(TextureLoader loader){ if(impl) impl->texture
 
 bool ModelViewer::isLoaded() const{ return impl ? impl->hasModel : false; }
 
+bool ModelViewer::loadFailed() const{ return impl ? impl->lastLoadFailed : false; }
+
 bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::string& name){
+    PLOGI << "mv:load name='" << name << "' data_size=" << data.size();
     clear();
+    impl->lastLoadFailed = false;
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFileFromMemory(data.data(), data.size(), aiProcess_Triangulate|aiProcess_GenNormals|aiProcess_JoinIdenticalVertices|aiProcess_OptimizeMeshes, name.c_str());
-    if(!scene || !scene->HasMeshes()) return false;
+    if(!scene || !scene->HasMeshes()){ PLOGW << "mv:loadFailed name='" << name << "'"; impl->lastLoadFailed = true; return false; }
 
     // Try to load some textures from materials (embedded or via textureLoader callback)
     // Use first material's diffuse/normal/metalness as a best-effort PBR setup
@@ -234,7 +269,8 @@ bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::st
         baseV += mesh->mNumVertices;
     }
 
-    // Upload to GL
+    // Upload to GL (ensure GL resources exist; this may compile/link shaders lazily)
+    impl->ensureGLInitialized();
     glBindVertexArray(impl->vao);
     glBindBuffer(GL_ARRAY_BUFFER, impl->vbo);
     glBufferData(GL_ARRAY_BUFFER, vbuf.size()*sizeof(float), vbuf.data(), GL_STATIC_DRAW);
@@ -248,10 +284,13 @@ bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::st
 
     impl->hasModel = true;
     impl->name = name;
+    impl->lastLoadFailed = false;
+    PLOGI << "mv:loaded name='" << name << "' indexCount=" << impl->indexCount;
     return true;
 }
 
 void ModelViewer::renderToRegion(const ImVec2& size){
+    PLOGV << "mv:renderToRegion size=" << size.x << "x" << size.y << " hasModel=" << impl->hasModel << " fbo=" << impl->fbo << " fboTex=" << impl->fboTex;
     if(!impl->hasModel){ ImGui::TextUnformatted("No model loaded"); return; }
     // Mouse controls: simple orbit
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -267,8 +306,11 @@ void ModelViewer::renderToRegion(const ImVec2& size){
     if(ImGui::GetIO().MouseWheel != 0.0f){ impl->distance *= (1.0f - ImGui::GetIO().MouseWheel*0.1f); if(impl->distance < 0.1f) impl->distance = 0.1f; }
 
     impl->drawGL((int)size.x, (int)size.y);
-    // Draw the framebuffer texture
+    // Draw the framebuffer texture flush to the top-left of the reserved area so it appears inline
+    ImGui::SetCursorScreenPos(p);
     ImGui::Image((ImTextureID)(intptr_t)impl->fboTex, size, ImVec2(0,1), ImVec2(1,0));
+    // Advance cursor to just after the image so subsequent items layout correctly
+    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + size.y));
 }
 
 bool ModelViewer::renderWindow(const char* title, bool* p_open){

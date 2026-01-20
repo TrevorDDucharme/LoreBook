@@ -15,6 +15,10 @@
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
+#include <plog/Log.h>
+#include <plog/Init.h>
+#include <plog/Appenders/ConsoleAppender.h>
+#include <plog/Formatters/TxtFormatter.h>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -108,6 +112,11 @@ int main(int argc, char** argv)
     createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
     strncpy(openVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(openVaultDirBuf));
     openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+
+    // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
+    static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
+    plog::init(plog::verbose, &consoleAppender);
+    PLOGI << "plog initialized (verbose -> stderr)";
 
     // Main loop
     while (!glfwWindowShouldClose(window))
@@ -402,9 +411,19 @@ int main(int argc, char** argv)
                     std::string label = d.path().filename().string();
                     if(ImGui::Selectable(label.c_str())){
                         browserPath = d.path();
+                        // Single-click accepts and closes, to match file selection behavior
+                        if(browserMode == BrowserMode::BrowseForCreateDir){
+                            strncpy(createVaultDirBuf, browserPath.string().c_str(), sizeof(createVaultDirBuf));
+                            createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
+                            ImGui::CloseCurrentPopup();
+                        } else if(browserMode == BrowserMode::BrowseForOpenDir){
+                            strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                            openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                            ImGui::CloseCurrentPopup();
+                        }
                     }
                     if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()){
-                        // Accept this directory for the mode that requested it
+                        // Fallback: double-click also accepts the directory
                         if(browserMode == BrowserMode::BrowseForCreateDir){
                             strncpy(createVaultDirBuf, browserPath.string().c_str(), sizeof(createVaultDirBuf));
                             createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
