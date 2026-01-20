@@ -16,6 +16,9 @@ struct ModelViewer {
     bool loadFromMemory(const std::vector<uint8_t>& data, const std::string& name);
     bool loadFromFile(const std::string& path);
 
+    // Whether the last load attempt failed
+    bool loadFailed() const;
+
     // Set a callback to resolve external texture paths to raw bytes
     void setTextureLoader(TextureLoader loader);
 
