@@ -89,6 +89,14 @@ int main(int argc, char** argv)
     static char openVaultDirBuf[1024];
     static char openVaultNameBuf[256] = "";
     static char openVaultError[512] = "";
+
+    // File browser state
+    enum class BrowserMode { None, BrowseForCreateDir, BrowseForOpenDir, BrowseForOpenFile };
+    static bool showBrowseModal = false;
+    static BrowserMode browserMode = BrowserMode::None;
+    static std::filesystem::path browserPath;
+    static std::string browserSelectedFile;
+
     // initialize directory buffers with current path once
     strncpy(createVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(createVaultDirBuf));
     createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
@@ -181,10 +189,16 @@ int main(int argc, char** argv)
                 strncpy(createVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(createVaultDirBuf));
                 createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
             }
+            ImGui::SameLine();
+            if(ImGui::Button("Browse...")){
+                showBrowseModal = true;
+                browserMode = BrowserMode::BrowseForCreateDir;
+                browserPath = std::filesystem::path(createVaultDirBuf);
+            }
             ImGui::InputText("Filename", createVaultNameBuf, sizeof(createVaultNameBuf));
 
             if(createVaultError[0] != '\0'){
-                ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), createVaultError);
+                ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", createVaultError);
             }
 
             if(ImGui::Button("Create")){
@@ -235,10 +249,23 @@ int main(int argc, char** argv)
                 strncpy(openVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(openVaultDirBuf));
                 openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
             }
+            ImGui::SameLine();
+            if(ImGui::Button("Browse...")){
+                showBrowseModal = true;
+                browserMode = BrowserMode::BrowseForOpenDir;
+                browserPath = std::filesystem::path(openVaultDirBuf);
+            }
             ImGui::InputText("Filename", openVaultNameBuf, sizeof(openVaultNameBuf));
+            ImGui::SameLine();
+            if(ImGui::Button("Browse File...")){
+                showBrowseModal = true;
+                browserMode = BrowserMode::BrowseForOpenFile;
+                browserPath = std::filesystem::path(openVaultDirBuf);
+                browserSelectedFile.clear();
+            }
 
             if(openVaultError[0] != '\0'){
-                ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), openVaultError);
+                ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", openVaultError);
             }
 
             if(ImGui::Button("Open")){
@@ -282,6 +309,120 @@ int main(int argc, char** argv)
                 showOpenVaultModal = false;
             }
 
+            ImGui::EndPopup();
+        }
+
+        // Open the appropriate browse popup if requested
+        if(showBrowseModal){
+            if(browserMode == BrowserMode::BrowseForOpenFile)
+                ImGui::OpenPopup("Select Vault File");
+            else
+                ImGui::OpenPopup("Browse Directory");
+            showBrowseModal = false;
+        }
+
+        // Browse Directory modal (select a directory)
+        if(ImGui::BeginPopupModal("Browse Directory", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Select directory:");
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", browserPath.string().c_str());
+            ImGui::SameLine();
+            if(ImGui::Button("Up")){
+                if(browserPath.has_parent_path()) browserPath = browserPath.parent_path();
+            }
+            ImGui::Separator();
+            // List directories
+            try{
+                std::vector<std::filesystem::directory_entry> dirs;
+                for(auto &e : std::filesystem::directory_iterator(browserPath)){
+                    if(e.is_directory()) dirs.push_back(e);
+                }
+                std::sort(dirs.begin(), dirs.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                for(auto &d : dirs){
+                    std::string label = d.path().filename().string();
+                    if(ImGui::Selectable(label.c_str())){
+                        browserPath = d.path();
+                    }
+                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()){
+                        // Accept this directory for the mode that requested it
+                        if(browserMode == BrowserMode::BrowseForCreateDir){
+                            strncpy(createVaultDirBuf, browserPath.string().c_str(), sizeof(createVaultDirBuf));
+                            createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
+                            ImGui::CloseCurrentPopup();
+                        } else if(browserMode == BrowserMode::BrowseForOpenDir){
+                            strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                            openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                }
+            } catch(...){}
+
+            if(ImGui::Button("Select Here")){
+                if(browserMode == BrowserMode::BrowseForCreateDir){
+                    strncpy(createVaultDirBuf, browserPath.string().c_str(), sizeof(createVaultDirBuf));
+                    createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
+                } else if(browserMode == BrowserMode::BrowseForOpenDir){
+                    strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                    openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // Select Vault File modal (choose a file in the directory)
+        if(ImGui::BeginPopupModal("Select Vault File", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Select file:");
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", browserPath.string().c_str());
+            ImGui::SameLine();
+            if(ImGui::Button("Up")){
+                if(browserPath.has_parent_path()) browserPath = browserPath.parent_path();
+            }
+            ImGui::Separator();
+            try{
+                std::vector<std::filesystem::directory_entry> dirs, files;
+                for(auto &e : std::filesystem::directory_iterator(browserPath)){
+                    if(e.is_directory()) dirs.push_back(e);
+                    else if(e.is_regular_file()) files.push_back(e);
+                }
+                std::sort(dirs.begin(), dirs.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                std::sort(files.begin(), files.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                for(auto &d : dirs){
+                    std::string label = std::string("[DIR] ") + d.path().filename().string();
+                    if(ImGui::Selectable(label.c_str())){
+                        browserPath = d.path();
+                    }
+                }
+                for(auto &f : files){
+                    std::string fname = f.path().filename().string();
+                    bool sel = (browserSelectedFile == fname);
+                    if(ImGui::Selectable(fname.c_str(), sel)){
+                        browserSelectedFile = fname;
+                    }
+                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()){
+                        browserSelectedFile = fname;
+                        strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                        openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                        strncpy(openVaultNameBuf, browserSelectedFile.c_str(), sizeof(openVaultNameBuf));
+                        openVaultNameBuf[sizeof(openVaultNameBuf)-1] = '\0';
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+            } catch(...){}
+
+            if(ImGui::Button("Open") && !browserSelectedFile.empty()){
+                strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                strncpy(openVaultNameBuf, browserSelectedFile.c_str(), sizeof(openVaultNameBuf));
+                openVaultNameBuf[sizeof(openVaultNameBuf)-1] = '\0';
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
 
