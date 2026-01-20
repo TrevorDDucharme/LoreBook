@@ -76,6 +76,8 @@ public:
     // Tag filter API (used by GraphView to filter tree)
     void setTagFilter(const std::vector<std::string>& tags, bool modeAll){ activeTagFilter = tags; tagFilterModeAll = modeAll; }
     void clearTagFilter(){ activeTagFilter.clear(); }
+    std::vector<std::string> getActiveTagFilterPublic() const { return activeTagFilter; }
+    bool getTagFilterModeAllPublic() const { return tagFilterModeAll; }
     bool nodeMatchesActiveFilter(int64_t id){
         if(activeTagFilter.empty()) return true;
         auto tags = parseTags(getTagsOf(id));
@@ -213,6 +215,7 @@ public:
 
     void drawVaultTree(){
         ImGui::Begin("Vault Tree");
+
         // Toolbar: New Note button
         if(ImGui::Button("New Note")){
             ImGui::OpenPopup("Create Note");
@@ -235,6 +238,106 @@ public:
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
+        }
+
+        // Tag search UI (mirrors GraphView tags) 🔎
+        ImGui::Separator();
+        ImGui::TextDisabled("Tag filter:"); ImGui::SameLine();
+        // Input to add a tag by name
+        static char tagSearchBuf[128] = "";
+        ImGui::SetNextItemWidth(200);
+        if(ImGui::InputTextWithHint("##tagsearch", "Add tag and press Enter", tagSearchBuf, sizeof(tagSearchBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
+            std::string t = std::string(tagSearchBuf);
+            // trim
+            while(!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
+            while(!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
+            if(!t.empty()){
+                if(std::find(activeTagFilter.begin(), activeTagFilter.end(), t) == activeTagFilter.end()){
+                    activeTagFilter.push_back(t);
+                }
+                tagSearchBuf[0] = '\0';
+            }
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Clear Tags")){
+            clearTagFilter();
+        }
+        ImGui::SameLine();
+        ImGui::Text("Mode:"); ImGui::SameLine();
+        if(ImGui::RadioButton("All (AND)", tagFilterModeAll)) tagFilterModeAll = true; ImGui::SameLine();
+        if(ImGui::RadioButton("Any (OR)", !tagFilterModeAll)) tagFilterModeAll = false;
+
+        // Show active tags as chips
+        ImGui::NewLine();
+        for(size_t i=0;i<activeTagFilter.size();++i){
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::TextUnformatted(activeTagFilter[i].c_str()); ImGui::SameLine();
+            if(ImGui::SmallButton((std::string("x##t") + std::to_string(i)).c_str())){
+                activeTagFilter.erase(activeTagFilter.begin()+i);
+            }
+            ImGui::SameLine();
+            ImGui::PopID();
+        }
+
+        // If tag filter is active show matched nodes as a flat list (even if their parent doesn't match)
+        if(!activeTagFilter.empty()){
+            ImGui::Separator();
+            ImGui::Text("Filtered results:");
+            ImGui::BeginChild("FilteredList", ImVec2(0,200), true);
+            auto all = getAllItems();
+            for(auto &it : all){
+                int64_t id = it.first; const std::string &name = it.second;
+                if(nodeMatchesActiveFilter(id)){
+                    std::string label = name + "##" + std::to_string(id);
+                    if(ImGui::Selectable(label.c_str(), selectedItemID == id)){
+                        selectedItemID = id;
+                    }
+                    // context menu for filtered view
+                    if(ImGui::BeginPopupContextItem((std::string("ctx") + std::to_string(id)).c_str())){
+                        if(ImGui::MenuItem("New Child")){
+                            int64_t nid = createItem("New Note", id);
+                            if(nid != -1) selectedItemID = nid;
+                        }
+                        if(ImGui::MenuItem("Rename")){
+                            renameTargetID = id;
+                            strncpy(renameBuf, getItemName(id).c_str(), sizeof(renameBuf));
+                            showRenameModal = true;
+                        }
+                        if(ImGui::MenuItem("Delete")){
+                            deleteTargetID = id;
+                            showDeleteModal = true;
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
+            }
+            ImGui::EndChild();
+
+            // Done with tree; don't render hierarchical view
+            ImGui::End();
+
+            // Open rename/delete modals if requested (same as before)
+            if(showRenameModal){ ImGui::OpenPopup("Rename Item"); showRenameModal = false; }
+            if(ImGui::BeginPopupModal("Rename Item", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                ImGui::InputText("New Name", renameBuf, sizeof(renameBuf));
+                if(ImGui::Button("OK")){
+                    if(renameTargetID >= 0){ std::string s(renameBuf); if(!s.empty()){ renameItem(renameTargetID, s); statusMessage = "Renamed"; statusTime = ImGui::GetTime(); } }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
+                ImGui::EndPopup();
+            }
+            if(showDeleteModal){ ImGui::OpenPopup("Delete Item"); showDeleteModal = false; }
+            if(ImGui::BeginPopupModal("Delete Item", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                ImGui::Text("Delete this item? This will remove the item and its relations."); ImGui::Separator();
+                if(ImGui::Button("Delete")){
+                    if(deleteTargetID >= 0){ if(deleteItem(deleteTargetID)){ statusMessage = "Item deleted"; statusTime = ImGui::GetTime(); } else { statusMessage = "Failed to delete item"; statusTime = ImGui::GetTime(); } }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
+                ImGui::EndPopup();
+            }
+            return;
         }
 
         // Draw the vault root (named after the vault) as the single top node
@@ -531,7 +634,9 @@ public:
         for(auto pid : parents){
             ImGui::TextUnformatted("- "); ImGui::SameLine();
             ImGui::TextUnformatted(getItemName(pid).c_str()); ImGui::SameLine();
-            if(pid == root){
+            // Allow removing root as a parent only if the node has other parents (never allow removal that leaves zero parents)
+            bool hasMultipleParents = (parents.size() > 1);
+            if(pid == root && !hasMultipleParents){
                 ImGui::TextDisabled("(root)");
             } else {
                 if(ImGui::SmallButton((std::string("RemoveP##") + std::to_string(pid)).c_str())){
@@ -931,10 +1036,10 @@ private:
         }
         if(stmt) sqlite3_finalize(stmt);
 
-        // Disallow removing the root parent explicitly
-        if(parentID == root) return false;
+        // Disallow removing the last remaining parent (never leave a node parentless)
+        if(parentCount <= 1) return false;
 
-        // Perform deletion
+        // Otherwise, removal is allowed (including removing the root if there are other parents)
         const char* del = "DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;";
         stmt = nullptr;
         if(sqlite3_prepare_v2(dbConnection, del, -1, &stmt, nullptr) == SQLITE_OK){
@@ -943,21 +1048,6 @@ private:
             sqlite3_step(stmt);
         }
         if(stmt) sqlite3_finalize(stmt);
-
-        // If this removed the last parent, ensure the root is attached
-        if(parentCount <= 1){
-            int remCount = 0;
-            const char* countSQL2 = "SELECT COUNT(*) FROM VaultItemChildren WHERE ChildID = ?;";
-            sqlite3_stmt* stmt2 = nullptr;
-            if(sqlite3_prepare_v2(dbConnection, countSQL2, -1, &stmt2, nullptr) == SQLITE_OK){
-                sqlite3_bind_int64(stmt2, 1, childID);
-                if(sqlite3_step(stmt2) == SQLITE_ROW) remCount = sqlite3_column_int(stmt2, 0);
-            }
-            if(stmt2) sqlite3_finalize(stmt2);
-            if(remCount == 0){
-                addParentRelation(root, childID);
-            }
-        }
 
         return true;
     }
