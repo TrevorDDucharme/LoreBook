@@ -28,6 +28,7 @@
 #include <atomic>
 #include <memory>
 #include <algorithm>
+#include <chrono>
 
 // Minimal single-file shader helpers
 static GLuint compileShader(GLenum type, const char* src){
@@ -43,7 +44,7 @@ static GLuint linkProgram(GLuint vs, GLuint fs){
 
 // ParsedModel holds CPU-side data produced by parsing (no GL calls)
 struct ParsedModel {
-    std::vector<float> vbuf; // interleaved pos,norm,uv
+    std::vector<float> vbuf; // interleaved pos,norm,uv(+tangent)
     std::vector<unsigned int> ibuf;
     struct Tex { std::vector<uint8_t> pixels; int w=0,h=0; bool present=false; } albedo, normal, mrao;
     // additional texture slots parsed from model
@@ -69,6 +70,9 @@ struct ParsedModel {
     // Per-mesh draw ranges (after flattening meshes we record ranges so we can bind per-mesh materials)
     struct MeshRange { unsigned int startIndex=0; unsigned int indexCount=0; unsigned int materialIndex=0; };
     std::vector<MeshRange> meshRanges;
+
+    // Record texture reference strings that failed to resolve for a compact summary
+    std::vector<std::string> failedTextureRefs;
 
     // computed transform to center & scale the model to a unit-ish size
     glm::mat4 modelMat = glm::mat4(1.0f);
@@ -174,6 +178,10 @@ struct ModelViewer::Impl {
     std::string name;
     glm::vec3 color{0.8f,0.8f,0.9f};
 
+    // Throttled logging state to avoid spamming the log on every frame
+    std::chrono::steady_clock::time_point lastRenderLog;
+    std::chrono::steady_clock::time_point lastDrawLog;
+
     // Diagnostics: whether the last load attempt failed
     bool lastLoadFailed = false;
 
@@ -190,6 +198,9 @@ struct ModelViewer::Impl {
         // are created (shader compile and glGen* can be somewhat expensive).
         // Resources will be created lazily in ensureGLInitialized() on the main thread when needed.
         glInitialized = false;
+        // initialize throttled log timestamps a bit in the past so first log is allowed
+        lastRenderLog = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        lastDrawLog = std::chrono::steady_clock::now() - std::chrono::seconds(10);
     }
 
     void ensureGLInitialized(){
@@ -289,7 +300,11 @@ struct ModelViewer::Impl {
     }
 
     void drawGL(int w,int h){
-        PLOGV << "drawGL:enter hasModel=" << hasModel << " indexCount=" << indexCount << " vao=" << vao << " vbo=" << vbo << " ibo=" << ibo << " fbo=" << fbo << " fboTex=" << fboTex;
+        auto now = std::chrono::steady_clock::now();
+        if(now - lastDrawLog > std::chrono::seconds(2)){
+            PLOGV << "drawGL:enter hasModel=" << hasModel << " indexCount=" << indexCount << " vao=" << vao << " vbo=" << vbo << " ibo=" << ibo << " fbo=" << fbo << " fboTex=" << fboTex;
+            lastDrawLog = now;
+        }
         if(!hasModel) return;
         ensureFBOSize(w,h);
         glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -406,14 +421,42 @@ bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::st
     auto loadMatTexToTex = [&](aiMaterial* mat, aiTextureType type, ParsedModel::Tex &dest)->bool{
         aiString tpStr; if(mat->GetTextureCount(type) <= 0) return false; mat->GetTexture(type, 0, &tpStr); if(tpStr.length <= 0) return false;
         std::string tp(tpStr.C_Str());
+        // embedded by index
         if(tp.size()>0 && tp[0]=='*'){
             int idx = atoi(tp.c_str()+1); if(idx < 0 || idx >= (int)scene->mNumTextures) { PLOGW << "mv:embedded tex idx out of range: " << tp; return false; }
             aiTexture* t = scene->mTextures[idx]; if(!t) return false;
             int w=0,h=0; std::vector<uint8_t> pix;
             if(!Impl::decodeAssimpTexture(t, pix, w, h)) { PLOGW << "mv:failed to decode embedded tex idx="<<idx; return false; }
-            dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); return true;
+            dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded embedded texture idx="<<idx<<" type="<<type<<" w="<<w<<" h="<<h; return true;
         } else {
-            if(impl->textureLoader){ auto bytes = impl->textureLoader(tp); if(!bytes.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeBytesToRGBA(bytes, pix, w, h)) { PLOGW << "mv:stb failed to decode external tex: "<<tp; return false; } dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); return true; } }
+            // Try external resolver
+            if(impl->textureLoader){ auto bytes = impl->textureLoader(tp); if(!bytes.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeBytesToRGBA(bytes, pix, w, h)) { PLOGW << "mv:stb failed to decode external tex: "<<tp; return false; } dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded external texture path='"<<tp<<"' size="<<bytes.size(); return true; } }
+            // data URI support (data:<mime>;base64,<data>)
+            if(tp.rfind("data:",0) == 0){ size_t comma = tp.find(','); if(comma != std::string::npos){ std::string b64 = tp.substr(comma+1);
+                auto decodeBase64 = [&](const std::string &in)->std::vector<uint8_t>{ std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; std::vector<uint8_t> out; std::vector<int> T(256,-1); for(int i=0;i<64;i++) T[(unsigned char)chars[i]] = i; int val=0, valb=-8; for(unsigned char c : in){ if(T[c] == -1) { if(c=='=') break; else continue; } val = (val<<6) + T[c]; valb += 6; if(valb>=0){ out.push_back((uint8_t)((val>>valb)&0xFF)); valb -= 8; } } return out; };
+                auto raw = decodeBase64(b64); if(!raw.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeCompressedImage(raw.data(), (int)raw.size(), pix, w, h)){ PLOGW << "mv:stb failed to decode data URI for: "<<tp; } else { dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded data URI texture w="<<w<<" h="<<h; return true; } } }
+            }
+            // fallback: search embedded textures by filename using more robust heuristics
+            auto normalizeForMatch = [&](const std::string &s)->std::string{
+                std::string out; out.reserve(s.size());
+                for(char c : s){ if(c == '\\') out.push_back('/'); else out.push_back((char)tolower((unsigned char)c)); }
+                size_t pos = out.find("://"); if(pos != std::string::npos) out = out.substr(pos+3);
+                // strip leading ./ or /
+                while(out.size() && (out[0]=='.' || out[0]=='/')){
+                    if(out.size()>1 && out[0]=='.' && out[1]=='/') out = out.substr(2);
+                    else if(out[0]=='/') out = out.substr(1);
+                    else break;
+                }
+                size_t q = out.find_first_of("?#"); if(q != std::string::npos) out = out.substr(0,q);
+                return out;
+            };
+            auto stripExt = [&](const std::string &s)->std::string{ size_t p = s.find_last_of('.'); return (p==std::string::npos) ? s : s.substr(0,p); };
+            auto removeDelims = [&](const std::string &s)->std::string{ std::string r; r.reserve(s.size()); for(char c : s) if(c!='_' && c!='-' && c!=' ') r.push_back(c); return r; };
+            std::string tpNorm = normalizeForMatch(tp); std::string tpBase = stripExt(tpNorm); std::string tpCompact = removeDelims(tpBase);
+            for(unsigned int ti=0; ti<scene->mNumTextures; ++ti){ aiTexture* tt = scene->mTextures[ti]; if(tt && tt->mFilename.length > 0){ std::string fn(tt->mFilename.C_Str()); std::string fnNorm = normalizeForMatch(fn); std::string fnBase = stripExt(fnNorm); std::string fnCompact = removeDelims(fnBase);
+                    if(fnNorm == tpNorm || fnBase == tpBase || (fnNorm.size() >= tpNorm.size() && fnNorm.find(tpNorm) != std::string::npos) || (tpNorm.size() >= fnNorm.size() && tpNorm.find(fnNorm) != std::string::npos) || fnBase == tpNorm || fnCompact == tpCompact){ int w=0,h=0; std::vector<uint8_t> pix; if(Impl::decodeAssimpTexture(tt, pix, w, h)){ dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:found embedded texture by heuristic match='"<<tp<<"' idx="<<ti<<" fn='"<<fn<<"' w="<<w<<" h="<<h; return true; } }
+                }
+            }
         }
         return false;
     };
@@ -500,7 +543,11 @@ bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::st
 }
 
 void ModelViewer::renderToRegion(const ImVec2& size){
-    PLOGV << "mv:renderToRegion size=" << size.x << "x" << size.y << " hasModel=" << impl->hasModel << " fbo=" << impl->fbo << " fboTex=" << impl->fboTex;
+    auto now = std::chrono::steady_clock::now();
+    if(now - impl->lastRenderLog > std::chrono::seconds(2)){
+        PLOGV << "mv:renderToRegion size=" << size.x << "x" << size.y << " hasModel=" << impl->hasModel << " fbo=" << impl->fbo << " fboTex=" << impl->fboTex;
+        impl->lastRenderLog = now;
+    }
     if(!impl->hasModel){ ImGui::TextUnformatted("No model loaded"); return; }
     // Mouse controls: simple orbit
     ImVec2 p = ImGui::GetCursorScreenPos();
@@ -635,18 +682,49 @@ void ModelViewer::loadFromMemoryAsync(const std::vector<uint8_t>& data, const st
                 return;
             }
             // Per-material parsing: we'll lazily fill material entries as we encounter meshes
+            // helper: resolve a material texture to decoded RGBA pixels (handles embedded by index, data: URIs, external resolver, and embedded by filename)
             auto loadMatTexToTex = [&](aiMaterial* mat, aiTextureType type, ParsedModel::Tex &dest)->bool{
                 aiString tpStr; if(mat->GetTextureCount(type) <= 0) return false; mat->GetTexture(type, 0, &tpStr); if(tpStr.length <= 0) return false;
                 std::string tp(tpStr.C_Str());
+                // embedded by index ("*0")
                 if(tp.size()>0 && tp[0]=='*'){
                     int idx = atoi(tp.c_str()+1); if(idx < 0 || idx >= (int)scene->mNumTextures) { PLOGW << "mv:embedded tex idx out of range: " << tp; return false; }
                     aiTexture* t = scene->mTextures[idx]; if(!t) return false;
                     int w=0,h=0; std::vector<uint8_t> pix;
                     if(!Impl::decodeAssimpTexture(t, pix, w, h)) { PLOGW << "mv:failed to decode embedded tex idx="<<idx; return false; }
-                    dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); return true;
+                    dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded embedded texture idx="<<idx<<" type="<<type<<" w="<<w<<" h="<<h; return true;
                 } else {
-                    if(impl->textureLoader){ auto bytes = impl->textureLoader(tp); if(!bytes.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeBytesToRGBA(bytes, pix, w, h)) { PLOGW << "mv:stb failed to decode external tex: "<<tp; return false; } dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); return true; } }
+                    // Try external resolver callback first
+                    if(impl->textureLoader){ auto bytes = impl->textureLoader(tp); if(!bytes.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeBytesToRGBA(bytes, pix, w, h)) { PLOGW << "mv:stb failed to decode external tex: "<<tp; return false; } dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded external texture path='"<<tp<<"' size="<<bytes.size(); return true; } }
+                    // data URI (data:<mime>;base64,<data>)
+                    if(tp.rfind("data:",0) == 0){ size_t comma = tp.find(','); if(comma != std::string::npos){ std::string b64 = tp.substr(comma+1);
+                        // simple base64 decode
+                        auto decodeBase64 = [&](const std::string &in)->std::vector<uint8_t>{ std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"; std::vector<uint8_t> out; std::vector<int> T(256,-1); for(int i=0;i<64;i++) T[(unsigned char)chars[i]] = i; int val=0, valb=-8; for(unsigned char c : in){ if(T[c] == -1) { if(c=='=') break; else continue; } val = (val<<6) + T[c]; valb += 6; if(valb>=0){ out.push_back((uint8_t)((val>>valb)&0xFF)); valb -= 8; } } return out; };
+                        auto raw = decodeBase64(b64); if(!raw.empty()){ int w=0,h=0; std::vector<uint8_t> pix; if(!Impl::decodeCompressedImage(raw.data(), (int)raw.size(), pix, w, h)){ PLOGW << "mv:stb failed to decode data URI for: "<<tp; } else { dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:loaded data URI texture w="<<w<<" h="<<h; return true; } } }
+                    }
+                    // As a fallback, search scene embedded textures by filename using more robust heuristics
+                    auto normalizeForMatch = [&](const std::string &s)->std::string{
+                        std::string out; out.reserve(s.size());
+                        for(char c : s){ if(c=='\\') out.push_back('/'); else out.push_back((char)tolower((unsigned char)c)); }
+                        size_t pos = out.find("://"); if(pos != std::string::npos) out = out.substr(pos+3);
+                        while(out.size() && (out[0]=='.' || out[0]=='/')){
+                            if(out.size()>1 && out[0]=='.' && out[1]=='/') out = out.substr(2);
+                            else if(out[0]=='/') out = out.substr(1);
+                            else break;
+                        }
+                        size_t q = out.find_first_of("?#"); if(q != std::string::npos) out = out.substr(0,q);
+                        return out;
+                    };
+                    auto stripExt = [&](const std::string &s)->std::string{ size_t p = s.find_last_of('.'); return (p==std::string::npos) ? s : s.substr(0,p); };
+                    auto removeDelims = [&](const std::string &s)->std::string{ std::string r; r.reserve(s.size()); for(char c : s) if(c!='_' && c!='-' && c!=' ') r.push_back(c); return r; };
+                    std::string tpNorm = normalizeForMatch(tp); std::string tpBase = stripExt(tpNorm); std::string tpCompact = removeDelims(tpBase);
+                    for(unsigned int ti=0; ti<scene->mNumTextures; ++ti){ aiTexture* tt = scene->mTextures[ti]; if(tt && tt->mFilename.length > 0){ std::string fn(tt->mFilename.C_Str()); std::string fnNorm = normalizeForMatch(fn); std::string fnBase = stripExt(fnNorm); std::string fnCompact = removeDelims(fnBase);
+                            if(fnNorm == tpNorm || fnBase == tpBase || (fnNorm.size() >= tpNorm.size() && fnNorm.find(tpNorm) != std::string::npos) || (tpNorm.size() >= fnNorm.size() && tpNorm.find(fnNorm) != std::string::npos) || fnBase == tpNorm || fnCompact == tpCompact){ int w=0,h=0; std::vector<uint8_t> pix; if(Impl::decodeAssimpTexture(tt, pix, w, h)){ dest.present = true; dest.w = w; dest.h = h; dest.pixels = std::move(pix); PLOGI << "mv:found embedded texture by heuristic match='"<<tp<<"' idx="<<ti<<" fn='"<<fn<<"' w="<<w<<" h="<<h; return true; } }
+                        } }
+
                 }
+                // record failed reference to summarize later (avoid per-frame spam)
+                if(!tp.empty()) parsed.failedTextureRefs.push_back(tp);
                 return false;
             };
             // flatten meshes and record per-mesh ranges + per-material textures/parameters
@@ -695,6 +773,27 @@ void ModelViewer::loadFromMemoryAsync(const std::vector<uint8_t>& data, const st
             }
             // Compute transform for the parsed geometry so async upload can apply it on the main thread
             float radius = 1.0f; computeModelTransform(parsed.vbuf, parsed.modelMat, radius, 12); parsed.boundRadius = radius;
+            // Log a compact summary of any missing textures to aid debugging (no per-frame spam)
+            if(!parsed.failedTextureRefs.empty()){
+                // dedupe
+                std::sort(parsed.failedTextureRefs.begin(), parsed.failedTextureRefs.end()); parsed.failedTextureRefs.erase(std::unique(parsed.failedTextureRefs.begin(), parsed.failedTextureRefs.end()), parsed.failedTextureRefs.end());
+                std::string s=""; for(size_t i=0;i<parsed.failedTextureRefs.size();++i){ if(i) s += ", "; s += parsed.failedTextureRefs[i]; if(i>=9){ s += ", ..."; break; } }
+                // list of embedded texture filenames to help match (also include a normalized form for easier comparison)
+                auto normalizeForList = [&](const std::string &s)->std::string{ std::string out; out.reserve(s.size()); for(char c : s){ if(c=='\\') out.push_back('/'); else out.push_back((char)tolower((unsigned char)c)); } size_t pos = out.find("://"); if(pos != std::string::npos) out = out.substr(pos+3); size_t q = out.find_first_of("?#"); if(q != std::string::npos) out = out.substr(0,q); return out; };
+                std::string embeddedList=""; std::string embeddedListNorm=""; for(unsigned int ti=0; ti<scene->mNumTextures && ti<20; ++ti){ aiTexture* tt = scene->mTextures[ti]; if(tt && tt->mFilename.length>0){ std::string fn(tt->mFilename.C_Str()); if(!embeddedList.empty()) embeddedList += ", "; embeddedList += fn; if(!embeddedListNorm.empty()) embeddedListNorm += ", "; embeddedListNorm += fn + std::string(" (norm=") + normalizeForList(fn) + ")"; } }
+                PLOGW << "mv:async parse '"<<name<<"' missing textures: "<<s<<"; embedded candidates: "<<embeddedList<<" ; embedded_norms: "<<embeddedListNorm;
+                // Write a temporary debug dump to /tmp to help debugging mismatches
+                try{
+                    std::string safeName = name; for(char &c : safeName) if(!isalnum((unsigned char)c)) c = '_'; std::string outPath = std::string("/tmp/mv_parse_") + safeName + ".txt";
+                    std::ofstream of(outPath);
+                    of << "mv async parse debug: " << name << "\n\n";
+                    of << "Failed texture refs:\n"; for(auto &f : parsed.failedTextureRefs) of << "  " << f << "\n";
+                    of << "\nMaterials and their texture keys:\n";
+                    for(unsigned int mi=0; mi<scene->mNumMaterials; ++mi){ of << "Material["<<mi<<"]:\n"; aiMaterial* mat = scene->mMaterials[mi]; if(!mat) continue; for(int t=0;t<aiTextureType_UNKNOWN+1;++t){ aiTextureType ty = static_cast<aiTextureType>(t); unsigned int count = mat->GetTextureCount(ty); for(unsigned int ti=0; ti<count; ++ti){ aiString s; mat->GetTexture(ty, ti, &s); of << "  type="<<t<<" ref='"<<(s.length>0?s.C_Str():std::string(""))<<"'\n"; } } }
+                    of << "\nEmbedded scene textures (first 50):\n"; for(unsigned int ti=0; ti<scene->mNumTextures && ti<50; ++ti){ aiTexture* tt = scene->mTextures[ti]; if(!tt) continue; of << "  idx="<<ti<<" filename='"<<(tt->mFilename.length>0?tt->mFilename.C_Str():std::string(""))<<"' compressed="<<(tt->mHeight==0?"yes":"no")<<"\n"; }
+                    of.flush(); PLOGI << "mv:async wrote debug dump to "<<outPath;
+                }catch(...){ PLOGW << "mv:async failed to write debug dump"; }
+            }
             // Parsing done; move parsed into pendingParsedModel protected by mutex
             {
                 std::lock_guard<std::mutex> l(impl->parsedMutex);

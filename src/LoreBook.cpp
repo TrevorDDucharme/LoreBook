@@ -115,7 +115,7 @@ int main(int argc, char** argv)
 
     // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
-    plog::init(plog::verbose, &consoleAppender);
+    plog::init(plog::warning, &consoleAppender);
     PLOGI << "plog initialized (verbose -> stderr)";
 
     // Main loop
