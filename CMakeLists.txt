@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
-file(GLOB_RECURSE CLIENT_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+file(GLOB_RECURSE CLIENT_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 # exclude LineageEditor.cpp
 list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/LineageEditor\\.cpp$")
 list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/BuildingEditor\\.cpp$")
@@ -51,6 +51,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
 #stb
 find_package(Stb REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${Stb_INCLUDE_DIR})
+
+# md4c (CommonMark parser)
+find_package(md4c CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE md4c::md4c)
 
 #openssl
 find_package(OpenSSL REQUIRED)

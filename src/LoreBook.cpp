@@ -14,6 +14,7 @@
 #include <filesystem>
 #include "GraphView.hpp"
 #include <Vault.hpp>
+#include "VaultChat.hpp"
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -76,8 +77,9 @@ int main(int argc, char** argv)
     static bool firstDock = true;
     std::unique_ptr<Vault> vault;
 
-    // Graph view
+    // Graph view (and chat)
     static bool showGraphWindow = true;
+    static bool showChatWindow = true; // chat will dock/tab with the graph
     static GraphView graphView;
     // Create Vault modal state
     static bool showCreateVaultModal = false;
@@ -145,7 +147,9 @@ int main(int argc, char** argv)
             ImGuiID dock_id_right = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.25f, nullptr, &dock_main_id);
             ImGui::DockBuilderDockWindow("Vault Tree", dock_id_left);
             ImGui::DockBuilderDockWindow("Vault Content", dock_main_id);
+            // Dock both Graph and Chat into the right node so they appear as tabs together
             ImGui::DockBuilderDockWindow("Vault Graph", dock_id_right);
+            ImGui::DockBuilderDockWindow("Vault Chat", dock_id_right);
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }
@@ -174,6 +178,9 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("View")){
                 if(ImGui::MenuItem("Vault Graph", nullptr, showGraphWindow)){
                     showGraphWindow = !showGraphWindow;
+                }
+                if(ImGui::MenuItem("Vault Chat", nullptr, showChatWindow)){
+                    showChatWindow = !showChatWindow;
                 }
                 ImGui::EndMenu();
             }
@@ -552,11 +559,18 @@ int main(int argc, char** argv)
             vault->drawVaultContent();
         }
 
-        // Graph view (dockable)
+        // Graph view and Chat (dockable)
         graphView.setVault(vault.get());
         if(showGraphWindow){
             // pass dt as ImGui frame delta
             graphView.updateAndDraw(ImGui::GetIO().DeltaTime);
+        }
+
+        // Render Vault Chat as its own window (docked with the graph by default)
+        if(showChatWindow && vault){
+            ImGui::Begin("Vault Chat");
+            RenderVaultChat(vault.get());
+            ImGui::End();
         }
 
         // Rendering
