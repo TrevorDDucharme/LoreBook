@@ -34,6 +34,13 @@ class Vault{
     std::vector<std::string> activeTagFilter;
     bool tagFilterModeAll = true; // true=AND (all), false=OR (any)
 
+    // UI context menu state
+    int64_t renameTargetID = -1;
+    char renameBuf[256] = "";
+    bool showRenameModal = false;
+    int64_t deleteTargetID = -1;
+    bool showDeleteModal = false;
+
 public:
     // Return whether the underlying DB is open
     bool isOpen() const { return dbConnection != nullptr; }
@@ -206,11 +213,88 @@ public:
 
     void drawVaultTree(){
         ImGui::Begin("Vault Tree");
+        // Toolbar: New Note button
+        if(ImGui::Button("New Note")){
+            ImGui::OpenPopup("Create Note");
+        }
+        ImGui::SameLine();
+        if(ImGui::BeginPopupModal("Create Note", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            static char newNoteName[256] = "New Note";
+            ImGui::InputText("Name", newNoteName, sizeof(newNoteName));
+            if(ImGui::Button("Create")){
+                std::string nameStr(newNoteName);
+                int64_t parent = (selectedItemID >= 0) ? selectedItemID : getOrCreateRoot();
+                int64_t nid = createItem(nameStr, parent);
+                if(nid != -1){
+                    selectedItemID = nid;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")){
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
         // Draw the vault root (named after the vault) as the single top node
         int64_t rootID = getOrCreateRoot();
         std::vector<int64_t> path;
         // If filtering is active, only draw nodes that match the filter or have matching descendants
         drawVaultNode(-1, rootID, path);
+
+        // Open rename modal if requested
+        if(showRenameModal){
+            ImGui::OpenPopup("Rename Item");
+            showRenameModal = false;
+        }
+        if(ImGui::BeginPopupModal("Rename Item", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::InputText("New Name", renameBuf, sizeof(renameBuf));
+            if(ImGui::Button("OK")){
+                if(renameTargetID >= 0){
+                    std::string s(renameBuf);
+                    if(!s.empty()){
+                        renameItem(renameTargetID, s);
+                        statusMessage = "Renamed";
+                        statusTime = ImGui::GetTime();
+                    }
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")){
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Open delete confirmation if requested
+        if(showDeleteModal){
+            ImGui::OpenPopup("Delete Item");
+            showDeleteModal = false;
+        }
+        if(ImGui::BeginPopupModal("Delete Item", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Delete this item? This will remove the item and its relations.\nChildren that become parentless will be attached to the root.");
+            ImGui::Separator();
+            if(ImGui::Button("Delete")){
+                if(deleteTargetID >= 0){
+                    if(deleteItem(deleteTargetID)){
+                        statusMessage = "Item deleted";
+                        statusTime = ImGui::GetTime();
+                    } else {
+                        statusMessage = "Failed to delete item";
+                        statusTime = ImGui::GetTime();
+                    }
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")){
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
         ImGui::End();
     }
 
@@ -501,7 +585,7 @@ public:
         // Show status message briefly
         if(!statusMessage.empty() && (ImGui::GetTime() - statusTime) < 3.0f){
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.8f,0.8f,0.2f,1.0f), statusMessage.c_str());
+            ImGui::TextColored(ImVec4(0.8f,0.8f,0.2f,1.0f), "%s", statusMessage.c_str());
         }
 
         ImGui::EndChild();
@@ -609,6 +693,24 @@ public:
         return v;
     }
 
+    int64_t createItem(const std::string& name, int64_t parentID = -1){
+        if(!dbConnection) return -1;
+        sqlite3_stmt* stmt = nullptr;
+        const char* insertSQL = "INSERT INTO VaultItems (Name, Content, Tags) VALUES (?, ?, ?);";
+        if(sqlite3_prepare_v2(dbConnection, insertSQL, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, "", -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, "", -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+        int64_t id = sqlite3_last_insert_rowid(dbConnection);
+        if(id <= 0) return -1;
+        if(parentID == -1) parentID = getOrCreateRoot();
+        addParentRelation(parentID, id);
+        return id;
+    }
+
 private:
     std::string getItemName(int64_t id){
         const char* sql = "SELECT Name FROM VaultItems WHERE ID = ?;";
@@ -672,6 +774,24 @@ private:
             if(ImGui::Selectable(label.c_str(), selectedItemID == nodeID)){
                 selectedItemID = nodeID;
             }
+
+            // Context menu for leaf node
+            if(ImGui::BeginPopupContextItem("node_context")){
+                if(ImGui::MenuItem("New Child")){
+                    int64_t nid = createItem("New Note", nodeID);
+                    if(nid != -1) selectedItemID = nid;
+                }
+                if(ImGui::MenuItem("Rename")){
+                    renameTargetID = nodeID;
+                    strncpy(renameBuf, getItemName(nodeID).c_str(), sizeof(renameBuf));
+                    showRenameModal = true;
+                }
+                if(ImGui::MenuItem("Delete", nullptr, false, !isRootNode)){
+                    deleteTargetID = nodeID;
+                    showDeleteModal = true;
+                }
+                ImGui::EndPopup();
+            }
         } else {
             ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
             if(isRootNode) nodeFlags |= ImGuiTreeNodeFlags_DefaultOpen;
@@ -679,6 +799,25 @@ private:
             if(ImGui::IsItemClicked()){
                 selectedItemID = nodeID;
             }
+
+            // Context menu for tree node (right-click the label)
+            if(ImGui::BeginPopupContextItem("node_context")){
+                if(ImGui::MenuItem("New Child")){
+                    int64_t nid = createItem("New Note", nodeID);
+                    if(nid != -1) selectedItemID = nid;
+                }
+                if(ImGui::MenuItem("Rename")){
+                    renameTargetID = nodeID;
+                    strncpy(renameBuf, getItemName(nodeID).c_str(), sizeof(renameBuf));
+                    showRenameModal = true;
+                }
+                if(ImGui::MenuItem("Delete", nullptr, false, !isRootNode)){
+                    deleteTargetID = nodeID;
+                    showDeleteModal = true;
+                }
+                ImGui::EndPopup();
+            }
+
             if(open){
                 path.push_back(nodeID);
                 for(auto child : children){
@@ -893,6 +1032,65 @@ private:
         }
         if(stmt) sqlite3_finalize(stmt);
         return tags;
+    }
+
+    bool renameItem(int64_t id, const std::string &newName){
+        if(id < 0) return false;
+        const char* sql = "UPDATE VaultItems SET Name = ? WHERE ID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_text(stmt,1,newName.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt,2, id);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool deleteItem(int64_t id){
+        if(id <= 0) return false;
+        int64_t root = getOrCreateRoot();
+        if(id == root) return false; // never delete root
+
+        // collect children before deletion
+        std::vector<int64_t> children;
+        getChildren(id, children);
+
+        // delete relations involving this node
+        const char* delRel = "DELETE FROM VaultItemChildren WHERE ParentID = ? OR ChildID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, delRel, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_int64(stmt,1,id);
+            sqlite3_bind_int64(stmt,2,id);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+
+        // delete the item itself
+        const char* delItem = "DELETE FROM VaultItems WHERE ID = ?;";
+        if(sqlite3_prepare_v2(dbConnection, delItem, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_int64(stmt,1,id);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+
+        // ensure children are attached to root if they lost all parents
+        for(auto c : children){
+            int count = 0;
+            const char* countSQL = "SELECT COUNT(*) FROM VaultItemChildren WHERE ChildID = ?;";
+            if(sqlite3_prepare_v2(dbConnection, countSQL, -1, &stmt, nullptr) == SQLITE_OK){
+                sqlite3_bind_int64(stmt,1,c);
+                if(sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt,0);
+            }
+            if(stmt) sqlite3_finalize(stmt);
+            if(count == 0) addParentRelation(root, c);
+        }
+
+        // clear selection/content if we deleted the selected/loaded item
+        if(selectedItemID == id) selectedItemID = -1;
+        if(loadedItemID == id){ loadedItemID = -1; currentContent.clear(); currentTitle.clear(); currentTags.clear(); contentDirty = false; }
+
+        return true;
     }
 
     bool addTagToItem(int64_t id, const std::string &tag){
