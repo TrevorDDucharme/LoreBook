@@ -103,6 +103,10 @@ find_package(X11 REQUIRED)
 find_package(GLUT REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE GLUT::GLUT Xi Xrandr Xxf86vm)
 
+# assimp (3D model import)
+find_package(assimp CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE assimp::assimp)
+
 # Some resolver functions (ns_initparse/ns_parserr) are provided by libresolv on
 # some platforms; link it to resolve ns_* undefined references.
 target_link_libraries(${PROJECT_NAME} PRIVATE resolv)

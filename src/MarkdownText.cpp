@@ -126,6 +126,29 @@ struct MD4CRenderer {
                     try{
                         int64_t aid = std::stoll(idstr);
                         auto meta = v->getAttachmentMeta(aid);
+                        auto isModelExt = [&](const std::string &n)->bool{
+                            std::string ext;
+                            try{ ext = std::filesystem::path(n).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower); } catch(...){}
+                            static const std::vector<std::string> models = {".obj",".fbx",".gltf",".glb",".ply",".dae",".stl"};
+                            for(auto &m: models) if(ext == m) return true;
+                            return (meta.mimeType.find("model") != std::string::npos);
+                        };
+
+                        if(isModelExt(meta.name)){
+                            // Render inline model viewer (if available) or show a loading placeholder
+                            ModelViewer* mv = v->getOrCreateModelViewerForSrc(src);
+                            ImVec2 avail = ImVec2(GetContentRegionAvail().x, std::min(320.0f, GetContentRegionAvail().x * 0.6f));
+                            if(mv && mv->isLoaded()){
+                                mv->renderToRegion(avail);
+                                // clicking inline opens full viewer
+                                if(ImGui::IsItemClicked()) v->openModelFromSrc(src);
+                            } else {
+                                ImGui::Text("Model: %s (loading...)", meta.name.c_str()); ImGui::SameLine();
+                                if(ImGui::SmallButton("Open")) v->openModelFromSrc(src);
+                            }
+                            return 0;
+                        }
+
                         if(meta.size > 0){
                             auto data = v->getAttachmentData(aid);
                             if(!data.empty()){
@@ -151,6 +174,27 @@ struct MD4CRenderer {
 
                 // http/https remote resource — check cache
                 if(src.rfind("http://",0) == 0 || src.rfind("https://",0) == 0){
+                    // If it's a model extension, create/queue and offer "View Model"
+                    auto isModelUrl = [&](const std::string &u)->bool{
+                        try{ auto ext = std::filesystem::path(u).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower); static const std::vector<std::string> models = {".obj",".fbx",".gltf",".glb",".ply",".dae",".stl"}; for(auto &m: models) if(ext==m) return true; } catch(...){}
+                        return false;
+                    };
+                    if(isModelUrl(src)){
+                        // Try inline viewer
+                        int64_t aid = v->findAttachmentByExternalPath(src);
+                        if(aid == -1) aid = v->addAttachmentFromURL(src);
+                        ModelViewer* mv = v->getOrCreateModelViewerForSrc(src);
+                        ImVec2 avail = ImVec2(GetContentRegionAvail().x, std::min(320.0f, GetContentRegionAvail().x * 0.6f));
+                        if(mv && mv->isLoaded()){
+                            mv->renderToRegion(avail);
+                            if(ImGui::IsItemClicked()) v->openModelFromSrc(src);
+                        } else {
+                            ImGui::Text("Model: %s", label.c_str()); ImGui::SameLine();
+                            if(ImGui::Button("View Model")) v->openModelFromSrc(src);
+                        }
+                        return 0;
+                    }
+
                     int64_t aid = v->findAttachmentByExternalPath(src);
                     if(aid == -1){
                         // create placeholder and start async fetch
