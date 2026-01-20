@@ -96,6 +96,9 @@ IconTexture LoadTextureFromMemory(const std::string& key, const std::vector<uint
 // Check if a dynamic texture exists by key
 bool HasDynamicTexture(const std::string& key);
 
+// Get a dynamic texture by key (returns empty IconTexture if not found)
+IconTexture GetDynamicTexture(const std::string& key);
+
 // Get the dimensions of an icon
 bool GetIconDimensions(const std::string& iconName, int& width, int& height);
 

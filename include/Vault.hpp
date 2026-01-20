@@ -1178,12 +1178,9 @@ public:
                                     if(!d.empty()) dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
                                 }
                                 if(dataPtr && !dataPtr->empty()){
-                                    this->enqueueMainThreadTask([this, mvPtr, dataPtr, metaName, aid](){
-                                        if(mvPtr->loadFromMemory(*dataPtr, metaName)){
-                                            this->statusMessage = "Model cached and ready"; this->statusTime = ImGui::GetTime();
-                                        } else { this->statusMessage = std::string("Failed to load cached model: ") + metaName; this->statusTime = ImGui::GetTime(); }
-                                        PLOGI << "vault:asyncLoaded model aid=" << aid;
-                                    });
+                                    // Parse/upload async (non-blocking)
+                                    mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                                    PLOGI << "vault:async parse queued model aid=" << aid;
                                 }
                             }).detach();
                         }
@@ -1478,14 +1475,9 @@ public:
                                 auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
                                 auto mvPtr = modelViewer.get();
                                 statusMessage = "Loading model..."; statusTime = ImGui::GetTime();
-                                // schedule load on main thread (non-blocking)
-                                enqueueMainThreadTask([this, mvPtr, dataPtr, filename](){
-                                    if(mvPtr->loadFromMemory(*dataPtr, filename)){
-                                        showModelViewer = true;
-                                    } else {
-                                        statusMessage = "Failed to load model"; statusTime = ImGui::GetTime();
-                                    }
-                                });
+                                // start async parse/upload and open viewer
+                                mvPtr->loadFromMemoryAsync(*dataPtr, filename);
+                                showModelViewer = true;
                             } else {
                                 // try fetch if external path exists
                                 if(attID >= 0){ auto meta = getAttachmentMeta(attID); if(!meta.externalPath.empty()){ asyncFetchAndStoreAttachment(attID, meta.externalPath); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); } }
@@ -1713,6 +1705,10 @@ public:
         ImGui::EndChild();
 
         ImGui::End(); 
+
+        // Ensure pending parsed models are processed so uploads complete even if inline viewer isn't rendered
+        for(auto &kv : modelViewerCache) if(kv.second) kv.second->processPendingUploads();
+        if(modelViewer) modelViewer->processPendingUploads();
 
         // Model viewer window (dockable)
         if(showModelViewer && modelViewer){ modelViewer->renderWindow("Model Viewer", &showModelViewer); }
@@ -2466,15 +2462,25 @@ inline void Vault::openPreviewFromSrc(const std::string& src){
         try{
             int64_t aid = std::stoll(idstr);
             auto meta = getAttachmentMeta(aid);
-            auto data = getAttachmentData(aid);
-            if(!data.empty()){
-                previewRawData = std::move(data);
-                previewMime = meta.mimeType;
-                previewName = meta.name;
-                previewIsRaw = true;
-                previewAttachmentID = aid; previewDisplayWidth = meta.displayWidth; previewDisplayHeight = meta.displayHeight;
-                showAttachmentPreview = true;
-                ImGui::OpenPopup("Attachment Preview");
+            if(meta.size > 0){
+                // Read data in worker thread then show preview on main thread
+                std::thread([this, aid, meta](){
+                    auto data = this->getAttachmentData(aid);
+                    if(!data.empty()){
+                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                        this->enqueueMainThreadTask([this, dataPtr, meta, aid](){
+                            this->previewRawData = std::move(*dataPtr);
+                            this->previewMime = meta.mimeType;
+                            this->previewName = meta.name;
+                            this->previewIsRaw = true;
+                            this->previewAttachmentID = aid; this->previewDisplayWidth = meta.displayWidth; this->previewDisplayHeight = meta.displayHeight;
+                            this->showAttachmentPreview = true;
+                            ImGui::OpenPopup("Attachment Preview");
+                        });
+                    } else {
+                        if(!meta.externalPath.empty()) this->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                    }
+                }).detach();
                 return;
             } else {
                 // Data empty — try async fetch if ExternalPath present
@@ -2495,14 +2501,23 @@ inline void Vault::openPreviewFromSrc(const std::string& src){
         if(aid != -1){
             auto meta = getAttachmentMeta(aid);
             if(meta.size > 0){
-                auto data = getAttachmentData(aid);
-                previewRawData = std::move(data);
-                previewMime = meta.mimeType;
-                previewName = meta.name;
-                previewIsRaw = true;
-                previewAttachmentID = aid; previewDisplayWidth = meta.displayWidth; previewDisplayHeight = meta.displayHeight;
-                showAttachmentPreview = true;
-                ImGui::OpenPopup("Attachment Preview");
+                std::thread([this, aid, meta](){
+                    auto data = this->getAttachmentData(aid);
+                    if(!data.empty()){
+                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                        this->enqueueMainThreadTask([this, dataPtr, meta, aid](){
+                            this->previewRawData = std::move(*dataPtr);
+                            this->previewMime = meta.mimeType;
+                            this->previewName = meta.name;
+                            this->previewIsRaw = true;
+                            this->previewAttachmentID = aid; this->previewDisplayWidth = meta.displayWidth; this->previewDisplayHeight = meta.displayHeight;
+                            this->showAttachmentPreview = true;
+                            ImGui::OpenPopup("Attachment Preview");
+                        });
+                    } else {
+                        if(!meta.externalPath.empty()) this->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                    }
+                }).detach();
                 return;
             } else {
                 if(!meta.externalPath.empty()){
@@ -2524,13 +2539,23 @@ inline void Vault::openPreviewFromSrc(const std::string& src){
         if(aid != -1){
             auto meta = getAttachmentMeta(aid);
             if(meta.size > 0){
-                auto data = getAttachmentData(aid);
-                previewRawData = std::move(data);
-                previewMime = meta.mimeType;
-                previewName = meta.name;
-                previewIsRaw = true;
-                previewAttachmentID = aid;
-                showAttachmentPreview = true; ImGui::OpenPopup("Attachment Preview");
+                std::thread([this, aid, meta, src](){
+                    auto data = this->getAttachmentData(aid);
+                    if(!data.empty()){
+                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                        this->enqueueMainThreadTask([this, dataPtr, meta, aid](){
+                            this->previewRawData = std::move(*dataPtr);
+                            this->previewMime = meta.mimeType;
+                            this->previewName = meta.name;
+                            this->previewIsRaw = true;
+                            this->previewAttachmentID = aid;
+                            this->showAttachmentPreview = true; ImGui::OpenPopup("Attachment Preview");
+                        });
+                    } else {
+                        this->statusMessage = "Fetching web resource..."; this->statusTime = ImGui::GetTime();
+                        this->asyncFetchAndStoreAttachment(aid, src);
+                    }
+                }).detach();
                 return;
             } else {
                 statusMessage = "Fetching web resource..."; statusTime = ImGui::GetTime();
@@ -2564,22 +2589,25 @@ inline void Vault::openModelFromSrc(const std::string& src){
         std::string idstr = src.substr(prefix.size());
         try{
             int64_t aid = std::stoll(idstr);
-            auto data = getAttachmentData(aid);
             auto meta = getAttachmentMeta(aid);
-            if(!data.empty()){
+            if(meta.size>0){
                 if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
                 auto mvPtr = modelViewer.get();
-                auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
                 statusMessage = "Loading model..."; statusTime = ImGui::GetTime();
-                enqueueMainThreadTask([this, mvPtr, dataPtr, metaName = meta.name](){
-                    if(mvPtr->loadFromMemory(*dataPtr, metaName)) showModelViewer = true;
-                    else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); }
-                });
+                std::thread([this, aid, mvPtr, metaId = meta.id, metaName = meta.name](){
+                    auto data = getAttachmentData(aid);
+                    if(!data.empty()){
+                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                        mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                        this->enqueueMainThreadTask([this](){ this->showModelViewer = true; });
+                    } else {
+                        auto m = this->getAttachmentMeta(aid);
+                        if(!m.externalPath.empty()) this->asyncFetchAndStoreAttachment(m.id, m.externalPath);
+                        else this->enqueueMainThreadTask([this](){ this->statusMessage = "Model data missing"; this->statusTime = ImGui::GetTime(); });
+                    }
+                }).detach();
                 return;
-            } else {
-                if(!meta.externalPath.empty()){ asyncFetchAndStoreAttachment(aid, meta.externalPath); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); }
-                else { statusMessage = "Model data missing"; statusTime = ImGui::GetTime(); }
-            }
+            } else { if(!meta.externalPath.empty()) asyncFetchAndStoreAttachment(meta.id, meta.externalPath); }
         } catch(...){}
         return;
     }
@@ -2588,17 +2616,23 @@ inline void Vault::openModelFromSrc(const std::string& src){
     if(src.rfind("http://",0)==0 || src.rfind("https://",0)==0){
         int64_t aid = findAttachmentByExternalPath(src);
         if(aid == -1) aid = addAttachmentFromURL(src);
-        if(aid != -1){ auto meta = getAttachmentMeta(aid); if(meta.size>0){ auto data = getAttachmentData(aid); if(!data.empty()){
+        if(aid != -1){ auto meta = getAttachmentMeta(aid); if(meta.size>0){
                     if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
                     auto mvPtr = modelViewer.get();
-                    auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
                     statusMessage = "Loading model..."; statusTime = ImGui::GetTime();
-                    enqueueMainThreadTask([this, mvPtr, dataPtr, metaName = meta.name](){
-                        if(mvPtr->loadFromMemory(*dataPtr, metaName)) showModelViewer = true;
-                        else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); }
-                    });
+                    std::thread([this, aid, mvPtr, metaName = meta.name, src](){
+                        auto data = getAttachmentData(aid);
+                        if(!data.empty()){
+                            auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                            mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                            this->enqueueMainThreadTask([this](){ this->showModelViewer = true; });
+                            return;
+                        } else {
+                            this->asyncFetchAndStoreAttachment(aid, src);
+                        }
+                    }).detach();
                     return;
-                } } else { asyncFetchAndStoreAttachment(aid, src); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); return; } }
+                } else { asyncFetchAndStoreAttachment(aid, src); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); return; } }
         statusMessage = "Failed to prepare remote model"; statusTime = ImGui::GetTime(); return;
     }
 
@@ -2607,17 +2641,14 @@ inline void Vault::openModelFromSrc(const std::string& src){
     if(src.rfind("file://",0)==0) path = src.substr(7);
     try{
         if(std::filesystem::exists(path) && std::filesystem::is_regular_file(path)){
-            std::ifstream in(path, std::ios::binary);
-            if(in){ std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
-                auto mvPtr = modelViewer.get();
-                auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
-                statusMessage = "Loading model..."; statusTime = ImGui::GetTime();
-                enqueueMainThreadTask([this, mvPtr, dataPtr, path](){
-                    if(mvPtr->loadFromMemory(*dataPtr, path)) showModelViewer = true; else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); }
-                });
-                return;
-            }
+            if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
+            auto mvPtr = modelViewer.get();
+            statusMessage = "Loading model..."; statusTime = ImGui::GetTime();
+            std::thread([this, path, mvPtr](){
+                try{ std::ifstream in(path, std::ios::binary); if(in){ auto d = std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); if(!d.empty()){ auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d)); mvPtr->loadFromMemoryAsync(*dataPtr, path); this->enqueueMainThreadTask([this](){ this->showModelViewer = true; }); return; } } } catch(...){ }
+                this->enqueueMainThreadTask([this](){ this->statusMessage = "Unsupported model source"; this->statusTime = ImGui::GetTime(); });
+            }).detach();
+            return;
         }
     } catch(...){}
     statusMessage = "Unsupported model source"; statusTime = ImGui::GetTime();
@@ -2735,12 +2766,8 @@ inline ModelViewer* Vault::getOrCreateModelViewerForSrc(const std::string& src){
                         if(!d.empty()) dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
                     }
                     if(dataPtr && !dataPtr->empty()){
-                        this->enqueueMainThreadTask([this, mvPtr, dataPtr, metaName, aid_pre](){
-                            if(mvPtr->loadFromMemory(*dataPtr, metaName)){
-                                this->statusMessage = "Model cached and ready"; this->statusTime = ImGui::GetTime();
-                            } else { this->statusMessage = std::string("Failed to load cached model: ") + metaName; this->statusTime = ImGui::GetTime(); }
-                            PLOGI << "vault:asyncLoaded model aid=" << aid_pre;
-                        });
+                        mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                        PLOGI << "vault:async parse queued model aid=" << aid_pre;
                     }
                 }).detach();
             } else { if(!meta.externalPath.empty()) asyncFetchAndStoreAttachment(meta.id, meta.externalPath); }
@@ -2758,12 +2785,8 @@ inline ModelViewer* Vault::getOrCreateModelViewerForSrc(const std::string& src){
                         if(!d.empty()) dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
                     }
                     if(dataPtr && !dataPtr->empty()){
-                        this->enqueueMainThreadTask([this, mvPtr, dataPtr, metaName, aid](){
-                            if(mvPtr->loadFromMemory(*dataPtr, metaName)){
-                                this->statusMessage = "Model cached and ready"; this->statusTime = ImGui::GetTime();
-                            } else { this->statusMessage = std::string("Failed to load cached model: ") + metaName; this->statusTime = ImGui::GetTime(); }
-                            PLOGI << "vault:asyncLoaded model aid=" << aid;
-                        });
+                        mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                        PLOGI << "vault:async parse queued model aid=" << aid;
                     }
                 }).detach();
             } else { if(!meta.externalPath.empty()) asyncFetchAndStoreAttachment(meta.id, meta.externalPath); } } catch(...){}
@@ -2779,12 +2802,8 @@ inline ModelViewer* Vault::getOrCreateModelViewerForSrc(const std::string& src){
                         if(!d.empty()) dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d));
                     }
                     if(dataPtr && !dataPtr->empty()){
-                        this->enqueueMainThreadTask([this, mvPtr, dataPtr, metaName, aid](){
-                            if(mvPtr->loadFromMemory(*dataPtr, metaName)){
-                                this->statusMessage = "Model cached and ready"; this->statusTime = ImGui::GetTime();
-                            } else { this->statusMessage = std::string("Failed to load cached model: ") + metaName; this->statusTime = ImGui::GetTime(); }
-                            PLOGI << "vault:asyncLoaded model aid=" << aid;
-                        });
+                        mvPtr->loadFromMemoryAsync(*dataPtr, metaName);
+                        PLOGI << "vault:async parse queued model aid=" << aid;
                     }
                 }).detach();
             } else { asyncFetchAndStoreAttachment(aid, src); } } else { addAttachmentFromURL(src); }
@@ -2797,12 +2816,8 @@ inline ModelViewer* Vault::getOrCreateModelViewerForSrc(const std::string& src){
                 std::shared_ptr<std::vector<uint8_t>> dataPtr;
                 try{ std::ifstream in(path, std::ios::binary); if(in){ auto d = std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); if(!d.empty()) dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(d)); } } catch(...){}
                 if(dataPtr && !dataPtr->empty()){
-                    this->enqueueMainThreadTask([this, mvPtr, dataPtr, path](){
-                        if(mvPtr->loadFromMemory(*dataPtr, path)){
-                            this->statusMessage = "Model loaded"; this->statusTime = ImGui::GetTime();
-                        } else { this->statusMessage = "Failed to load model"; this->statusTime = ImGui::GetTime(); }
-                        PLOGI << "vault:asyncLoaded local file '" << path << "'";
-                    });
+                    mvPtr->loadFromMemoryAsync(*dataPtr, path);
+                    PLOGI << "vault:async parse queued local file '" << path << "'";
                 }
             }).detach();
         } } catch(...){ }

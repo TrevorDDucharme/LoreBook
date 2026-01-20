@@ -333,6 +333,12 @@ bool HasDynamicTexture(const std::string& key){
     return s_dynamicTextures.find(key) != s_dynamicTextures.end();
 }
 
+IconTexture GetDynamicTexture(const std::string& key){
+    auto it = s_dynamicTextures.find(key);
+    if(it != s_dynamicTextures.end()) return it->second;
+    return IconTexture();
+}
+
 // Draw an icon as an ImGui::Image using the original image file
 bool DrawIcon(const std::string& iconName, const ImVec2& size, const ImVec4& tint_col, const ImVec4& border_col) {
     IconTexture texture = LoadIconTexture(iconName);

@@ -184,30 +184,43 @@ struct MD4CRenderer {
                                     ImGui::SameLine();
                                     if(ImGui::SmallButton("View Raw")) v->openPreviewFromSrc(src);
                                     ImGui::SameLine(); if(ImGui::SmallButton("Open")) v->openModelFromSrc(src);
-                                } else {
+                                } else if(mv && mv->isLoading()){
                                     ImGui::Text("Model: %s (loading...)", meta.name.c_str()); ImGui::SameLine();
                                     if(ImGui::SmallButton("Open")) v->openModelFromSrc(src);
+                                } else {
+                                    ImGui::Text("Model: %s", meta.name.c_str()); ImGui::SameLine();
+                                    if(ImGui::Button("View Model")) v->openModelFromSrc(src);
                                 }
                             }
                             return 0;
                         }
 
                         if(meta.size > 0){
-                            auto data = v->getAttachmentData(aid);
-                            if(!data.empty()){
-                                auto tex = LoadTextureFromMemory(std::string("vault:att:") + std::to_string(aid), data);
-                                if(tex.loaded){
-                                    float availW = GetContentRegionAvail().x;
-                                    float width = availW;
-                                    if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
-                                    else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
-                                    else if(tex.width > availW) width = availW; else width = static_cast<float>(tex.width);
-                                    float scale = width / static_cast<float>(tex.width);
-                                    float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(tex.height) * scale;
-                                    ImGui::Image((ImTextureID)(intptr_t)tex.textureID, ImVec2(width, height));
-                                    NewLine();
-                                    return 0;
-                                }
+                            std::string key = std::string("vault:att:") + std::to_string(aid);
+                            IconTexture cached = GetDynamicTexture(key);
+                            if(cached.loaded){
+                                float availW = GetContentRegionAvail().x;
+                                float width = availW;
+                                if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
+                                else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
+                                else if(cached.width > availW) width = availW; else width = static_cast<float>(cached.width);
+                                float scale = width / static_cast<float>(cached.width);
+                                float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(cached.height) * scale;
+                                ImGui::Image((ImTextureID)(intptr_t)cached.textureID, ImVec2(width, height));
+                                NewLine();
+                                return 0;
+                            } else {
+                                // Schedule background read + main-thread texture creation
+                                std::thread([vaultPtr = v, aid, key](){
+                                    auto data = vaultPtr->getAttachmentData(aid);
+                                    if(!data.empty()){
+                                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                                        vaultPtr->enqueueMainThreadTask([key, dataPtr, aid](){
+                                            LoadTextureFromMemory(key, *dataPtr);
+                                            PLOGI << "vault:loaded image aid=" << aid;
+                                        });
+                                    }
+                                }).detach();
                             }
                         } else {
                             // no data — try async fetch if ExternalPath present
@@ -256,6 +269,9 @@ struct MD4CRenderer {
                                     ImGui::SameLine();
                                     if(ImGui::SmallButton("View Raw")) v->openPreviewFromSrc(src);
                                     ImGui::SameLine(); if(ImGui::Button("View Model")) v->openModelFromSrc(src);
+                                } else if(mv && mv->isLoading()){
+                                    ImGui::Text("Model: %s (loading...)", displayName.c_str()); ImGui::SameLine();
+                                    if(ImGui::Button("View Model")) v->openModelFromSrc(src);
                                 } else {
                                     ImGui::Text("Model: %s", displayName.c_str()); ImGui::SameLine();
                                     if(ImGui::Button("View Model")) v->openModelFromSrc(src);
@@ -264,21 +280,30 @@ struct MD4CRenderer {
                             return 0;
                         }
                         if(meta.size > 0){
-                            auto data = v->getAttachmentData(aid);
-                            if(!data.empty()){
-                                auto tex = LoadTextureFromMemory(std::string("vault:assets:") + std::to_string(aid), data);
-                                if(tex.loaded){
-                                    float availW = GetContentRegionAvail().x;
-                                    float width = availW;
-                                    if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
-                                    else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
-                                    else if(tex.width > availW) width = availW; else width = static_cast<float>(tex.width);
-                                    float scale = width / static_cast<float>(tex.width);
-                                    float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(tex.height) * scale;
-                                    ImGui::Image((ImTextureID)(intptr_t)tex.textureID, ImVec2(width, height));
-                                    NewLine();
-                                    return 0;
-                                }
+                            std::string key = std::string("vault:assets:") + std::to_string(aid);
+                            IconTexture cached = GetDynamicTexture(key);
+                            if(cached.loaded){
+                                float availW = GetContentRegionAvail().x;
+                                float width = availW;
+                                if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
+                                else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
+                                else if(cached.width > availW) width = availW; else width = static_cast<float>(cached.width);
+                                float scale = width / static_cast<float>(cached.width);
+                                float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(cached.height) * scale;
+                                ImGui::Image((ImTextureID)(intptr_t)cached.textureID, ImVec2(width, height));
+                                NewLine();
+                                return 0;
+                            } else {
+                                std::thread([vaultPtr = v, aid, key](){
+                                    auto data = vaultPtr->getAttachmentData(aid);
+                                    if(!data.empty()){
+                                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                                        vaultPtr->enqueueMainThreadTask([key, dataPtr, aid](){
+                                            LoadTextureFromMemory(key, *dataPtr);
+                                            PLOGI << "vault:loaded image aid=" << aid;
+                                        });
+                                    }
+                                }).detach();
                             }
                         } else {
                             if(!meta.externalPath.empty()) v->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
@@ -335,21 +360,31 @@ struct MD4CRenderer {
                     }
                     auto meta = v->getAttachmentMeta(aid);
                     if(meta.size > 0){
-                        auto data = v->getAttachmentData(aid);
-                        if(!data.empty()){
-                            auto tex = LoadTextureFromMemory(std::string("vault:url:") + std::to_string(aid), data);
-                            if(tex.loaded){
-                                float availW = GetContentRegionAvail().x;
-                                float width = availW;
-                                if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
-                                else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
-                                else if(tex.width > availW) width = availW; else width = static_cast<float>(tex.width);
-                                float scale = width / static_cast<float>(tex.width);
-                                float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(tex.height) * scale;
-                                ImGui::Image((ImTextureID)(intptr_t)tex.textureID, ImVec2(width, height));
-                                NewLine();
-                                return 0;
-                            }
+                        std::string key = std::string("vault:url:") + std::to_string(aid);
+                        IconTexture cached = GetDynamicTexture(key);
+                        if(cached.loaded){
+                            float availW = GetContentRegionAvail().x;
+                            float width = availW;
+                            if(urlW > 0) width = std::min(static_cast<float>(urlW), availW);
+                            else if(meta.displayWidth > 0) width = std::min(static_cast<float>(meta.displayWidth), availW);
+                            else if(cached.width > availW) width = availW; else width = static_cast<float>(cached.width);
+                            float scale = width / static_cast<float>(cached.width);
+                            float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(cached.height) * scale;
+                            ImGui::Image((ImTextureID)(intptr_t)cached.textureID, ImVec2(width, height));
+                            NewLine();
+                            return 0;
+                        } else {
+                            std::thread([vaultPtr = v, aid, key](){
+
+                                auto data = vaultPtr->getAttachmentData(aid);
+                                if(!data.empty()){
+                                    auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                                    vaultPtr->enqueueMainThreadTask([key, dataPtr, aid](){
+                                        LoadTextureFromMemory(key, *dataPtr);
+                                        PLOGI << "vault:loaded image aid=" << aid;
+                                    });
+                                }
+                            }).detach();
                         }
                     }
                     ImGui::Text("Fetching image: %s", label.c_str());
