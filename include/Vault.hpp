@@ -9,10 +9,14 @@
 #include "MarkdownText.hpp"
 #include <sqlite3.h>
 #include <unordered_set>
+#include <unordered_map>
 #include <sstream>
 #include <cctype>
+#include <fstream>
 
 class Vault{
+    // forward declaration for chat render helper
+    friend void RenderVaultChat(Vault* vault);
     int64_t id;
     std::string name;
     int64_t selectedItemID = -1;
@@ -41,9 +45,31 @@ class Vault{
     int64_t deleteTargetID = -1;
     bool showDeleteModal = false;
 
+    // Import Markdown UI state (shown from context menu)
+    bool showImportModal = false;
+    std::filesystem::path importPath = std::filesystem::current_path();
+    std::unordered_set<std::string> importSelectedFiles;
+    int64_t importParentID = -1;
+
+    // Per-node child filters (display-only). Keys are node IDs; values are a filter spec.
+    struct ChildFilterSpec { std::string mode = "AND"; std::vector<std::string> tags; std::string expr; };
+    std::unordered_map<int64_t, ChildFilterSpec> nodeChildFilters;
+    // UI state for Set Filter modal
+    bool showSetFilterModal = false;
+    int64_t setFilterTargetID = -1;
+    char setFilterBuf[256] = ""; // expression or helper text
+    // Modal initialization and state helpers
+    std::vector<std::string> setFilterInitialTags;
+    int setFilterModeDefault = 0; // 0=AND,1=OR,2=EXPR
+    std::vector<std::string> setFilterSelectedTags;
+    int setFilterMode = 0;
+
 public:
     // Return whether the underlying DB is open
     bool isOpen() const { return dbConnection != nullptr; }
+
+    // Expose raw DB connection for helpers (use carefully)
+    sqlite3* getDBPublic() const { return dbConnection; }
 
     // Public API for GraphView and other UI integrations
     std::vector<std::pair<int64_t,std::string>> getAllItemsPublic(){ return getAllItems(); }
@@ -125,6 +151,13 @@ public:
             sqlite3_free(errMsg);
         }
 
+        // Ensure node filters table exists for persisting per-node child filters
+        const char* createFiltersTableSQL = "CREATE TABLE IF NOT EXISTS VaultNodeFilters (NodeID INTEGER PRIMARY KEY, Mode TEXT, Tags TEXT, Expr TEXT);";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createFiltersTableSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+        // Load any persisted per-node filters
+        loadNodeFiltersFromDB();
+
         // Ensure legacy DBs get the IsRoot column so the root can be identified by ID instead of Name
         {
             sqlite3_stmt* pragma = nullptr;
@@ -149,6 +182,67 @@ public:
             }
         }
 
+    }
+
+    // Load persisted node filters from DB into memory
+    void loadNodeFiltersFromDB(){
+        if(!dbConnection) return;
+        const char* sql = "SELECT NodeID, Mode, Tags, Expr FROM VaultNodeFilters;";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+            while(sqlite3_step(stmt) == SQLITE_ROW){
+                int64_t nid = sqlite3_column_int64(stmt, 0);
+                const unsigned char* mode = sqlite3_column_text(stmt,1);
+                const unsigned char* tags = sqlite3_column_text(stmt,2);
+                const unsigned char* expr = sqlite3_column_text(stmt,3);
+                ChildFilterSpec s;
+                if(mode) s.mode = reinterpret_cast<const char*>(mode);
+                if(tags){
+                    std::string t(reinterpret_cast<const char*>(tags));
+                    size_t pos = 0;
+                    while(pos < t.size()){
+                        size_t comma = t.find(',', pos);
+                        std::string part = t.substr(pos, (comma==std::string::npos? t.size()-pos : comma-pos));
+                        // trim
+                        while(!part.empty() && std::isspace((unsigned char)part.front())) part.erase(part.begin());
+                        while(!part.empty() && std::isspace((unsigned char)part.back())) part.pop_back();
+                        if(!part.empty()) s.tags.push_back(part);
+                        if(comma==std::string::npos) break;
+                        pos = comma+1;
+                    }
+                }
+                if(expr) s.expr = reinterpret_cast<const char*>(expr);
+                nodeChildFilters[nid] = s;
+            }
+        }
+        if(stmt) sqlite3_finalize(stmt);
+    }
+
+    void saveNodeFilterToDB(int64_t nodeID, const ChildFilterSpec& spec){
+        if(!dbConnection) return;
+        const char* sql = "INSERT OR REPLACE INTO VaultNodeFilters (NodeID, Mode, Tags, Expr) VALUES (?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_int64(stmt,1,nodeID);
+            sqlite3_bind_text(stmt,2,spec.mode.c_str(), -1, SQLITE_TRANSIENT);
+            std::string joined;
+            for(size_t i=0;i<spec.tags.size();++i){ if(i) joined += ","; joined += spec.tags[i]; }
+            sqlite3_bind_text(stmt,3,joined.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt,4,spec.expr.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+    }
+
+    void clearNodeFilterFromDB(int64_t nodeID){
+        if(!dbConnection) return;
+        const char* sql = "DELETE FROM VaultNodeFilters WHERE NodeID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_int64(stmt, 1, nodeID);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
     }
 
     int64_t getOrCreateRoot(){
@@ -240,6 +334,7 @@ public:
             ImGui::EndPopup();
         }
 
+
         // Tag search UI (mirrors GraphView tags) 🔎
         ImGui::Separator();
         ImGui::TextDisabled("Tag filter:"); ImGui::SameLine();
@@ -307,6 +402,12 @@ public:
                             deleteTargetID = id;
                             showDeleteModal = true;
                         }
+                        if(ImGui::MenuItem("Import Markdown...")){
+                            showImportModal = true;
+                            importParentID = id;
+                            importPath = std::filesystem::current_path();
+                            importSelectedFiles.clear();
+                        }
                         ImGui::EndPopup();
                     }
                 }
@@ -335,6 +436,85 @@ public:
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
+                ImGui::EndPopup();
+            }
+
+            // Import Markdown modal
+            if(showImportModal){ ImGui::OpenPopup("Import Markdown Files"); showImportModal = false; }
+            if(ImGui::BeginPopupModal("Import Markdown Files", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                ImGui::Text("Select Markdown files to import (multiple):");
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", importPath.string().c_str()); ImGui::SameLine();
+                if(ImGui::Button("Up")){
+                    if(importPath.has_parent_path()) importPath = importPath.parent_path();
+                }
+                ImGui::Separator();
+                try{
+                    std::vector<std::filesystem::directory_entry> dirs, files;
+                    for(auto &e : std::filesystem::directory_iterator(importPath)){
+                        if(e.is_directory()) dirs.push_back(e);
+                        else if(e.is_regular_file()){
+                            auto ext = e.path().extension().string();
+                            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                            if(ext == ".md" || ext == ".markdown") files.push_back(e);
+                        }
+                    }
+                    std::sort(dirs.begin(), dirs.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                    std::sort(files.begin(), files.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                    for(auto &d : dirs){
+                        std::string label = std::string("[DIR] ") + d.path().filename().string();
+                        if(ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_DontClosePopups)){
+                            importPath = d.path();
+                            importSelectedFiles.clear();
+                        }
+                    }
+                    ImGui::Separator();
+                    for(auto &f : files){
+                        std::string fname = f.path().filename().string();
+                        bool sel = importSelectedFiles.find(fname) != importSelectedFiles.end();
+                        std::string flabel = (sel ? std::string("[x] ") : std::string("[ ] ")) + fname;
+                        if(ImGui::Selectable(flabel.c_str(), sel, ImGuiSelectableFlags_DontClosePopups)){
+                            if(sel) importSelectedFiles.erase(fname); else importSelectedFiles.insert(fname);
+                        }
+                    }
+                } catch(...){ ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "Failed to read directory"); }
+
+                ImGui::Separator();
+                if(ImGui::Button("Select All")){
+                    try{
+                        for(auto &e : std::filesystem::directory_iterator(importPath)){
+                            if(e.is_regular_file()){
+                                auto ext = e.path().extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                                if(ext == ".md" || ext == ".markdown") importSelectedFiles.insert(e.path().filename().string());
+                            }
+                        }
+                    } catch(...){}
+                }
+                ImGui::SameLine(); if(ImGui::Button("Clear")) importSelectedFiles.clear();
+                ImGui::SameLine();
+                if(importSelectedFiles.empty()) ImGui::BeginDisabled();
+                if(importSelectedFiles.empty()) ImGui::BeginDisabled();
+            if(ImGui::Button("Import")){
+                int imported = 0;
+                int64_t lastId = -1;
+                for(auto &fname : importSelectedFiles){
+                    try{
+                        std::filesystem::path full = importPath / fname;
+                        std::ifstream in(full, std::ios::in);
+                        if(!in) continue;
+                        std::ostringstream ss; ss << in.rdbuf();
+                        std::string content = ss.str();
+                        std::string title = full.stem().string();
+                        int64_t id = createItemWithContent(title, content, {}, importParentID);
+                        if(id > 0){ imported++; lastId = id; }
+                    } catch(...){ }
+                }
+                if(imported > 0){ statusMessage = std::string("Imported ") + std::to_string(imported) + " files"; statusTime = ImGui::GetTime(); if(lastId != -1) selectedItemID = lastId; }
+                ImGui::CloseCurrentPopup();
+            }
+            if(importSelectedFiles.empty()) ImGui::EndDisabled();
+                if(importSelectedFiles.empty()) ImGui::EndDisabled();
+                ImGui::SameLine(); if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
             return;
@@ -371,6 +551,66 @@ public:
             ImGui::EndPopup();
         }
 
+        // Set Child Filter modal
+        if(showSetFilterModal){ ImGui::OpenPopup("Set Child Filter"); showSetFilterModal = false; setFilterSelectedTags = setFilterInitialTags; setFilterMode = setFilterModeDefault; }
+        if(ImGui::BeginPopupModal("Set Child Filter", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Child filter determines which children are displayed under this node.");
+            ImGui::Separator();
+            ImGui::Text("Mode:"); ImGui::SameLine();
+            ImGui::RadioButton("AND", &setFilterMode, 0); ImGui::SameLine();
+            ImGui::RadioButton("OR", &setFilterMode, 1); ImGui::SameLine();
+            ImGui::RadioButton("Expression", &setFilterMode, 2);
+            ImGui::Separator();
+            if(setFilterMode != 2){
+                // Tag picker from existing tags
+                ImGui::Text("Pick tags (selected tags will be required/optional depending on mode):");
+                ImGui::Separator();
+                auto allTags = getAllTagsPublic();
+                for(auto &t : allTags){
+                    bool sel = std::find(setFilterSelectedTags.begin(), setFilterSelectedTags.end(), t) != setFilterSelectedTags.end();
+                    if(ImGui::Selectable(t.c_str(), sel)){
+                        if(sel) setFilterSelectedTags.erase(std::remove(setFilterSelectedTags.begin(), setFilterSelectedTags.end(), t), setFilterSelectedTags.end());
+                        else setFilterSelectedTags.push_back(t);
+                    }
+                }
+                ImGui::Separator();
+                // Add custom tag
+                static char newTagBuf[64];
+                ImGui::InputTextWithHint("##newtag","Type a tag and press Add", newTagBuf, sizeof(newTagBuf)); ImGui::SameLine();
+                if(ImGui::Button("Add")){
+                    std::string nt(newTagBuf); if(!nt.empty()){
+                        if(std::find(setFilterSelectedTags.begin(), setFilterSelectedTags.end(), nt) == setFilterSelectedTags.end()) setFilterSelectedTags.push_back(nt);
+                        newTagBuf[0] = '\0';
+                    }
+                }
+                // show selected
+                ImGui::Text("Selected:");
+                for(size_t i=0;i<setFilterSelectedTags.size();++i){ ImGui::SameLine(); ImGui::TextDisabled("%s", setFilterSelectedTags[i].c_str()); }
+            } else {
+                ImGui::Text("Expression (use && for AND, || for OR, ! for NOT, parentheses allowed):");
+                ImGui::InputTextMultiline("##filterexpr", setFilterBuf, sizeof(setFilterBuf), ImVec2(400,120));
+                ImGui::TextDisabled("Example: (location && !closed) || (region && tavern)");
+            }
+            ImGui::Separator();
+            if(ImGui::Button("Set")){
+                ChildFilterSpec spec;
+                if(setFilterMode == 2){ spec.mode = "EXPR"; spec.expr = std::string(setFilterBuf); spec.tags.clear(); }
+                else { spec.mode = (setFilterMode == 1) ? "OR" : "AND"; spec.tags = setFilterSelectedTags; spec.expr.clear(); }
+                if(spec.mode != "EXPR" && spec.tags.empty()){
+                    // empty filter means clear
+                    clearNodeFilterFromDB(setFilterTargetID);
+                    nodeChildFilters.erase(setFilterTargetID);
+                } else {
+                    nodeChildFilters[setFilterTargetID] = spec;
+                    saveNodeFilterToDB(setFilterTargetID, spec);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine(); if(ImGui::Button("Clear")){ clearNodeFilterFromDB(setFilterTargetID); nodeChildFilters.erase(setFilterTargetID); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine(); if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
         // Open delete confirmation if requested
         if(showDeleteModal){
             ImGui::OpenPopup("Delete Item");
@@ -398,20 +638,150 @@ public:
             ImGui::EndPopup();
         }
 
+        // Import Markdown modal
+        if(showImportModal){ ImGui::OpenPopup("Import Markdown Files"); showImportModal = false; }
+        if(ImGui::BeginPopupModal("Import Markdown Files", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Select Markdown files to import (multiple):");
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", importPath.string().c_str()); ImGui::SameLine();
+            if(ImGui::Button("Up")){
+                if(importPath.has_parent_path()) importPath = importPath.parent_path();
+            }
+            ImGui::Separator();
+            try{
+                std::vector<std::filesystem::directory_entry> dirs, files;
+                for(auto &e : std::filesystem::directory_iterator(importPath)){
+                    if(e.is_directory()) dirs.push_back(e);
+                    else if(e.is_regular_file()){
+                        auto ext = e.path().extension().string();
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        if(ext == ".md" || ext == ".markdown") files.push_back(e);
+                    }
+                }
+                std::sort(dirs.begin(), dirs.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                std::sort(files.begin(), files.end(), [](const auto &a, const auto &b){ return a.path().filename().string() < b.path().filename().string(); });
+                for(auto &d : dirs){
+                    std::string label = std::string("[DIR] ") + d.path().filename().string();
+                    if(ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_DontClosePopups)){
+                        importPath = d.path();
+                        importSelectedFiles.clear();
+                    }
+                }
+                ImGui::Separator();
+                for(auto &f : files){
+                    std::string fname = f.path().filename().string();
+                    bool sel = importSelectedFiles.find(fname) != importSelectedFiles.end();
+                    std::string flabel = (sel ? std::string("[x] ") : std::string("[ ] ")) + fname;
+                    if(ImGui::Selectable(flabel.c_str(), sel, ImGuiSelectableFlags_DontClosePopups)){
+                        if(sel) importSelectedFiles.erase(fname); else importSelectedFiles.insert(fname);
+                    }
+                }
+            } catch(...){ ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "Failed to read directory"); }
+
+            ImGui::Separator();
+            if(ImGui::Button("Select All")){
+                try{
+                    for(auto &e : std::filesystem::directory_iterator(importPath)){
+                        if(e.is_regular_file()){
+                            auto ext = e.path().extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                            if(ext == ".md" || ext == ".markdown") importSelectedFiles.insert(e.path().filename().string());
+                        }
+                    }
+                } catch(...){}
+            }
+            ImGui::SameLine(); if(ImGui::Button("Clear")) importSelectedFiles.clear();
+            ImGui::SameLine();
+            if(ImGui::Button("Import")){
+                int imported = 0;
+                int64_t lastId = -1;
+                for(auto &fname : importSelectedFiles){
+                    try{
+                        std::filesystem::path full = importPath / fname;
+                        std::ifstream in(full, std::ios::in);
+                        if(!in) continue;
+                        std::ostringstream ss; ss << in.rdbuf();
+                        std::string content = ss.str();
+                        std::string title = full.stem().string();
+                        int64_t id = createItemWithContent(title, content, {}, importParentID);
+                        if(id > 0){ imported++; lastId = id; }
+                    } catch(...){ }
+                }
+                if(imported > 0){ statusMessage = std::string("Imported ") + std::to_string(imported) + " files"; statusTime = ImGui::GetTime(); if(lastId != -1) selectedItemID = lastId; }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine(); if(ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
         ImGui::End();
     }
 
-    // Return whether node or any descendant matches active filter
-    bool nodeOrDescendantMatches(int64_t nodeID, std::unordered_set<int64_t> &visited){
+
+    // Return whether node or any descendant matches ancestor filter specs.
+    bool nodeOrDescendantMatchesWithSpecs(int64_t nodeID, const std::vector<ChildFilterSpec>& inheritedSpecs, std::unordered_set<int64_t> &visited){
         if(visited.find(nodeID) != visited.end()) return false; // cycle protection
         visited.insert(nodeID);
-        if(nodeMatchesActiveFilter(nodeID)) return true;
+        // Check whether this node satisfies all ancestor specs (if any were provided)
+        if(!inheritedSpecs.empty()){
+            bool ok = true;
+            auto tags = parseTags(getTagsOf(nodeID));
+            std::unordered_set<std::string> tagsLower;
+            for(auto &t : tags){ std::string s = t; std::transform(s.begin(), s.end(), s.begin(), ::tolower); tagsLower.insert(s); }
+            for(const auto &spec : inheritedSpecs){ if(!evalFilterSpecOnTags(spec, tagsLower)){ ok = false; break; } }
+            if(ok) return true;
+        }
+        // Otherwise propagate specs to children, including this node's own child-filter if present
+        std::vector<ChildFilterSpec> nextSpecs = inheritedSpecs;
+        auto it = nodeChildFilters.find(nodeID);
+        if(it != nodeChildFilters.end()) nextSpecs.push_back(it->second);
         std::vector<int64_t> children;
         getChildren(nodeID, children);
-        for(auto c : children){
-            if(nodeOrDescendantMatches(c, visited)) return true;
-        }
+        for(auto c : children){ if(nodeOrDescendantMatchesWithSpecs(c, nextSpecs, visited)) return true; }
         return false;
+    }
+
+    // Backwards-compat wrapper used elsewhere where no filters are passed
+    bool nodeOrDescendantMatches(int64_t nodeID, std::unordered_set<int64_t> &visited){
+        std::vector<ChildFilterSpec> specs;
+        return nodeOrDescendantMatchesWithSpecs(nodeID, specs, visited);
+    }
+
+    // Simple expression evaluator for filter expressions (supports &&, ||, !, parentheses)
+    static std::string toLowerCopy(const std::string &s){ std::string o = s; std::transform(o.begin(), o.end(), o.begin(), ::tolower); return o; }
+    static bool evalFilterExpr(const std::string &expr, const std::unordered_set<std::string> &tagsLower){
+        // Tokenizer & parser inside
+        struct P {
+            const std::string &s; size_t p; const std::unordered_set<std::string> &tags; P(const std::string &s_, const std::unordered_set<std::string> &t_): s(s_), p(0), tags(t_){}
+            void skip(){ while(p < s.size() && isspace((unsigned char)s[p])) ++p; }
+            bool match(const std::string &t){ skip(); if(s.compare(p, t.size(), t)==0){ p += t.size(); return true;} return false; }
+            bool parseExpr(){ auto v = parseOr(); skip(); return v; }
+            bool parseOr(){ bool v = parseAnd(); skip(); while(true){ if(match("||") || match("or")){ bool r = parseAnd(); v = v || r; } else break; skip(); } return v; }
+            bool parseAnd(){ bool v = parseUnary(); skip(); while(true){ if(match("&&") || match("and")){ bool r = parseUnary(); v = v && r; } else break; skip(); } return v; }
+            bool parseUnary(){ skip(); if(match("!")) { return !parseUnary(); } if(match("not")) { return !parseUnary(); } return parsePrimary(); }
+            bool parsePrimary(){ skip(); if(match("(")){ bool v = parseExpr(); skip(); if(p < s.size() && s[p]==')') ++p; return v; } // identifier
+                // parse identifier
+                skip(); size_t start = p;
+                while(p < s.size() && (isalnum((unsigned char)s[p]) || s[p]=='_' || s[p]=='-' || s[p]=='.')) ++p;
+                if(p > start){ std::string tok = s.substr(start, p-start); std::string low = tok; std::transform(low.begin(), low.end(), low.begin(), ::tolower); return tags.find(low) != tags.end(); }
+                return false;
+            }
+        } parser(expr, tagsLower);
+        try{ return parser.parseExpr(); } catch(...){ return false; }
+    }
+
+    static bool evalFilterSpecOnTags(const ChildFilterSpec &spec, const std::unordered_set<std::string> &tagsLower){
+        if(spec.mode == "EXPR"){
+            if(spec.expr.empty()) return false;
+            return evalFilterExpr(spec.expr, tagsLower);
+        } else if(spec.mode == "OR"){
+            if(spec.tags.empty()) return false;
+            for(auto &t : spec.tags){ std::string low = toLowerCopy(t); if(tagsLower.find(low) != tagsLower.end()) return true; }
+            return false;
+        } else { // AND
+            if(spec.tags.empty()) return false;
+            for(auto &t : spec.tags){ std::string low = toLowerCopy(t); if(tagsLower.find(low) == tagsLower.end()) return false; }
+            return true;
+        }
     }
 
     void drawVaultContent(){
@@ -488,8 +858,8 @@ public:
         }
         float leftWidth = avail.x * 0.5f;
 
-        // Left: editor (non-scrollable, editor widget will manage its own internal scrolling)
-        ImGui::BeginChild("VaultEditorLeft", ImVec2(leftWidth, mainHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        // Left: editor (scrollable)
+        ImGui::BeginChild("VaultEditorLeft", ImVec2(leftWidth, mainHeight), true);
         ImGui::TextDisabled("Editor (Markdown)");
         ImGui::Separator();
 
@@ -548,8 +918,8 @@ public:
 
         ImGui::SameLine();
 
-        // Right: live preview (non-scrollable)
-        ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        // Right: live preview (scrollable)
+        ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true);
         ImGui::TextDisabled("Preview");
         ImGui::Separator();
         // Render markdown using our MarkdownText helper
@@ -816,6 +1186,41 @@ public:
         return id;
     }
 
+    // Convenience: create an item and set its content and tags atomically
+    int64_t createItemWithContent(const std::string& name, const std::string& content, const std::vector<std::string>& tags, int64_t parentID = -1){
+        int64_t id = createItem(name, parentID);
+        if(id <= 0) return id;
+        const char* updateSQL = "UPDATE VaultItems SET Content = ?, Tags = ? WHERE ID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        std::string joined = joinTags(tags);
+        if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_text(stmt,1,content.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt,2,joined.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt,3,id);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+        return id;
+    }
+
+    // Public helper to fetch content for a given item id
+    std::string getItemContentPublic(int64_t id){
+        const char* sql = "SELECT Content FROM VaultItems WHERE ID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        std::string out;
+        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_int64(stmt,1,id);
+            if(sqlite3_step(stmt) == SQLITE_ROW){
+                const unsigned char* text = sqlite3_column_text(stmt,0);
+                if(text) out = reinterpret_cast<const char*>(text);
+            }
+        }
+        if(stmt) sqlite3_finalize(stmt);
+        return out;
+    }
+
+    std::string getItemNamePublic(int64_t id){ return getItemName(id); }
+
 private:
     std::string getItemName(int64_t id){
         const char* sql = "SELECT Name FROM VaultItems WHERE ID = ?;";
@@ -869,7 +1274,18 @@ private:
         getChildren(nodeID, children);
 
         bool isRootNode = (nodeID == getOrCreateRoot());
+        // If this node has a child-filter, show it in the label for clarity
         std::string displayName = name + (isRootNode ? std::string(" (vault)") : std::string());
+        auto fit = nodeChildFilters.find(nodeID);
+        if(fit != nodeChildFilters.end()){
+            if(fit->second.mode == "EXPR"){
+                if(!fit->second.expr.empty()) displayName += std::string(" [filter: EXPR: ") + fit->second.expr + "]";
+            } else if(!fit->second.tags.empty()){
+                std::string fstr;
+                for(size_t i=0;i<fit->second.tags.size();++i){ if(i) fstr += ","; fstr += fit->second.tags[i]; }
+                displayName += std::string(" [filter: ") + fit->second.mode + std::string(": ") + fstr + "]";
+            }
+        }
 
         ImGui::PushID(static_cast<int>(parentID));
         ImGui::PushID(static_cast<int>(nodeID));
@@ -894,6 +1310,31 @@ private:
                 if(ImGui::MenuItem("Delete", nullptr, false, !isRootNode)){
                     deleteTargetID = nodeID;
                     showDeleteModal = true;
+                }
+                if(ImGui::MenuItem("Import Markdown...")){
+                    showImportModal = true;
+                    importParentID = nodeID;
+                    importPath = std::filesystem::current_path();
+                    importSelectedFiles.clear();
+                }
+                if(ImGui::MenuItem("Set Child Filter...")){
+                    setFilterTargetID = nodeID;
+                    auto it = nodeChildFilters.find(nodeID);
+                    setFilterInitialTags.clear();
+                    setFilterModeDefault = 0;
+                    setFilterBuf[0] = '\0';
+                    if(it != nodeChildFilters.end()){
+                        if(it->second.mode == "OR") setFilterModeDefault = 1;
+                        else if(it->second.mode == "EXPR") setFilterModeDefault = 2;
+                        else setFilterModeDefault = 0;
+                        setFilterInitialTags = it->second.tags;
+                        if(!it->second.expr.empty()) strncpy(setFilterBuf, it->second.expr.c_str(), sizeof(setFilterBuf));
+                    }
+                    showSetFilterModal = true;
+                }
+                if(ImGui::MenuItem("Clear Child Filter", nullptr, false, nodeChildFilters.find(nodeID) != nodeChildFilters.end())){
+                    clearNodeFilterFromDB(nodeID);
+                    nodeChildFilters.erase(nodeID);
                 }
                 ImGui::EndPopup();
             }
@@ -920,12 +1361,57 @@ private:
                     deleteTargetID = nodeID;
                     showDeleteModal = true;
                 }
+                if(ImGui::MenuItem("Import Markdown...")){
+                    showImportModal = true;
+                    importParentID = nodeID;
+                    importPath = std::filesystem::current_path();
+                    importSelectedFiles.clear();
+                }
+                if(ImGui::MenuItem("Set Child Filter...")){
+                    setFilterTargetID = nodeID;
+                    auto it = nodeChildFilters.find(nodeID);
+                    setFilterInitialTags.clear();
+                    setFilterModeDefault = 0;
+                    setFilterBuf[0] = '\0';
+                    if(it != nodeChildFilters.end()){
+                        if(it->second.mode == "OR") setFilterModeDefault = 1;
+                        else if(it->second.mode == "EXPR") setFilterModeDefault = 2;
+                        else setFilterModeDefault = 0;
+                        setFilterInitialTags = it->second.tags;
+                        if(!it->second.expr.empty()) strncpy(setFilterBuf, it->second.expr.c_str(), sizeof(setFilterBuf));
+                    }
+                    showSetFilterModal = true;
+                }
+                if(ImGui::MenuItem("Clear Child Filter", nullptr, false, nodeChildFilters.find(nodeID) != nodeChildFilters.end())){
+                    clearNodeFilterFromDB(nodeID);
+                    nodeChildFilters.erase(nodeID);
+                }
                 ImGui::EndPopup();
             }
 
             if(open){
                 path.push_back(nodeID);
+                // Build filters to pass to children: start with inherited Filters passed to this call
+                // We need to obtain inherited filters from the caller; since this function signature didn't have it,
+                // use an ad-hoc approach: check if current node has any child filters and pass them down cumulatively.
+                // To make this correct, we modify recursive calls to gather filters along the path.
+                // Gather filters from ancestors by walking the path and collecting nodeChildFilters entries.
+                std::vector<ChildFilterSpec> inheritedSpecs;
+                for(auto anc : path){
+                    if(anc == nodeID) continue; // skip current node
+                    auto it = nodeChildFilters.find(anc);
+                    if(it != nodeChildFilters.end()) inheritedSpecs.push_back(it->second);
+                }
+                // Also include this node's filter for its children
+                auto itcur = nodeChildFilters.find(nodeID);
+                if(itcur != nodeChildFilters.end()) inheritedSpecs.push_back(itcur->second);
+
                 for(auto child : children){
+                    // If inherited specs exclude this child and it has no matching descendants, skip rendering this child
+                    std::unordered_set<int64_t> visited;
+                    if(!inheritedSpecs.empty()){
+                        if(!nodeOrDescendantMatchesWithSpecs(child, inheritedSpecs, visited)) continue;
+                    }
                     drawVaultNode(nodeID, child, path);
                 }
                 path.pop_back();

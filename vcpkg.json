@@ -36,6 +36,7 @@
 		"cli11",
 		"sqlite3",
 		"implot",
-		"implot3d"
+		"implot3d",
+		"md4c"
 	]
 }
