@@ -13,6 +13,10 @@
 #include <sstream>
 #include <cctype>
 #include <fstream>
+#include <cstring>
+#include <mutex>
+#include <curl/curl.h>
+#include <thread>
 
 class Vault{
     // forward declaration for chat render helper
@@ -51,9 +55,22 @@ class Vault{
     std::unordered_set<std::string> importSelectedFiles;
     int64_t importParentID = -1;
 
+    // Attachment UI state
+    bool showAttachmentPreview = false;
+    int64_t previewAttachmentID = -1;
+    std::vector<uint8_t> previewRawData;
+    std::string previewMime;
+    std::string previewName;
+    bool previewIsRaw = false;
+    char attachPathBuf[1024] = "";
+    char attachmentSavePathBuf[1024] = "";
+
     // Per-node child filters (display-only). Keys are node IDs; values are a filter spec.
     struct ChildFilterSpec { std::string mode = "AND"; std::vector<std::string> tags; std::string expr; };
     std::unordered_map<int64_t, ChildFilterSpec> nodeChildFilters;
+
+    // DB mutex for background fetch updates
+    std::mutex dbMutex;
     // UI state for Set Filter modal
     bool showSetFilterModal = false;
     int64_t setFilterTargetID = -1;
@@ -116,6 +133,47 @@ public:
         }
     }
 
+    // Attachments: metadata and API
+    struct Attachment {
+        int64_t id = -1;
+        int64_t itemID = -1;
+        std::string name;
+        std::string mimeType;
+        int64_t size = 0;
+        std::string externalPath;
+        int64_t createdAt = 0; // unix timestamp
+    };
+
+    // Adds an attachment (store bytes in DB BLOB). Returns attachment ID or -1 on error.
+    int64_t addAttachment(int64_t itemID = -1, const std::string& name = "", const std::string& mimeType = "", const std::vector<uint8_t>& data = std::vector<uint8_t>(), const std::string& externalPath = "");
+
+    // Add or find an attachment by external URL (caches vault-level); returns attachment id (may create placeholder and fetch asynchronously)
+    int64_t addAttachmentFromURL(const std::string& url, const std::string& name = "");
+
+    // Find attachment by external path/url; returns -1 if not found
+    int64_t findAttachmentByExternalPath(const std::string& path);
+
+    // Fetch attachment data synchronously and update DB (blocking) — returns true if fetched
+    bool fetchAttachmentNow(int64_t attachmentID, const std::string& url);
+
+    // Start async fetch to populate an existing attachment record's Data and MimeType
+    void asyncFetchAndStoreAttachment(int64_t attachmentID, const std::string& url);
+
+    // Retrieve attachment metadata
+    Attachment getAttachmentMeta(int64_t attachmentID);
+
+    // List attachments for an item
+    std::vector<Attachment> listAttachments(int64_t itemID);
+
+    // Retrieve raw attachment byte data
+    std::vector<uint8_t> getAttachmentData(int64_t attachmentID);
+
+    // Remove an attachment (metadata + blob)
+    bool removeAttachment(int64_t attachmentID);
+
+    // Open an attachment (or file) referenced by a markdown src (e.g. vault://attachment/123 or file:///path/to/img.png)
+    void openPreviewFromSrc(const std::string& src);
+
     Vault(std::filesystem::path dbPath,std::string vaultName){
         name = vaultName;
         //open connection to the database
@@ -157,6 +215,82 @@ public:
         if(sqlite3_exec(dbConnection, createFiltersTableSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
         // Load any persisted per-node filters
         loadNodeFiltersFromDB();
+
+        // Ensure metadata table exists for schema versioning
+        const char* createMetaSQL = "CREATE TABLE IF NOT EXISTS VaultMeta (Key TEXT PRIMARY KEY, Value TEXT);";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createMetaSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        // Ensure attachments table exists for embedded resources
+        const char* createAttachmentsSQL = "CREATE TABLE IF NOT EXISTS Attachments ("
+                                           "ID INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                           "ItemID INTEGER,"
+                                           "Name TEXT,"
+                                           "MimeType TEXT,"
+                                           "Data BLOB,"
+                                           "ExternalPath TEXT,"
+                                           "Size INTEGER,"
+                                           "CreatedAt INTEGER DEFAULT (strftime('%s','now'))," 
+                                           "FOREIGN KEY(ItemID) REFERENCES VaultItems(ID)"
+                                           ");";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createAttachmentsSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        // Ensure ExternalPath index exists
+        const char* idxSQL = "CREATE INDEX IF NOT EXISTS idx_Attachments_ExternalPath ON Attachments(ExternalPath);";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, idxSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        // Migration: detect old Attachments schema where ItemID was declared NOT NULL, and rebuild table if necessary
+        {
+            sqlite3_stmt* pragma = nullptr;
+            const char* pragmaSQL = "PRAGMA table_info(Attachments);";
+            bool needRebuild = false;
+            if(sqlite3_prepare_v2(dbConnection, pragmaSQL, -1, &pragma, nullptr) == SQLITE_OK){
+                while(sqlite3_step(pragma) == SQLITE_ROW){
+                    const unsigned char* colName = sqlite3_column_text(pragma, 1);
+                    int notnull = sqlite3_column_int(pragma, 3);
+                    if(colName && std::string(reinterpret_cast<const char*>(colName)) == "ItemID" && notnull == 1){ needRebuild = true; break; }
+                }
+            }
+            if(pragma) sqlite3_finalize(pragma);
+
+            if(needRebuild){
+                // Rebuild table with nullable ItemID
+                const char* beginT = "BEGIN TRANSACTION;";
+                const char* createNew = "CREATE TABLE Attachments_new (ID INTEGER PRIMARY KEY AUTOINCREMENT, ItemID INTEGER, Name TEXT, MimeType TEXT, Data BLOB, ExternalPath TEXT, Size INTEGER, CreatedAt INTEGER DEFAULT (strftime('%s','now')));";
+                const char* copySQL = "INSERT INTO Attachments_new (ID, ItemID, Name, MimeType, Data, ExternalPath, Size, CreatedAt) SELECT ID, ItemID, Name, MimeType, Data, ExternalPath, Size, CreatedAt FROM Attachments;";
+                const char* dropOld = "DROP TABLE Attachments;";
+                const char* rename = "ALTER TABLE Attachments_new RENAME TO Attachments;";
+                const char* commitT = "COMMIT;";
+                char* mErr = nullptr;
+                if(sqlite3_exec(dbConnection, beginT, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, createNew, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, copySQL, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, dropOld, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, rename, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, idxSQL, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+                mErr = nullptr; if(sqlite3_exec(dbConnection, commitT, nullptr, nullptr, &mErr) != SQLITE_OK){ if(mErr) sqlite3_free(mErr); }
+            }
+        }
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createAttachmentsSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        // Ensure SchemaVersion entry exists (set to 2 for attachment support)
+        {
+            sqlite3_stmt* verStmt = nullptr;
+            const char* selectVer = "SELECT Value FROM VaultMeta WHERE Key = 'SchemaVersion';";
+            bool hasVer = false;
+            if(sqlite3_prepare_v2(dbConnection, selectVer, -1, &verStmt, nullptr) == SQLITE_OK){
+                if(sqlite3_step(verStmt) == SQLITE_ROW) hasVer = true;
+            }
+            if(verStmt) sqlite3_finalize(verStmt);
+            if(!hasVer){
+                const char* insertVer = "INSERT OR REPLACE INTO VaultMeta (Key, Value) VALUES ('SchemaVersion', '2');";
+                char* iErr = nullptr;
+                if(sqlite3_exec(dbConnection, insertVer, nullptr, nullptr, &iErr) != SQLITE_OK){ if(iErr) sqlite3_free(iErr); }
+            }
+        }
 
         // Ensure legacy DBs get the IsRoot column so the root can be identified by ID instead of Name
         {
@@ -244,6 +378,8 @@ public:
         }
         if(stmt) sqlite3_finalize(stmt);
     }
+
+    
 
     int64_t getOrCreateRoot(){
         // Prefer explicit IsRoot flag (so the root is identified by ID, not by mutable Name)
@@ -922,8 +1058,8 @@ public:
         ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true);
         ImGui::TextDisabled("Preview");
         ImGui::Separator();
-        // Render markdown using our MarkdownText helper
-        ImGui::MarkdownText(currentContent.c_str());
+        // Render markdown using our MarkdownText helper (pass Vault context for attachment previews)
+        ImGui::MarkdownText(currentContent.c_str(), this);
         ImGui::EndChild();
 
         // Meta area: Tags & Parents (bottom) — resizable by dragging the splitter above
@@ -1055,6 +1191,95 @@ public:
                 }
             }
             ImGui::EndChild();
+        }
+
+        // Attachments UI
+        ImGui::Separator();
+        ImGui::TextDisabled("Attachments:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(400);
+        if(ImGui::InputTextWithHint("##attach_path", "Path or URL (files only)", attachPathBuf, sizeof(attachPathBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
+            std::string p(attachPathBuf);
+            if(!p.empty()){
+                std::ifstream in(p, std::ios::binary);
+                if(in){
+                    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    std::string name = std::filesystem::path(p).filename().string();
+                    std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    std::string mime = "application/octet-stream";
+                    if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
+                    int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
+                    if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
+                    else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
+                } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+            }
+        }
+        ImGui::SameLine(); if(ImGui::Button("Import Attachment")){
+            std::string p(attachPathBuf);
+            if(!p.empty()){
+                std::ifstream in(p, std::ios::binary);
+                if(in){
+                    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    std::string name = std::filesystem::path(p).filename().string();
+                    std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    std::string mime = "application/octet-stream";
+                    if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
+                    int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
+                    if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
+                    else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
+                } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+            }
+        }
+
+        // List attachments
+        auto attachments = listAttachments(loadedItemID);
+        for(auto &a : attachments){
+            std::string label = a.name + " [id:" + std::to_string(a.id) + "]";
+            ImGui::TextUnformatted(label.c_str()); ImGui::SameLine(); ImGui::TextDisabled("(%lld bytes)", (long long)a.size); ImGui::SameLine();
+            if(ImGui::Button((std::string("Preview##att") + std::to_string(a.id)).c_str())){ previewAttachmentID = a.id; previewIsRaw = false; showAttachmentPreview = true; ImGui::OpenPopup("Attachment Preview"); }
+            ImGui::SameLine(); if(ImGui::SmallButton((std::string("Remove##att") + std::to_string(a.id)).c_str())){ if(removeAttachment(a.id)){ statusMessage = "Attachment removed"; statusTime = ImGui::GetTime(); } else { statusMessage = "Failed to remove attachment"; statusTime = ImGui::GetTime(); } }
+        }
+
+        // Attachment preview popup
+        if(showAttachmentPreview){
+            if(ImGui::BeginPopupModal("Attachment Preview", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                if(previewIsRaw && previewAttachmentID == -1){
+                    ImGui::Text("Name: %s", previewName.c_str());
+                    ImGui::Text("Mime: %s", previewMime.c_str());
+                    ImGui::Text("Size: %lld bytes", (long long)previewRawData.size());
+                    ImGui::Separator();
+                    // Save As
+                    ImGui::InputText("##savepath", attachmentSavePathBuf, sizeof(attachmentSavePathBuf)); ImGui::SameLine();
+                    if(ImGui::Button("Save As")){
+                        std::string outp(attachmentSavePathBuf);
+                        if(!outp.empty()){
+                            std::ofstream of(outp, std::ios::binary);
+                            if(of){ of.write(reinterpret_cast<const char*>(previewRawData.data()), previewRawData.size()); of.close(); statusMessage = "Saved"; statusTime = ImGui::GetTime(); }
+                            else { statusMessage = "Failed to save"; statusTime = ImGui::GetTime(); }
+                        }
+                    }
+                } else {
+                    auto meta = getAttachmentMeta(previewAttachmentID);
+                    ImGui::Text("Name: %s", meta.name.c_str());
+                    ImGui::Text("Mime: %s", meta.mimeType.c_str());
+                    ImGui::Text("Size: %lld bytes", (long long)meta.size);
+                    ImGui::Separator();
+                    // Save As
+                    ImGui::InputText("##savepath", attachmentSavePathBuf, sizeof(attachmentSavePathBuf)); ImGui::SameLine();
+                    if(ImGui::Button("Save As")){
+                        std::string outp(attachmentSavePathBuf);
+                        if(!outp.empty()){
+                            auto data = getAttachmentData(meta.id);
+                            std::ofstream of(outp, std::ios::binary);
+                            if(of){ of.write(reinterpret_cast<const char*>(data.data()), data.size()); of.close(); statusMessage = "Saved"; statusTime = ImGui::GetTime(); }
+                            else { statusMessage = "Failed to save"; statusTime = ImGui::GetTime(); }
+                        }
+                    }
+                }
+                ImGui::Separator();
+                if(ImGui::Button("Close")) { ImGui::CloseCurrentPopup(); showAttachmentPreview = false; }
+                ImGui::EndPopup();
+            }
         }
 
         // Show status message briefly
@@ -1686,3 +1911,292 @@ private:
         return setTagsFor(id, tags);
     }
 };
+
+inline int64_t Vault::addAttachment(int64_t itemID, const std::string& name, const std::string& mimeType, const std::vector<uint8_t>& data, const std::string& externalPath){
+    if(!dbConnection) return -1;
+    const char* sql = "INSERT INTO Attachments (ItemID, Name, MimeType, Data, ExternalPath, Size) VALUES (?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        if(itemID >= 0) sqlite3_bind_int64(stmt, 1, itemID); else sqlite3_bind_null(stmt, 1);
+        sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, mimeType.c_str(), -1, SQLITE_TRANSIENT);
+        if(!data.empty()) sqlite3_bind_blob(stmt, 4, reinterpret_cast<const void*>(data.data()), static_cast<int>(data.size()), SQLITE_TRANSIENT);
+        else sqlite3_bind_null(stmt, 4);
+        if(!externalPath.empty()) sqlite3_bind_text(stmt, 5, externalPath.c_str(), -1, SQLITE_TRANSIENT);
+        else sqlite3_bind_null(stmt, 5);
+        sqlite3_bind_int64(stmt, 6, static_cast<int64_t>(data.size()));
+        sqlite3_step(stmt);
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return sqlite3_last_insert_rowid(dbConnection);
+}
+
+inline Vault::Attachment Vault::getAttachmentMeta(int64_t attachmentID){
+    Attachment a;
+    if(!dbConnection) return a;
+    const char* sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, attachmentID);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            a.id = sqlite3_column_int64(stmt, 0);
+            a.itemID = sqlite3_column_int64(stmt, 1);
+            const unsigned char* t0 = sqlite3_column_text(stmt, 2); if(t0) a.name = reinterpret_cast<const char*>(t0);
+            const unsigned char* t1 = sqlite3_column_text(stmt, 3); if(t1) a.mimeType = reinterpret_cast<const char*>(t1);
+            a.size = sqlite3_column_int64(stmt, 4);
+            const unsigned char* t2 = sqlite3_column_text(stmt, 5); if(t2) a.externalPath = reinterpret_cast<const char*>(t2);
+            a.createdAt = sqlite3_column_int64(stmt, 6);
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return a;
+}
+
+inline std::vector<Vault::Attachment> Vault::listAttachments(int64_t itemID){
+    std::vector<Attachment> out;
+    if(!dbConnection) return out;
+    const char* sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ItemID = ? ORDER BY ID ASC;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        while(sqlite3_step(stmt) == SQLITE_ROW){
+            Attachment a;
+            a.id = sqlite3_column_int64(stmt, 0);
+            a.itemID = sqlite3_column_int64(stmt, 1);
+            const unsigned char* t0 = sqlite3_column_text(stmt, 2); if(t0) a.name = reinterpret_cast<const char*>(t0);
+            const unsigned char* t1 = sqlite3_column_text(stmt, 3); if(t1) a.mimeType = reinterpret_cast<const char*>(t1);
+            a.size = sqlite3_column_int64(stmt, 4);
+            const unsigned char* t2 = sqlite3_column_text(stmt, 5); if(t2) a.externalPath = reinterpret_cast<const char*>(t2);
+            a.createdAt = sqlite3_column_int64(stmt, 6);
+            out.push_back(a);
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return out;
+}
+
+inline std::vector<uint8_t> Vault::getAttachmentData(int64_t attachmentID){
+    std::vector<uint8_t> out;
+    if(!dbConnection) return out;
+    const char* sql = "SELECT Data FROM Attachments WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, attachmentID);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            const void* blob = sqlite3_column_blob(stmt, 0);
+            int bsize = sqlite3_column_bytes(stmt, 0);
+            if(blob && bsize > 0){ out.resize(static_cast<size_t>(bsize)); memcpy(out.data(), blob, static_cast<size_t>(bsize)); }
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return out;
+}
+
+inline bool Vault::removeAttachment(int64_t attachmentID){
+    if(!dbConnection) return false;
+    const char* sql = "DELETE FROM Attachments WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    bool ok = false;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, attachmentID);
+        if(sqlite3_step(stmt) == SQLITE_DONE) ok = true;
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return ok;
+}
+
+inline void Vault::openPreviewFromSrc(const std::string& src){
+    previewIsRaw = false; previewRawData.clear(); previewMime.clear(); previewName.clear();
+    // vault://attachment/<id>
+    const std::string prefix = "vault://attachment/";
+    if(src.rfind(prefix, 0) == 0){
+        std::string idstr = src.substr(prefix.size());
+        try{
+            int64_t aid = std::stoll(idstr);
+            auto meta = getAttachmentMeta(aid);
+            auto data = getAttachmentData(aid);
+            if(!data.empty()){
+                previewRawData = std::move(data);
+                previewMime = meta.mimeType;
+                previewName = meta.name;
+                previewIsRaw = true;
+                previewAttachmentID = aid;
+                showAttachmentPreview = true;
+                ImGui::OpenPopup("Attachment Preview");
+                return;
+            } else {
+                // Data empty — try async fetch if ExternalPath present
+                if(!meta.externalPath.empty()){
+                    asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                    statusMessage = "Fetching attachment..."; statusTime = ImGui::GetTime();
+                }
+            }
+            statusMessage = "Attachment empty"; statusTime = ImGui::GetTime();
+        } catch(...) { statusMessage = "Invalid attachment id"; statusTime = ImGui::GetTime(); }
+        return;
+    }
+    // file:// or plain path or http(s)
+    std::string path = src;
+    if(src.rfind("file://", 0) == 0) path = src.substr(7);
+    if(src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0){
+        // Add to vault cache if not already present, and start async fetch
+        int64_t aid = findAttachmentByExternalPath(src);
+        if(aid == -1) aid = addAttachmentFromURL(src);
+        if(aid != -1){
+            auto meta = getAttachmentMeta(aid);
+            if(meta.size > 0){
+                auto data = getAttachmentData(aid);
+                previewRawData = std::move(data);
+                previewMime = meta.mimeType;
+                previewName = meta.name;
+                previewIsRaw = true;
+                previewAttachmentID = aid;
+                showAttachmentPreview = true; ImGui::OpenPopup("Attachment Preview");
+                return;
+            } else {
+                statusMessage = "Fetching web resource..."; statusTime = ImGui::GetTime();
+                asyncFetchAndStoreAttachment(aid, src);
+                return;
+            }
+        } else {
+            statusMessage = "Failed to create cache record"; statusTime = ImGui::GetTime(); return;
+        }
+    }
+    try{
+        if(std::filesystem::exists(path) && std::filesystem::is_regular_file(path)){
+            std::ifstream in(path, std::ios::binary);
+            if(in){
+                previewRawData.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+                previewName = std::filesystem::path(path).filename().string();
+                std::string ext = std::filesystem::path(path).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") previewMime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
+                else previewMime = "application/octet-stream";
+                previewIsRaw = true; showAttachmentPreview = true; previewAttachmentID = -1; ImGui::OpenPopup("Attachment Preview"); return;
+            }
+        }
+    } catch(...){}
+    statusMessage = "Unsupported preview source"; statusTime = ImGui::GetTime();
+}
+
+// Find an attachment by ExternalPath (URL or path), returns -1 if not found
+inline int64_t Vault::findAttachmentByExternalPath(const std::string& path){
+    if(!dbConnection) return -1;
+    const char* sql = "SELECT ID FROM Attachments WHERE ExternalPath = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    int64_t out = -1;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_text(stmt, 1, path.c_str(), -1, SQLITE_TRANSIENT);
+        if(sqlite3_step(stmt) == SQLITE_ROW) out = sqlite3_column_int64(stmt, 0);
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return out;
+}
+
+// Add an attachment record referencing the external URL (creates placeholder and spawns async fetch), returns attachment id
+inline int64_t Vault::addAttachmentFromURL(const std::string& url, const std::string& name){
+    if(!dbConnection) return -1;
+    // check existing
+    int64_t existing = findAttachmentByExternalPath(url);
+    if(existing != -1) return existing;
+
+    std::string filename = name;
+    if(filename.empty()){
+        try{
+            auto pos = url.find_last_of('/');
+            if(pos != std::string::npos) filename = url.substr(pos+1);
+            auto q = filename.find_first_of('?'); if(q!=std::string::npos) filename = filename.substr(0,q);
+        } catch(...){}
+        if(filename.empty()) filename = "remote";
+    }
+
+    const char* insSQL = "INSERT INTO Attachments (ItemID, Name, MimeType, Data, ExternalPath, Size) VALUES (NULL, ?, ?, NULL, ?, 0);";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, insSQL, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_text(stmt, 1, filename.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, url.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    int64_t id = sqlite3_last_insert_rowid(dbConnection);
+    if(id != -1){
+        // async fetch
+        asyncFetchAndStoreAttachment(id, url);
+    }
+    return id;
+}
+
+// Synchronous fetch (blocking) that updates the attachment data and mime type
+inline bool Vault::fetchAttachmentNow(int64_t attachmentID, const std::string& url){
+    if(!dbConnection) return false;
+    // Curl fetch
+    std::vector<uint8_t> out;
+    std::string contentType;
+    CURL* curl = curl_easy_init();
+    if(!curl) return false;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "LoreBook/1.0");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char* ptr, size_t size, size_t nmemb, void* userdata)->size_t{
+        auto* vec = static_cast<std::vector<uint8_t>*>(userdata);
+        size_t n = size * nmemb;
+        vec->insert(vec->end(), ptr, ptr + n);
+        return n;
+    });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+    // header callback to capture content-type
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, +[](char* buffer, size_t size, size_t nitems, void* userdata)->size_t{
+        std::string s(buffer, size * nitems);
+        auto* ct = static_cast<std::string*>(userdata);
+        std::string key = "content-type:";
+        std::string low = s; std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+        auto pos = low.find(key);
+        if(pos != std::string::npos){
+            auto val = s.substr(pos + key.size());
+            // trim
+            while(!val.empty() && (val.front()==' ' || val.front()=='\t' || val.front()=='\r' || val.front()=='\n')) val.erase(val.begin());
+            while(!val.empty() && (val.back()=='\r' || val.back()=='\n')) val.pop_back();
+            *ct = val;
+        }
+        return size * nitems;
+    });
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &contentType);
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    if(res != CURLE_OK) return false;
+
+    // Determine mime
+    std::string mime = contentType;
+    if(mime.empty()){
+        // fallback based on extension
+        try{ auto p = std::filesystem::path(url); auto ext = p.extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower); if(!ext.empty()) mime = (ext==".png"||ext==".jpg"||ext==".jpeg"? std::string("image/") + (ext.size()>1? ext.substr(1):"") : std::string("application/octet-stream")); }catch(...){}
+    }
+
+    // Update DB with blob and mime and size
+    {
+        std::lock_guard<std::mutex> l(dbMutex);
+        const char* upd = "UPDATE Attachments SET Data = ?, Size = ?, MimeType = ? WHERE ID = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if(sqlite3_prepare_v2(dbConnection, upd, -1, &stmt, nullptr) == SQLITE_OK){
+            if(!out.empty()) sqlite3_bind_blob(stmt, 1, reinterpret_cast<const void*>(out.data()), static_cast<int>(out.size()), SQLITE_TRANSIENT);
+            else sqlite3_bind_null(stmt, 1);
+            sqlite3_bind_int64(stmt, 2, static_cast<int64_t>(out.size()));
+            sqlite3_bind_text(stmt, 3, mime.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt, 4, attachmentID);
+            sqlite3_step(stmt);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+    }
+    return true;
+}
+
+// Start async fetch to populate an existing attachment
+inline void Vault::asyncFetchAndStoreAttachment(int64_t attachmentID, const std::string& url){
+    // detach thread, do not block UI
+    std::thread([this, attachmentID, url](){
+        bool ok = fetchAttachmentNow(attachmentID, url);
+        if(ok){ statusMessage = "Attachment fetched"; statusTime = ImGui::GetTime(); }
+        else { statusMessage = "Failed to fetch attachment"; statusTime = ImGui::GetTime(); }
+    }).detach();
+}

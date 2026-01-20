@@ -10,7 +10,9 @@ namespace ImGui
 {
     // Main function to render markdown text
     IMGUI_API void MarkdownText(const char* text);
+    IMGUI_API void MarkdownText(const char* text, void* context);
     IMGUI_API void MarkdownText(const std::string& text);
+    IMGUI_API void MarkdownText(const std::string& text, void* context);
 
     // Convenience formatted versions
     template <typename... Args>

@@ -5,6 +5,8 @@
 #include <vector>
 #include <stack>
 #include <Fonts.hpp>
+#include "Vault.hpp"
+#include "Icons.hpp"
 
 // Minimal md4c->ImGui renderer using callbacks
 namespace ImGui {
@@ -14,6 +16,7 @@ struct MD4CRenderer {
     std::stack<MD_BLOCKTYPE> blocks;
     std::stack<MD_SPANTYPE> spans;
     std::string linkUrl;
+    void* ctx = nullptr;
     bool in_code_block = false;
     std::string code_lang;
 
@@ -106,6 +109,92 @@ struct MD4CRenderer {
         if(t == MD_SPAN_A){
             MD_SPAN_A_DETAIL* d = (MD_SPAN_A_DETAIL*)detail;
             if(d && d->href.text) r->linkUrl.assign(d->href.text, d->href.size); else r->linkUrl.clear();
+        } else if(t == MD_SPAN_IMG){
+            MD_SPAN_IMG_DETAIL* d = (MD_SPAN_IMG_DETAIL*)detail;
+            std::string src;
+            if(d && d->src.text) src.assign(d->src.text, d->src.size);
+            std::string label = "[image]";
+            try{ auto p = std::filesystem::path(src); if(!p.filename().empty()) label = p.filename().string(); } catch(...){}
+
+            // If we have a Vault context, attempt inline rendering and caching
+            if(r->ctx){
+                Vault* v = reinterpret_cast<Vault*>(r->ctx);
+                // vault attachment
+                const std::string prefix = "vault://attachment/";
+                if(src.rfind(prefix,0) == 0){
+                    std::string idstr = src.substr(prefix.size());
+                    try{
+                        int64_t aid = std::stoll(idstr);
+                        auto meta = v->getAttachmentMeta(aid);
+                        if(meta.size > 0){
+                            auto data = v->getAttachmentData(aid);
+                            if(!data.empty()){
+                                auto tex = LoadTextureFromMemory(std::string("vault:att:") + std::to_string(aid), data);
+                                if(tex.loaded){
+                                    float availW = GetContentRegionAvail().x;
+                                    float scale = 1.0f;
+                                    if(tex.width > availW) scale = availW / static_cast<float>(tex.width);
+                                    ImGui::Image((ImTextureID)(intptr_t)tex.textureID, ImVec2(tex.width*scale, tex.height*scale));
+                                    NewLine();
+                                    return 0;
+                                }
+                            }
+                        } else {
+                            // no data — try async fetch if ExternalPath present
+                            if(!meta.externalPath.empty()) v->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                        }
+                    } catch(...){}
+                    // fallback: show filename button that opens preview
+                    if(ImGui::SmallButton(label.c_str())) v->openPreviewFromSrc(src);
+                    return 0;
+                }
+
+                // http/https remote resource — check cache
+                if(src.rfind("http://",0) == 0 || src.rfind("https://",0) == 0){
+                    int64_t aid = v->findAttachmentByExternalPath(src);
+                    if(aid == -1){
+                        // create placeholder and start async fetch
+                        aid = v->addAttachmentFromURL(src);
+                        ImGui::Text("Fetching image: %s", label.c_str());
+                        return 0;
+                    }
+                    auto meta = v->getAttachmentMeta(aid);
+                    if(meta.size > 0){
+                        auto data = v->getAttachmentData(aid);
+                        if(!data.empty()){
+                            auto tex = LoadTextureFromMemory(std::string("vault:url:") + std::to_string(aid), data);
+                            if(tex.loaded){
+                                float availW = GetContentRegionAvail().x;
+                                float scale = 1.0f;
+                                if(tex.width > availW) scale = availW / static_cast<float>(tex.width);
+                                ImGui::Image((ImTextureID)(intptr_t)tex.textureID, ImVec2(tex.width*scale, tex.height*scale));
+                                NewLine();
+                                return 0;
+                            }
+                        }
+                    }
+                    ImGui::Text("Fetching image: %s", label.c_str());
+                    return 0;
+                }
+            }
+
+            // Fallback: show a placeholder small button (no context or unsupported scheme)
+            if(ImGui::SmallButton(label.c_str())){
+                // If no Vault context, we could open external viewer if path is local
+                try{ std::string p(src); if(p.rfind("file://",0)==0) p = p.substr(7); if(std::filesystem::exists(p)){
+                    // try to open preview using system default (not implemented)
+                }} catch(...){}
+            }
+            return 0;
+            // render a small button for images — clicking it opens preview if we have a Vault context
+            if(ImGui::SmallButton(label.c_str())){
+                if(r->ctx){
+                    Vault* v = reinterpret_cast<Vault*>(r->ctx);
+                    v->openPreviewFromSrc(src);
+                } else {
+                    // no context, try to open file directly by launching external viewer? not implemented
+                }
+            }
         }
         return 0;
     }
@@ -122,11 +211,14 @@ struct MD4CRenderer {
     }
 };
 
-void MarkdownText(const char* text){
+void MarkdownText(const char* text){ MarkdownText(text, nullptr); }
+
+void MarkdownText(const char* text, void* context){
     if(!text || !text[0]) return;
     ImGuiWindow* w = GetCurrentWindow(); if(w->SkipItems) return;
 
     MD4CRenderer renderer;
+    renderer.ctx = context;
     MD_PARSER parser = {0};
     parser.enter_block = MD4CRenderer::enter_block;
     parser.leave_block = MD4CRenderer::leave_block;
@@ -140,5 +232,6 @@ void MarkdownText(const char* text){
 }
 
 void MarkdownText(const std::string& text){ MarkdownText(text.c_str()); }
+void MarkdownText(const std::string& text, void* context){ MarkdownText(text.c_str(), context); }
 
 }

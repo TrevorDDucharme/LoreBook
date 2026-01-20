@@ -263,6 +263,8 @@ IconTexture LoadIconTexture(const std::string& iconName) {
         // Use regular stbi_load for filesystem
         image_data = stbi_load(filepath.c_str(), &texture.width, &texture.height, &channels, 4);
     }
+
+
     
     if (!image_data) {
         PLOGE << "Failed to load image: " << filepath << " - " << stbi_failure_reason();
@@ -295,6 +297,40 @@ IconTexture LoadIconTexture(const std::string& iconName) {
     
     PLOGI << "Loaded texture for icon: " << iconName << " (" << texture.width << "x" << texture.height << ")";
     return texture;
+}
+
+// Helper: dynamic texture cache and loader for in-memory images
+static std::unordered_map<std::string, IconTexture> s_dynamicTextures;
+
+// Load a generic image from raw bytes into GL texture and cache it by key
+IconTexture LoadTextureFromMemory(const std::string& key, const std::vector<uint8_t>& data) {
+    // Check cache
+    auto it = s_dynamicTextures.find(key);
+    if (it != s_dynamicTextures.end()) return it->second;
+
+    IconTexture texture;
+    int channels;
+    int w = 0, h = 0;
+    unsigned char* image_data = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &channels, 4);
+    if (!image_data) return texture;
+
+    texture.width = w; texture.height = h;
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, texture.width, texture.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
+    stbi_image_free(image_data);
+    texture.textureID = textureID; texture.loaded = true;
+    s_dynamicTextures[key] = texture;
+    return texture;
+}
+
+bool HasDynamicTexture(const std::string& key){
+    return s_dynamicTextures.find(key) != s_dynamicTextures.end();
 }
 
 // Draw an icon as an ImGui::Image using the original image file

@@ -90,6 +90,12 @@ struct IconTexture {
 // The texture is cached for subsequent calls
 IconTexture LoadIconTexture(const std::string& iconName);
 
+// Load a texture from raw image bytes in memory (PNG/JPEG/etc) and cache it using provided key
+IconTexture LoadTextureFromMemory(const std::string& key, const std::vector<uint8_t>& data);
+
+// Check if a dynamic texture exists by key
+bool HasDynamicTexture(const std::string& key);
+
 // Get the dimensions of an icon
 bool GetIconDimensions(const std::string& iconName, int& width, int& height);
 
