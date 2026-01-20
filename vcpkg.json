@@ -37,6 +37,7 @@
 		"sqlite3",
 		"implot",
 		"implot3d",
-		"md4c"
+		"md4c",
+		"assimp"
 	]
 }

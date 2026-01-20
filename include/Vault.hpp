@@ -17,6 +17,8 @@
 #include <mutex>
 #include <curl/curl.h>
 #include <thread>
+#include <memory>
+#include "ModelViewer.hpp"
 
 class Vault{
     // forward declaration for chat render helper
@@ -64,6 +66,16 @@ class Vault{
     bool previewIsRaw = false;
     char attachPathBuf[1024] = "";
     char attachmentSavePathBuf[1024] = "";
+
+    // Model viewer state
+    bool showModelViewer = false;
+    std::unique_ptr<ModelViewer> modelViewer;
+
+    // Cached per-src inline model viewers (keyed by original src string)
+    std::unordered_map<std::string, std::unique_ptr<ModelViewer>> modelViewerCache;
+
+    // Pending reload requests from background fetches; entries are src keys (external URL or vault://attachment/<id>)
+    std::vector<std::string> pendingViewerReloads;
 
     // Per-node child filters (display-only). Keys are node IDs; values are a filter spec.
     struct ChildFilterSpec { std::string mode = "AND"; std::vector<std::string> tags; std::string expr; };
@@ -173,6 +185,12 @@ public:
 
     // Open an attachment (or file) referenced by a markdown src (e.g. vault://attachment/123 or file:///path/to/img.png)
     void openPreviewFromSrc(const std::string& src);
+
+    // Open a model preview (loads into ModelViewer).
+    void openModelFromSrc(const std::string& src);
+
+    // Get or create an inline ModelViewer for a markdown src (vault://..., http(s) or file://). The returned viewer may not be loaded yet.
+    ModelViewer* getOrCreateModelViewerForSrc(const std::string& src);
 
     Vault(std::filesystem::path dbPath,std::string vaultName){
         name = vaultName;
@@ -1060,6 +1078,26 @@ public:
         ImGui::Separator();
         // Render markdown using our MarkdownText helper (pass Vault context for attachment previews)
         ImGui::MarkdownText(currentContent.c_str(), this);
+
+        // Process pending model viewer reloads triggered by background fetches
+        {
+            std::vector<std::string> pending;
+            {
+                std::lock_guard<std::mutex> l(dbMutex);
+                if(!pendingViewerReloads.empty()) pending.swap(pendingViewerReloads);
+            }
+            for(const auto &k : pending){
+                auto it = modelViewerCache.find(k);
+                if(it != modelViewerCache.end()){
+                    int64_t aid = -1;
+                    const std::string vpfx = "vault://attachment/";
+                    if(k.rfind(vpfx,0) == 0){ try{ aid = std::stoll(k.substr(vpfx.size())); } catch(...){} }
+                    else aid = findAttachmentByExternalPath(k);
+                    if(aid != -1){ auto meta = getAttachmentMeta(aid); if(meta.size>0){ auto d = getAttachmentData(aid); if(!d.empty()){ it->second->loadFromMemory(d, meta.name); statusMessage = "Model cached and ready"; statusTime = ImGui::GetTime(); } } }
+                }
+            }
+        }
+
         ImGui::EndChild();
 
         // Meta area: Tags & Parents (bottom) — resizable by dragging the splitter above
@@ -1277,6 +1315,77 @@ public:
                     }
                 }
                 ImGui::Separator();
+                // If model mime/extension, offer "View Model"
+                auto checkAndShowModelBtn = [&](const std::string& mime, const std::string& filename, const std::vector<uint8_t>& raw, int64_t attID)->void{
+                    auto isModelExt = [&](const std::string& f)->bool{
+                        std::string ext = f;
+                        try{ std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower); }
+                        catch(...){}
+                        if(ext.rfind('.',0) != 0) {
+                            size_t pos = ext.find_last_of('.'); if(pos!=std::string::npos) ext = ext.substr(pos);
+                        }
+                        static const std::vector<std::string> models = {".obj",".fbx",".gltf",".glb",".ply",".dae",".stl"};
+                        for(auto &m: models) if(ext == m) return true;
+                        if(mime.find("model") != std::string::npos) return true;
+                        return false;
+                    };
+                    if(isModelExt(filename)){
+                        ImGui::SameLine();
+                        if(ImGui::Button("View Model")){
+                            // ensure modelViewer exists
+                            if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
+                            // load from available data if present
+                            std::vector<uint8_t> d;
+                            if(attID >= 0){ d = getAttachmentData(attID); }
+                            else d = raw;
+                            if(!d.empty()){
+                                if(modelViewer->loadFromMemory(d, filename)){
+                                    showModelViewer = true;
+                                } else {
+                                    statusMessage = "Failed to load model"; statusTime = ImGui::GetTime();
+                                }
+                            } else {
+                                // try fetch if external path exists
+                                if(attID >= 0){ auto meta = getAttachmentMeta(attID); if(!meta.externalPath.empty()){ asyncFetchAndStoreAttachment(attID, meta.externalPath); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); } }
+                                else { statusMessage = "No data to load"; statusTime = ImGui::GetTime(); }
+                            }
+                        }
+                    }
+                };
+
+                if(previewIsRaw && previewAttachmentID == -1){
+                    checkAndShowModelBtn(previewMime, previewName, previewRawData, -1);
+                    ImGui::Separator();
+                    // Save As
+                    ImGui::InputText("##savepath", attachmentSavePathBuf, sizeof(attachmentSavePathBuf)); ImGui::SameLine();
+                    if(ImGui::Button("Save As")){
+                        std::string outp(attachmentSavePathBuf);
+                        if(!outp.empty()){
+                            std::ofstream of(outp, std::ios::binary);
+                            if(of){ of.write(reinterpret_cast<const char*>(previewRawData.data()), previewRawData.size()); of.close(); statusMessage = "Saved"; statusTime = ImGui::GetTime(); }
+                            else { statusMessage = "Failed to save"; statusTime = ImGui::GetTime(); }
+                        }
+                    }
+                } else {
+                    auto meta = getAttachmentMeta(previewAttachmentID);
+                    checkAndShowModelBtn(meta.mimeType, meta.name, std::vector<uint8_t>(), meta.id);
+                    ImGui::Text("Name: %s", meta.name.c_str());
+                    ImGui::Text("Mime: %s", meta.mimeType.c_str());
+                    ImGui::Text("Size: %lld bytes", (long long)meta.size);
+                    ImGui::Separator();
+                    // Save As
+                    ImGui::InputText("##savepath", attachmentSavePathBuf, sizeof(attachmentSavePathBuf)); ImGui::SameLine();
+                    if(ImGui::Button("Save As")){
+                        std::string outp(attachmentSavePathBuf);
+                        if(!outp.empty()){
+                            auto data = getAttachmentData(meta.id);
+                            std::ofstream of(outp, std::ios::binary);
+                            if(of){ of.write(reinterpret_cast<const char*>(data.data()), data.size()); of.close(); statusMessage = "Saved"; statusTime = ImGui::GetTime(); }
+                            else { statusMessage = "Failed to save"; statusTime = ImGui::GetTime(); }
+                        }
+                    }
+                }
+                ImGui::Separator();
                 if(ImGui::Button("Close")) { ImGui::CloseCurrentPopup(); showAttachmentPreview = false; }
                 ImGui::EndPopup();
             }
@@ -1291,6 +1400,10 @@ public:
         ImGui::EndChild();
 
         ImGui::End();
+
+        // Model viewer window (dockable)
+        if(showModelViewer && modelViewer){ modelViewer->renderWindow("Model Viewer", &showModelViewer); }
+
     }
 
     // Manage DB lifetime safely and prevent accidental copies
@@ -2078,18 +2191,123 @@ inline void Vault::openPreviewFromSrc(const std::string& src){
     statusMessage = "Unsupported preview source"; statusTime = ImGui::GetTime();
 }
 
+inline void Vault::openModelFromSrc(const std::string& src){
+    // Try vault attachment first
+    const std::string prefix = "vault://attachment/";
+    if(src.rfind(prefix,0)==0){
+        std::string idstr = src.substr(prefix.size());
+        try{
+            int64_t aid = std::stoll(idstr);
+            auto data = getAttachmentData(aid);
+            auto meta = getAttachmentMeta(aid);
+            if(!data.empty()){
+                if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
+                if(modelViewer->loadFromMemory(data, meta.name)) showModelViewer = true;
+                else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); }
+                return;
+            } else {
+                if(!meta.externalPath.empty()){ asyncFetchAndStoreAttachment(aid, meta.externalPath); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); }
+                else { statusMessage = "Model data missing"; statusTime = ImGui::GetTime(); }
+            }
+        } catch(...){}
+        return;
+    }
+
+    // http(s)
+    if(src.rfind("http://",0)==0 || src.rfind("https://",0)==0){
+        int64_t aid = findAttachmentByExternalPath(src);
+        if(aid == -1) aid = addAttachmentFromURL(src);
+        if(aid != -1){ auto meta = getAttachmentMeta(aid); if(meta.size>0){ auto data = getAttachmentData(aid); if(!data.empty()){ if(!modelViewer) modelViewer = std::make_unique<ModelViewer>(); if(modelViewer->loadFromMemory(data, meta.name)) showModelViewer = true; else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); } return; } } else { asyncFetchAndStoreAttachment(aid, src); statusMessage = "Fetching model..."; statusTime = ImGui::GetTime(); return; } }
+        statusMessage = "Failed to prepare remote model"; statusTime = ImGui::GetTime(); return;
+    }
+
+    // file path
+    std::string path = src;
+    if(src.rfind("file://",0)==0) path = src.substr(7);
+    try{
+        if(std::filesystem::exists(path) && std::filesystem::is_regular_file(path)){
+            std::ifstream in(path, std::ios::binary);
+            if(in){ std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                if(!modelViewer) modelViewer = std::make_unique<ModelViewer>();
+                if(modelViewer->loadFromMemory(d, path)) showModelViewer = true; else { statusMessage = "Failed to load model"; statusTime = ImGui::GetTime(); }
+                return;
+            }
+        }
+    } catch(...){}
+    statusMessage = "Unsupported model source"; statusTime = ImGui::GetTime();
+}
+
 // Find an attachment by ExternalPath (URL or path), returns -1 if not found
+// This routine attempts multiple normalizations: exact match, strip "vault://" prefix, and basename-like matches
 inline int64_t Vault::findAttachmentByExternalPath(const std::string& path){
     if(!dbConnection) return -1;
-    const char* sql = "SELECT ID FROM Attachments WHERE ExternalPath = ? LIMIT 1;";
-    sqlite3_stmt* stmt = nullptr;
     int64_t out = -1;
-    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+    // Exact match first
+    const char* exactSQL = "SELECT ID FROM Attachments WHERE ExternalPath = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, exactSQL, -1, &stmt, nullptr) == SQLITE_OK){
         sqlite3_bind_text(stmt, 1, path.c_str(), -1, SQLITE_TRANSIENT);
         if(sqlite3_step(stmt) == SQLITE_ROW) out = sqlite3_column_int64(stmt, 0);
     }
     if(stmt) sqlite3_finalize(stmt);
+    if(out != -1) return out;
+
+    // Try stripping vault:// prefix
+    std::string p = path;
+    const std::string vpre = "vault://";
+    if(p.rfind(vpre, 0) == 0) p = p.substr(vpre.size());
+
+    // Try exact without prefix and with leading slash
+    const char* altSQL = "SELECT ID FROM Attachments WHERE ExternalPath = ? OR ExternalPath = ? OR ExternalPath LIKE '%' || ? LIMIT 1;";
+    stmt = nullptr;
+    try{
+        std::string p_slash = std::string("/") + p;
+        std::string basename = std::filesystem::path(p).filename().string();
+        if(sqlite3_prepare_v2(dbConnection, altSQL, -1, &stmt, nullptr) == SQLITE_OK){
+            sqlite3_bind_text(stmt, 1, p.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, p_slash.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, basename.c_str(), -1, SQLITE_TRANSIENT);
+            if(sqlite3_step(stmt) == SQLITE_ROW) out = sqlite3_column_int64(stmt, 0);
+        }
+    } catch(...){ }
+    if(stmt) sqlite3_finalize(stmt);
     return out;
+}
+
+// Get or create an inline ModelViewer for a markdown src
+inline ModelViewer* Vault::getOrCreateModelViewerForSrc(const std::string& src){
+    auto it = modelViewerCache.find(src);
+    if(it != modelViewerCache.end()) return it->second.get();
+
+    auto mv = std::make_unique<ModelViewer>();
+    // texture resolver tries relative -> exact -> basename against attachments
+    mv->setTextureLoader([this, src](const std::string& path)->std::vector<uint8_t>{
+        std::vector<uint8_t> empty;
+        try{
+            int64_t aid = findAttachmentByExternalPath(src);
+            if(aid != -1){ auto meta = getAttachmentMeta(aid); if(!meta.externalPath.empty()){
+                try{ auto baseDir = std::filesystem::path(meta.externalPath).parent_path(); if(!baseDir.empty()){ auto cand = (baseDir / path).string(); int64_t aid2 = findAttachmentByExternalPath(cand); if(aid2 != -1) return getAttachmentData(aid2); } }catch(...){}
+            } }
+            int64_t aid3 = findAttachmentByExternalPath(path);
+            if(aid3 != -1) return getAttachmentData(aid3);
+            std::string base = std::filesystem::path(path).filename().string(); if(!base.empty()){ int64_t aid4 = findAttachmentByExternalPath(base); if(aid4 != -1) return getAttachmentData(aid4); }
+        } catch(...){ }
+        return empty;
+    });
+
+    // Try to pre-load model if already cached
+    const std::string prefix = "vault://attachment/";
+    if(src.rfind(prefix,0) == 0){
+        try{ int64_t aid = std::stoll(src.substr(prefix.size())); auto meta = getAttachmentMeta(aid); if(meta.size>0){ auto data = getAttachmentData(aid); if(!data.empty()) mv->loadFromMemory(data, meta.name); } else { if(!meta.externalPath.empty()) asyncFetchAndStoreAttachment(meta.id, meta.externalPath); } } catch(...){}
+    } else if(src.rfind("http://",0)==0 || src.rfind("https://",0)==0){
+        int64_t aid = findAttachmentByExternalPath(src);
+        if(aid != -1){ auto meta = getAttachmentMeta(aid); if(meta.size>0){ auto data = getAttachmentData(aid); if(!data.empty()) mv->loadFromMemory(data, meta.name); } else { asyncFetchAndStoreAttachment(aid, src); } } else { addAttachmentFromURL(src); }
+    } else {
+        std::string path = src; if(src.rfind("file://",0)==0) path = src.substr(7);
+        try{ if(std::filesystem::exists(path) && std::filesystem::is_regular_file(path)){ std::ifstream in(path, std::ios::binary); if(in){ std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()); if(!d.empty()) mv->loadFromMemory(d, path); } } } catch(...){ }
+    }
+
+    ModelViewer* out = mv.get(); modelViewerCache[src] = std::move(mv); return out;
 }
 
 // Add an attachment record referencing the external URL (creates placeholder and spawns async fetch), returns attachment id
@@ -2196,7 +2414,17 @@ inline void Vault::asyncFetchAndStoreAttachment(int64_t attachmentID, const std:
     // detach thread, do not block UI
     std::thread([this, attachmentID, url](){
         bool ok = fetchAttachmentNow(attachmentID, url);
-        if(ok){ statusMessage = "Attachment fetched"; statusTime = ImGui::GetTime(); }
+        if(ok){
+            statusMessage = "Attachment fetched"; statusTime = ImGui::GetTime();
+            // enqueue reload for any inline model viewers that reference this external path or attachment id
+            std::lock_guard<std::mutex> l(dbMutex);
+            try{
+                auto meta = getAttachmentMeta(attachmentID);
+                if(!meta.externalPath.empty()) pendingViewerReloads.push_back(meta.externalPath);
+                // also add vault://attachment/<id> key so viewers keyed by attachment uri reload as well
+                pendingViewerReloads.push_back(std::string("vault://attachment/") + std::to_string(attachmentID));
+            } catch(...){}
+        }
         else { statusMessage = "Failed to fetch attachment"; statusTime = ImGui::GetTime(); }
     }).detach();
 }
