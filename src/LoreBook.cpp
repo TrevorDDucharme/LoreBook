@@ -96,6 +96,10 @@ int main(int argc, char** argv)
     static BrowserMode browserMode = BrowserMode::None;
     static std::filesystem::path browserPath;
     static std::string browserSelectedFile;
+    // When a file is opened from the file picker successfully, request the parent Open modal to close
+    static bool requestCloseOpenVaultModal = false;
+    // When set by the file selector, request automatic opening of the selected file (legacy fallback)
+    static bool openVaultAutoOpenRequested = false;
 
     // initialize directory buffers with current path once
     strncpy(createVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(createVaultDirBuf));
@@ -136,9 +140,12 @@ int main(int argc, char** argv)
             ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
             ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
             ImGuiID dock_main_id = dockspace_id;
+            // Split: left for Vault Tree, right for Vault Graph, center for Vault Content
             ImGuiID dock_id_left = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
+            ImGuiID dock_id_right = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.25f, nullptr, &dock_main_id);
             ImGui::DockBuilderDockWindow("Vault Tree", dock_id_left);
             ImGui::DockBuilderDockWindow("Vault Content", dock_main_id);
+            ImGui::DockBuilderDockWindow("Vault Graph", dock_id_right);
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }
@@ -262,6 +269,52 @@ int main(int argc, char** argv)
                 browserMode = BrowserMode::BrowseForOpenFile;
                 browserPath = std::filesystem::path(openVaultDirBuf);
                 browserSelectedFile.clear();
+            }
+
+            // If a file was selected in the file browser, handle it like the Open button was pressed
+            if(openVaultAutoOpenRequested){
+                // legacy fallback: process immediately and clear the flag so it doesn't trigger later
+                openVaultAutoOpenRequested = false;
+                std::string dirStr(openVaultDirBuf);
+                std::string nameStr(openVaultNameBuf);
+                if(nameStr.empty()){
+                    strncpy(openVaultError, "Filename cannot be empty", sizeof(openVaultError));
+                } else {
+                    try{
+                        std::filesystem::path full;
+                        std::filesystem::path namePath(nameStr);
+                        std::filesystem::path dirPath(dirStr);
+                        if(namePath.is_absolute()){
+                            full = namePath;
+                        } else {
+                            full = dirPath / namePath;
+                        }
+                        if(!std::filesystem::exists(full) || !std::filesystem::is_regular_file(full)){
+                            strncpy(openVaultError, "File does not exist", sizeof(openVaultError));
+                        } else {
+                            // open using directory + filename
+                            std::filesystem::path parent = full.parent_path();
+                            std::string fname = full.filename().string();
+                            Vault v(parent, fname);
+                            if(!v.isOpen()){
+                                strncpy(openVaultError, "Failed to open database file.", sizeof(openVaultError));
+                            } else {
+                                vault = std::make_unique<Vault>(std::move(v));
+                                ImGui::CloseCurrentPopup();
+                                showOpenVaultModal = false;
+                            }
+                        }
+                    } catch(const std::exception &ex){
+                        strncpy(openVaultError, ex.what(), sizeof(openVaultError));
+                    }
+                }
+            }
+
+            // If requested (e.g., the file selector opened and succeeded), close this Open modal now
+            if(requestCloseOpenVaultModal){
+                requestCloseOpenVaultModal = false;
+                ImGui::CloseCurrentPopup();
+                showOpenVaultModal = false;
             }
 
             if(openVaultError[0] != '\0'){
@@ -401,15 +454,80 @@ int main(int argc, char** argv)
                     std::string fname = f.path().filename().string();
                     bool sel = (browserSelectedFile == fname);
                     if(ImGui::Selectable(fname.c_str(), sel)){
-                        browserSelectedFile = fname;
-                    }
-                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()){
+                        // Single-click accepts the file immediately and attempt to open it
                         browserSelectedFile = fname;
                         strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
                         openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
                         strncpy(openVaultNameBuf, browserSelectedFile.c_str(), sizeof(openVaultNameBuf));
                         openVaultNameBuf[sizeof(openVaultNameBuf)-1] = '\0';
-                        ImGui::CloseCurrentPopup();
+
+                        // Attempt to open immediately so the action completes where the user clicked
+                        try{
+                            std::filesystem::path full = browserPath / fname;
+                            if(!std::filesystem::exists(full) || !std::filesystem::is_regular_file(full)){
+                                strncpy(openVaultError, "File does not exist or is not a regular file", sizeof(openVaultError));
+                                // Close file picker and re-open Open dialog so user sees error
+                                ImGui::CloseCurrentPopup();
+                                showOpenVaultModal = true;
+                            } else {
+                                std::filesystem::path parent = full.parent_path();
+                                std::string fonly = full.filename().string();
+                                Vault v(parent, fonly);
+                                if(!v.isOpen()){
+                                    strncpy(openVaultError, "Failed to open database file.", sizeof(openVaultError));
+                                    ImGui::CloseCurrentPopup();
+                                    showOpenVaultModal = true;
+                                } else {
+                                    vault = std::make_unique<Vault>(std::move(v));
+                                    openVaultError[0] = '\0';
+                                    // Close the file picker now and request the parent Open modal to close too
+                                    ImGui::CloseCurrentPopup();
+                                    showOpenVaultModal = false;
+                                    requestCloseOpenVaultModal = true;
+                                }
+                            }
+                        } catch(const std::exception &ex){
+                            strncpy(openVaultError, ex.what(), sizeof(openVaultError));
+                            ImGui::CloseCurrentPopup();
+                            showOpenVaultModal = true;
+                        }
+                    }
+                    // Also accept on double-click for convenience
+                    if(ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && ImGui::IsItemHovered()){
+                        // Duplicate single-click behavior
+                        browserSelectedFile = fname;
+                        strncpy(openVaultDirBuf, browserPath.string().c_str(), sizeof(openVaultDirBuf));
+                        openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+                        strncpy(openVaultNameBuf, browserSelectedFile.c_str(), sizeof(openVaultNameBuf));
+                        openVaultNameBuf[sizeof(openVaultNameBuf)-1] = '\0';
+
+                        try{
+                            std::filesystem::path full = browserPath / fname;
+                            if(!std::filesystem::exists(full) || !std::filesystem::is_regular_file(full)){
+                                strncpy(openVaultError, "File does not exist or is not a regular file", sizeof(openVaultError));
+                                ImGui::CloseCurrentPopup();
+                                showOpenVaultModal = true;
+                            } else {
+                                std::filesystem::path parent = full.parent_path();
+                                std::string fonly = full.filename().string();
+                                Vault v(parent, fonly);
+                                if(!v.isOpen()){
+                                    strncpy(openVaultError, "Failed to open database file.", sizeof(openVaultError));
+                                    ImGui::CloseCurrentPopup();
+                                    showOpenVaultModal = true;
+                                } else {
+                                    vault = std::make_unique<Vault>(std::move(v));
+                                    openVaultError[0] = '\0';
+                                    ImGui::CloseCurrentPopup();
+                                    showOpenVaultModal = false;
+                                    requestCloseOpenVaultModal = true;
+                                }
+                            }
+                        } catch(const std::exception &ex){
+                            strncpy(openVaultError, ex.what(), sizeof(openVaultError));
+                            ImGui::CloseCurrentPopup();
+                            showOpenVaultModal = true;
+                        }
                     }
                 }
             } catch(...){}

@@ -119,17 +119,26 @@ void GraphView::updateAndDraw(float dt){
     ImGui::Checkbox("Show Labels", &showLabels);
     ImGui::Checkbox("Show Edges", &showEdges);
 
-    // Tags UI (from Vault)
+    // Tags UI (from Vault) — synced with Vault's active filter
     if(ImGui::CollapsingHeader("Tags", ImGuiTreeNodeFlags_DefaultOpen)){
         // refresh tags
         allTags = vault ? vault->getAllTagsPublic() : std::vector<std::string>();
+
+        // Sync toggles from Vault's active filter so changes in Tree view are reflected here
+        std::vector<std::string> vaultActive = vault ? vault->getActiveTagFilterPublic() : std::vector<std::string>();
+        std::unordered_set<std::string> activeSet(vaultActive.begin(), vaultActive.end());
         for(auto &t : allTags){
-            if(tagToggles.find(t) == tagToggles.end()) tagToggles[t] = false;
+            tagToggles[t] = (activeSet.find(t) != activeSet.end());
         }
+        // Sync mode from Vault
+        if(vault) tagModeAll = vault->getTagFilterModeAllPublic();
+
         ImGui::Text("Mode:"); ImGui::SameLine();
         if(ImGui::RadioButton("All (AND)", tagModeAll)) tagModeAll = true; ImGui::SameLine();
         if(ImGui::RadioButton("Any (OR)", !tagModeAll)) tagModeAll = false;
         ImGui::NewLine();
+
+        bool changed = false;
         for(auto &t : allTags){
             // color swatch
             ImU32 col = 0xFF000000;
@@ -146,15 +155,15 @@ void GraphView::updateAndDraw(float dt){
             ImGui::SameLine();
             bool prev = tagToggles[t];
             if(ImGui::Checkbox((std::string(" ") + t).c_str(), &tagToggles[t])){
-                // toggled
+                changed = true;
             }
         }
-        // After possible toggles, inform Vault of current active tags
-        if(vault){
+        if(changed && vault){
             std::vector<std::string> active;
             for(auto &kv : tagToggles) if(kv.second) active.push_back(kv.first);
             vault->setTagFilter(active, tagModeAll);
-        }    }
+        }
+    }
 
     // Canvas area
     ImVec2 canvasSize = ImGui::GetContentRegionAvail();
