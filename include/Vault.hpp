@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <sstream>
+#include <queue>
 #include <cctype>
 #include <fstream>
 #include <cstring>
@@ -58,6 +59,8 @@ class Vault{
     std::filesystem::path importPath = std::filesystem::current_path();
     std::unordered_set<std::string> importSelectedFiles;
     int64_t importParentID = -1;
+    // Path (ancestors) captured at modal open so imports inherit tags from the exact UI path
+    std::vector<int64_t> importParentPath;
 
     // Import Asset UI state (file browser and upload)
     bool showImportAssetModal = false;
@@ -548,8 +551,18 @@ public:
             if(ImGui::Button("Create")){
                 std::string nameStr(newNoteName);
                 int64_t parent = (selectedItemID >= 0) ? selectedItemID : getOrCreateRoot();
+                // Use union-of-ancestors as a toolbar fallback (no explicit UI path available)
+                std::vector<std::string> inherited;
+                if(selectedItemID >= 0) inherited = collectTagsUnionFromNode(parent);
                 int64_t nid = createItem(nameStr, parent);
                 if(nid != -1){
+                    if(!inherited.empty()){
+                        setTagsFor(nid, inherited);
+                        std::string s;
+                        for(size_t ii=0; ii<inherited.size(); ++ii){ if(ii) s += ","; s += inherited[ii]; }
+                        statusMessage = std::string("Inherited tags: ") + s;
+                        statusTime = ImGui::GetTime();
+                    }
                     selectedItemID = nid;
                 }
                 ImGui::CloseCurrentPopup();
@@ -618,7 +631,15 @@ public:
                     if(ImGui::BeginPopupContextItem((std::string("ctx") + std::to_string(id)).c_str())){
                         if(ImGui::MenuItem("New Child")){
                             int64_t nid = createItem("New Note", id);
-                            if(nid != -1) selectedItemID = nid;
+                            if(nid != -1){
+                                auto inherited = collectTagsUnionFromNode(id);
+                                if(!inherited.empty()){
+                                    setTagsFor(nid, inherited);
+                                    std::string s; for(size_t ii=0; ii<inherited.size(); ++ii){ if(ii) s += ","; s += inherited[ii]; }
+                                    statusMessage = std::string("Inherited tags: ") + s; statusTime = ImGui::GetTime();
+                                }
+                                selectedItemID = nid;
+                            }
                         }
                         if(ImGui::MenuItem("Rename")){
                             renameTargetID = id;
@@ -632,6 +653,7 @@ public:
                         if(ImGui::MenuItem("Import Markdown...")){
                             showImportModal = true;
                             importParentID = id;
+                            importParentPath.clear(); importParentPath.push_back(id);
                             importPath = std::filesystem::current_path();
                             importSelectedFiles.clear();
                         }
@@ -732,7 +754,8 @@ public:
                         std::ostringstream ss; ss << in.rdbuf();
                         std::string content = ss.str();
                         std::string title = full.stem().string();
-                        int64_t id = createItemWithContent(title, content, {}, importParentID);
+                        std::vector<std::string> inherited = collectTagsFromPath(importParentPath);
+                        int64_t id = createItemWithContent(title, content, inherited, importParentID);
                         if(id > 0){ imported++; lastId = id; }
                     } catch(...){ }
                 }
@@ -929,7 +952,8 @@ public:
                         std::ostringstream ss; ss << in.rdbuf();
                         std::string content = ss.str();
                         std::string title = full.stem().string();
-                        int64_t id = createItemWithContent(title, content, {}, importParentID);
+                        std::vector<std::string> inherited = collectTagsFromPath(importParentPath);
+                        int64_t id = createItemWithContent(title, content, inherited, importParentID);
                         if(id > 0){ imported++; lastId = id; }
                     } catch(...){ }
                 }
@@ -1946,8 +1970,17 @@ private:
             // Context menu for leaf node
             if(ImGui::BeginPopupContextItem("node_context")){
                 if(ImGui::MenuItem("New Child")){
+                    std::vector<int64_t> fullPath = path; fullPath.push_back(nodeID);
                     int64_t nid = createItem("New Note", nodeID);
-                    if(nid != -1) selectedItemID = nid;
+                    if(nid != -1){
+                        auto inherited = collectTagsFromPath(fullPath);
+                        if(!inherited.empty()){
+                            setTagsFor(nid, inherited);
+                            std::string s; for(size_t ii=0; ii<inherited.size(); ++ii){ if(ii) s += ","; s += inherited[ii]; }
+                            statusMessage = std::string("Inherited tags: ") + s; statusTime = ImGui::GetTime();
+                        }
+                        selectedItemID = nid;
+                    }
                 }
                 if(ImGui::MenuItem("Rename")){
                     renameTargetID = nodeID;
@@ -1961,6 +1994,7 @@ private:
                 if(ImGui::MenuItem("Import Markdown...")){
                     showImportModal = true;
                     importParentID = nodeID;
+                    importParentPath = path; importParentPath.push_back(nodeID);
                     importPath = std::filesystem::current_path();
                     importSelectedFiles.clear();
                 }
@@ -1996,8 +2030,17 @@ private:
             // Context menu for tree node (right-click the label)
             if(ImGui::BeginPopupContextItem("node_context")){
                 if(ImGui::MenuItem("New Child")){
+                    std::vector<int64_t> fullPath = path; fullPath.push_back(nodeID);
                     int64_t nid = createItem("New Note", nodeID);
-                    if(nid != -1) selectedItemID = nid;
+                    if(nid != -1){
+                        auto inherited = collectTagsFromPath(fullPath);
+                        if(!inherited.empty()){
+                            setTagsFor(nid, inherited);
+                            std::string s; for(size_t ii=0; ii<inherited.size(); ++ii){ if(ii) s += ","; s += inherited[ii]; }
+                            statusMessage = std::string("Inherited tags: ") + s; statusTime = ImGui::GetTime();
+                        }
+                        selectedItemID = nid;
+                    }
                 }
                 if(ImGui::MenuItem("Rename")){
                     renameTargetID = nodeID;
@@ -2011,6 +2054,7 @@ private:
                 if(ImGui::MenuItem("Import Markdown...")){
                     showImportModal = true;
                     importParentID = nodeID;
+                    importParentPath = path; importParentPath.push_back(nodeID);
                     importPath = std::filesystem::current_path();
                     importSelectedFiles.clear();
                 }
@@ -2226,6 +2270,48 @@ private:
     std::string joinTags(const std::vector<std::string> &tags){
         std::string out;
         for(size_t i=0;i<tags.size();++i){ if(i) out += ","; out += tags[i]; }
+        return out;
+    }
+
+    // Collect tags along a specific UI path (path contains ancestor IDs from root..node).
+    // We iterate from nearest parent to root so immediate parent's tags take precedence.
+    std::vector<std::string> collectTagsFromPath(const std::vector<int64_t> &path){
+        std::vector<std::string> out;
+        std::unordered_set<std::string> seenLower;
+        for(int i = (int)path.size()-1; i >= 0; --i){
+            int64_t id = path[i];
+            try{
+                auto tags = parseTags(getTagsOf(id));
+                for(auto &t : tags){
+                    std::string low = toLowerCopy(t);
+                    if(seenLower.insert(low).second) out.push_back(t);
+                }
+            } catch(...){ }
+        }
+        return out;
+    }
+
+    // Fallback: collect union of ancestor tags reachable from a node (BFS upward), nearest ancestors first
+    std::vector<std::string> collectTagsUnionFromNode(int64_t nodeID){
+        std::vector<std::string> out;
+        if(nodeID < 0) return out;
+        std::unordered_set<std::string> seenLower;
+        std::vector<int64_t> q;
+        std::unordered_set<int64_t> visited;
+        q.push_back(nodeID); visited.insert(nodeID);
+        size_t qi = 0;
+        while(qi < q.size()){
+            int64_t cur = q[qi++];
+            try{
+                auto tags = parseTags(getTagsOf(cur));
+                for(auto &t : tags){
+                    std::string low = toLowerCopy(t);
+                    if(seenLower.insert(low).second) out.push_back(t);
+                }
+                auto parents = getParentsOf(cur);
+                for(auto p : parents){ if(visited.insert(p).second) q.push_back(p); }
+            } catch(...){ }
+        }
         return out;
     }
 
