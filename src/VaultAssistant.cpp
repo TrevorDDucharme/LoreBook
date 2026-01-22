@@ -173,27 +173,47 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
         PLOGD << "[RAG][keywords] keywords: " << ks.str();
     } catch(...){ }
 
-    // Build SQL that checks lower(Name) LIKE '%kw%' OR lower(Content) LIKE '%kw%' OR lower(Tags) LIKE '%kw%'
+    // Build SQL that prioritizes nodes with Name matches, then sorts by total keyword occurrence count.
     sqlite3* db = vault_->getDBPublic();
     if(!db) return out;
 
-    std::string sql = "SELECT ID, Name, Content, Tags FROM VaultItems WHERE ";
+    // Build a score expression: for each keyword give a large boost if it appears in Name (priority),
+    // plus add the occurrence counts across Name/Content/Tags.
+    std::string scoreExpr;
     for(size_t i=0;i<keywords.size();++i){
-        if(i) sql += " OR ";
-        sql += "(lower(Name) LIKE ? OR lower(Content) LIKE ? OR lower(Tags) LIKE ? )";
+        if(i) scoreExpr += " + ";
+        scoreExpr += "(CASE WHEN INSTR(lower(Name), ?) > 0 THEN 100000 ELSE 0 END) + ((LENGTH(lower(Name)) - LENGTH(REPLACE(lower(Name), ?, ''))) + (LENGTH(lower(Content)) - LENGTH(REPLACE(lower(Content), ?, ''))) + (LENGTH(lower(Tags)) - LENGTH(REPLACE(lower(Tags), ?, ''))))";
     }
-    sql += " LIMIT ?;";
+
+    std::string whereExpr;
+    for(size_t i=0;i<keywords.size();++i){
+        if(i) whereExpr += " OR ";
+        whereExpr += "(INSTR(lower(Name), ?) > 0 OR INSTR(lower(Content), ?) > 0 OR INSTR(lower(Tags), ?) > 0)";
+    }
+
+    std::string sql = "SELECT ID, Name, Content, Tags, (" + scoreExpr + ") AS score FROM VaultItems WHERE " + whereExpr + " ORDER BY score DESC LIMIT ?;";
+
+    PLOGD << "[RAG][sql] " << (sql.size() > 2000 ? std::string(sql.c_str(), 2000) + "...(truncated)" : sql);
 
     sqlite3_stmt* stmt = nullptr;
     if(sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK){
         int bindIdx = 1;
+        // For each keyword we bound: INSTR(Name) ?, REPLACE(Name) ?, REPLACE(Content) ?, REPLACE(Tags) ?  => 4 binds per keyword
+        // then in WHERE: INSTR(Name) ?, INSTR(Content) ?, INSTR(Tags) ? => 3 binds per keyword
         for(const auto &kw : keywords){
-            std::string pattern = std::string("%") + kw + "%";
-            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+            // expression binds
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(Name)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Name)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Content)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Tags)
+        }
+        for(const auto &kw : keywords){
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Name)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Content)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Tags)
         }
         sqlite3_bind_int(stmt, bindIdx++, k);
+        int rowCount = 0;
         while(sqlite3_step(stmt) == SQLITE_ROW){
             Node n;
             n.id = sqlite3_column_int64(stmt,0);
@@ -204,7 +224,9 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
             n.content = cont ? reinterpret_cast<const char*>(cont) : std::string();
             n.tags = tags ? reinterpret_cast<const char*>(tags) : std::string();
             out.push_back(n);
+            ++rowCount;
         }
+        PLOGD << "[RAG][sql] rows_returned=" << rowCount;
     }
     if(stmt) sqlite3_finalize(stmt);
     return out;
