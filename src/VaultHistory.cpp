@@ -9,7 +9,9 @@
 
 namespace LoreBook {
 
-VaultHistory::VaultHistory(sqlite3* dbConnection) : db(dbConnection) {}
+VaultHistory::VaultHistory(sqlite3* dbConnection) : db(dbConnection), backend(nullptr) {}
+
+VaultHistory::VaultHistory(LoreBook::IDBBackend* b) : db(nullptr), backend(b) {}
 
 static int execNoErr(sqlite3* db, const char* sql){
     char* err = nullptr;
@@ -19,83 +21,149 @@ static int execNoErr(sqlite3* db, const char* sql){
 }
 
 bool VaultHistory::ensureSchema(std::string* outError){
-    if(!db){ if(outError) *outError = "DB not open"; return false; }
-
-    const char* createRevisions = "CREATE TABLE IF NOT EXISTS Revisions ("
-                                   "RevisionID TEXT PRIMARY KEY,"
-                                   "ItemID INTEGER,"
-                                   "AuthorUserID INTEGER,"
-                                   "CreatedAt INTEGER,"
-                                   "BaseRevisionID TEXT,"
-                                   "RevisionType TEXT,"
-                                   "ChangeSummary TEXT,"
-                                   "UnifiedDiff TEXT"
-                                   ");";
-    if(execNoErr(db, createRevisions) != SQLITE_OK){ if(outError) *outError = "failed to create Revisions"; return false; }
-
-    const char* createRevisionFields = "CREATE TABLE IF NOT EXISTS RevisionFields ("
-                                       "RevisionID TEXT,"
-                                       "FieldName TEXT,"
-                                       "OldValue TEXT,"
-                                       "NewValue TEXT,"
-                                       "FieldDiff TEXT,"
-                                       "PRIMARY KEY (RevisionID, FieldName),"
-                                       "FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE CASCADE"
+    if(db){
+        const char* createRevisions = "CREATE TABLE IF NOT EXISTS Revisions ("
+                                       "RevisionID TEXT PRIMARY KEY,"
+                                       "ItemID INTEGER,"
+                                       "AuthorUserID INTEGER,"
+                                       "CreatedAt INTEGER,"
+                                       "BaseRevisionID TEXT,"
+                                       "RevisionType TEXT,"
+                                       "ChangeSummary TEXT,"
+                                       "UnifiedDiff TEXT"
                                        ");";
-    if(execNoErr(db, createRevisionFields) != SQLITE_OK){ if(outError) *outError = "failed to create RevisionFields"; return false; }
+        if(execNoErr(db, createRevisions) != SQLITE_OK){ if(outError) *outError = "failed to create Revisions"; return false; }
 
-    const char* createItemVersions = "CREATE TABLE IF NOT EXISTS ItemVersions ("
-                                     "ItemID INTEGER,"
-                                     "VersionSeq INTEGER,"
-                                     "RevisionID TEXT,"
-                                     "CreatedAt INTEGER,"
-                                     "PRIMARY KEY (ItemID, VersionSeq),"
-                                     "FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE SET NULL"
-                                     ");";
-    if(execNoErr(db, createItemVersions) != SQLITE_OK){ if(outError) *outError = "failed to create ItemVersions"; return false; }
+        const char* createRevisionFields = "CREATE TABLE IF NOT EXISTS RevisionFields ("
+                                           "RevisionID TEXT,"
+                                           "FieldName TEXT,"
+                                           "OldValue TEXT,"
+                                           "NewValue TEXT,"
+                                           "FieldDiff TEXT,"
+                                           "PRIMARY KEY (RevisionID, FieldName),"
+                                           "FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE CASCADE"
+                                           ");";
+        if(execNoErr(db, createRevisionFields) != SQLITE_OK){ if(outError) *outError = "failed to create RevisionFields"; return false; }
 
-    const char* createRevisionParents = "CREATE TABLE IF NOT EXISTS RevisionParents ("
-                                        "RevisionID TEXT,"
-                                        "ParentRevisionID TEXT,"
-                                        "PRIMARY KEY (RevisionID, ParentRevisionID)"
-                                        ");";
-    if(execNoErr(db, createRevisionParents) != SQLITE_OK){ if(outError) *outError = "failed to create RevisionParents"; return false; }
+        const char* createItemVersions = "CREATE TABLE IF NOT EXISTS ItemVersions ("
+                                         "ItemID INTEGER,"
+                                         "VersionSeq INTEGER,"
+                                         "RevisionID TEXT,"
+                                         "CreatedAt INTEGER,"
+                                         "PRIMARY KEY (ItemID, VersionSeq),"
+                                         "FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE SET NULL"
+                                         ");";
+        if(execNoErr(db, createItemVersions) != SQLITE_OK){ if(outError) *outError = "failed to create ItemVersions"; return false; }
 
-    const char* createConflicts = "CREATE TABLE IF NOT EXISTS Conflicts ("
-                                  "ConflictID TEXT PRIMARY KEY,"
-                                  "ItemID INTEGER,"
-                                  "FieldName TEXT,"
-                                  "BaseRevisionID TEXT,"
-                                  "LocalRevisionID TEXT,"
-                                  "RemoteRevisionID TEXT,"
-                                  "OriginatorUserID INTEGER,"
-                                  "CreatedAt INTEGER,"
-                                  "Status TEXT DEFAULT 'open',"
-                                  "ResolvedByAdminUserID INTEGER,"
-                                  "ResolvedAt INTEGER,"
-                                  "ResolutionPayload TEXT"
-                                  ");";
-    if(execNoErr(db, createConflicts) != SQLITE_OK){ if(outError) *outError = "failed to create Conflicts"; return false; }
+        const char* createRevisionParents = "CREATE TABLE IF NOT EXISTS RevisionParents ("
+                                            "RevisionID TEXT,"
+                                            "ParentRevisionID TEXT,"
+                                            "PRIMARY KEY (RevisionID, ParentRevisionID)"
+                                            ");";
+        if(execNoErr(db, createRevisionParents) != SQLITE_OK){ if(outError) *outError = "failed to create RevisionParents"; return false; }
 
-    // ensure VaultItems has HeadRevision and VersionSeq - this is a no-op if columns already exist
-    sqlite3_stmt* pragma2 = nullptr;
-    bool hasVersionSeq = false, hasHeadRevision = false;
-    const char* pragmaSQL2 = "PRAGMA table_info(VaultItems);";
-    if(sqlite3_prepare_v2(db, pragmaSQL2, -1, &pragma2, nullptr) == SQLITE_OK){
-        while(sqlite3_step(pragma2) == SQLITE_ROW){
-            const unsigned char* colName = sqlite3_column_text(pragma2, 1);
-            if(colName){
-                std::string cname = reinterpret_cast<const char*>(colName);
-                if(cname == "VersionSeq") hasVersionSeq = true;
-                if(cname == "HeadRevision") hasHeadRevision = true;
+        const char* createConflicts = "CREATE TABLE IF NOT EXISTS Conflicts ("
+                                      "ConflictID TEXT PRIMARY KEY,"
+                                      "ItemID INTEGER,"
+                                      "FieldName TEXT,"
+                                      "BaseRevisionID TEXT,"
+                                      "LocalRevisionID TEXT,"
+                                      "RemoteRevisionID TEXT,"
+                                      "OriginatorUserID INTEGER,"
+                                      "CreatedAt INTEGER,"
+                                      "Status TEXT DEFAULT 'open',"
+                                      "ResolvedByAdminUserID INTEGER,"
+                                      "ResolvedAt INTEGER,"
+                                      "ResolutionPayload TEXT"
+                                      ");";
+        if(execNoErr(db, createConflicts) != SQLITE_OK){ if(outError) *outError = "failed to create Conflicts"; return false; }
+
+        // ensure VaultItems has HeadRevision and VersionSeq - this is a no-op if columns already exist
+        sqlite3_stmt* pragma2 = nullptr;
+        bool hasVersionSeq = false, hasHeadRevision = false;
+        const char* pragmaSQL2 = "PRAGMA table_info(VaultItems);";
+        if(sqlite3_prepare_v2(db, pragmaSQL2, -1, &pragma2, nullptr) == SQLITE_OK){
+            while(sqlite3_step(pragma2) == SQLITE_ROW){
+                const unsigned char* colName = sqlite3_column_text(pragma2, 1);
+                if(colName){
+                    std::string cname = reinterpret_cast<const char*>(colName);
+                    if(cname == "VersionSeq") hasVersionSeq = true;
+                    if(cname == "HeadRevision") hasHeadRevision = true;
+                }
             }
         }
-    }
-    if(pragma2) sqlite3_finalize(pragma2);
-    if(!hasVersionSeq){ execNoErr(db, "ALTER TABLE VaultItems ADD COLUMN VersionSeq INTEGER DEFAULT 0;"); }
-    if(!hasHeadRevision){ execNoErr(db, "ALTER TABLE VaultItems ADD COLUMN HeadRevision TEXT DEFAULT NULL;"); }
+        if(pragma2) sqlite3_finalize(pragma2);
+        if(!hasVersionSeq){ execNoErr(db, "ALTER TABLE VaultItems ADD COLUMN VersionSeq INTEGER DEFAULT 0;"); }
+        if(!hasHeadRevision){ execNoErr(db, "ALTER TABLE VaultItems ADD COLUMN HeadRevision TEXT DEFAULT NULL;"); }
 
-    return true;
+        return true;
+    }
+
+    // backend path (MySQL/MariaDB)
+    if(backend){
+        auto exec = [&](const char* sql){ std::string e; return backend->execute(sql, &e); };
+        const char* createRevisions = "CREATE TABLE IF NOT EXISTS Revisions ("
+                                       "RevisionID VARCHAR(64) PRIMARY KEY,"  // use larger type for MySQL
+                                       "ItemID BIGINT," 
+                                       "AuthorUserID BIGINT," 
+                                       "CreatedAt BIGINT," 
+                                       "BaseRevisionID VARCHAR(64),"
+                                       "RevisionType VARCHAR(32),"
+                                       "ChangeSummary TEXT," 
+                                       "UnifiedDiff TEXT"
+                                       ");";
+        if(!exec(createRevisions)){ if(outError) *outError = "failed to create Revisions (mysql)"; return false; }
+        const char* createRevisionFields = "CREATE TABLE IF NOT EXISTS RevisionFields ("
+                                           "RevisionID VARCHAR(64),"
+                                           "FieldName VARCHAR(64),"
+                                           "OldValue TEXT,"
+                                           "NewValue TEXT,"
+                                           "FieldDiff TEXT,"
+                                           "PRIMARY KEY (RevisionID, FieldName)"
+                                           ");";
+        if(!exec(createRevisionFields)){ if(outError) *outError = "failed to create RevisionFields (mysql)"; return false; }
+        const char* createItemVersions = "CREATE TABLE IF NOT EXISTS ItemVersions ("
+                                         "ItemID BIGINT,"
+                                         "VersionSeq BIGINT,"
+                                         "RevisionID VARCHAR(64),"
+                                         "CreatedAt BIGINT,"
+                                         "PRIMARY KEY (ItemID, VersionSeq)"
+                                         ");";
+        if(!exec(createItemVersions)){ if(outError) *outError = "failed to create ItemVersions (mysql)"; return false; }
+        const char* createRevisionParents = "CREATE TABLE IF NOT EXISTS RevisionParents ("
+                                            "RevisionID VARCHAR(64),"
+                                            "ParentRevisionID VARCHAR(64),"
+                                            "PRIMARY KEY (RevisionID, ParentRevisionID)"
+                                            ");";
+        if(!exec(createRevisionParents)){ if(outError) *outError = "failed to create RevisionParents (mysql)"; return false; }
+        const char* createConflicts = "CREATE TABLE IF NOT EXISTS Conflicts ("
+                                      "ConflictID VARCHAR(64) PRIMARY KEY," 
+                                      "ItemID BIGINT,"
+                                      "FieldName VARCHAR(64),"
+                                      "BaseRevisionID VARCHAR(64),"
+                                      "LocalRevisionID VARCHAR(64),"
+                                      "RemoteRevisionID VARCHAR(64),"
+                                      "OriginatorUserID BIGINT,"
+                                      "CreatedAt BIGINT,"
+                                      "Status VARCHAR(32) DEFAULT 'open',"
+                                      "ResolvedByAdminUserID BIGINT,"
+                                      "ResolvedAt BIGINT,"
+                                      "ResolutionPayload TEXT"
+                                      ");";
+        if(!exec(createConflicts)){ if(outError) *outError = "failed to create Conflicts (mysql)"; return false; }
+
+        // ensure VaultItems has HeadRevision and VersionSeq
+        if(!backend->hasColumn("VaultItems","VersionSeq")){
+            if(!exec("ALTER TABLE VaultItems ADD COLUMN VersionSeq BIGINT DEFAULT 0;")){ if(outError) *outError = "failed to add VersionSeq column (mysql)"; return false; }
+        }
+        if(!backend->hasColumn("VaultItems","HeadRevision")){
+            if(!exec("ALTER TABLE VaultItems ADD COLUMN HeadRevision VARCHAR(64) DEFAULT NULL;")){ if(outError) *outError = "failed to add HeadRevision column (mysql)"; return false; }
+        }
+        return true;
+    }
+
+    if(outError) *outError = "DB not open";
+    return false;
 }
 
 static std::string nowEpoch(){
@@ -119,6 +187,36 @@ static std::string readSingleText(sqlite3* db, const char* sql, int64_t param){
 
 // Read a field value from a revision (RevisionFields.NewValue) if present, otherwise fallback to current VaultItems value
 static std::string getFieldValueFromRevisionOrItem(sqlite3* db, const std::string &revID, int64_t itemID, const std::string &fieldName);
+
+// Backend helpers (MySQL) - read a single text column
+static std::string readSingleTextBackend(LoreBook::IDBBackend* backend, const std::string &sql, int64_t param){
+    if(!backend) return std::string();
+    auto stmt = backend->prepare(sql);
+    if(!stmt) return std::string();
+    stmt->bindInt(1, param);
+    auto rs = stmt->executeQuery();
+    if(rs && rs->next()){
+        if(rs->isNull(0)) return std::string();
+        return rs->getString(0);
+    }
+    return std::string();
+}
+
+static std::string getFieldValueFromRevisionOrItemBackend(LoreBook::IDBBackend* backend, const std::string &revID, int64_t itemID, const std::string &fieldName){
+    if(!backend) return std::string();
+    if(fieldName == "HeadRevision"){
+        return readSingleTextBackend(backend, "SELECT HeadRevision FROM VaultItems WHERE ID = ? LIMIT 1;", itemID);
+    }
+    if(!revID.empty()){
+        auto stmt = backend->prepare("SELECT NewValue FROM RevisionFields WHERE RevisionID = ? AND FieldName = ? LIMIT 1;");
+        if(stmt){ stmt->bindString(1, revID); stmt->bindString(2, fieldName); auto rs = stmt->executeQuery(); if(rs && rs->next()){ if(rs->isNull(0)) return std::string(); return rs->getString(0); } }
+    }
+    // fallback to current VaultItems
+    if(fieldName == "Name") return readSingleTextBackend(backend, "SELECT Name FROM VaultItems WHERE ID = ? LIMIT 1;", itemID);
+    if(fieldName == "Content") return readSingleTextBackend(backend, "SELECT Content FROM VaultItems WHERE ID = ? LIMIT 1;", itemID);
+    if(fieldName == "Tags") return readSingleTextBackend(backend, "SELECT Tags FROM VaultItems WHERE ID = ? LIMIT 1;", itemID);
+    return std::string();
+}
 
 // Forward-declare threeWayMerge so it can be used before its definition
 static bool threeWayMerge(const std::string &base, const std::string &local, const std::string &remote, std::string &merged, bool &hasConflict);
@@ -153,7 +251,114 @@ std::vector<std::string> VaultHistory::detectAndEnqueueConflicts(int64_t itemID,
     // Ensure inputs are reasonable
     if(itemID <= 0 || localRevisionID.empty() || remoteRevisionID.empty()) return {};
     std::vector<std::string> createdConflicts;
-    if(!db) return createdConflicts;
+    if(!db && !backend) return createdConflicts;
+
+    // Backend (MySQL) implementation
+    if(backend){
+        // Fetch fields changed by local revision
+        auto selStmt = backend->prepare("SELECT FieldName, NewValue FROM RevisionFields WHERE RevisionID = ?;");
+        if(!selStmt) return createdConflicts;
+        selStmt->bindString(1, localRevisionID);
+        auto rs = selStmt->executeQuery();
+        std::map<std::string,std::string> localValues;
+        std::vector<std::string> fields;
+        while(rs && rs->next()){
+            std::string field = rs->getString(0);
+            std::string val = rs->isNull(1) ? std::string() : rs->getString(1);
+            localValues[field] = val;
+            fields.push_back(field);
+        }
+
+        std::map<std::string,std::string> mergedValues;
+        for(auto &f : fields){
+            std::string base = getFieldValueFromRevisionOrItemBackend(backend, baseRevisionID, itemID, f);
+            std::string remote = getFieldValueFromRevisionOrItemBackend(backend, remoteRevisionID, itemID, f);
+            std::string local = localValues[f];
+            std::string merged;
+            bool hasConflict = false;
+            bool ok = threeWayMerge(base, local, remote, merged, hasConflict);
+            if(!ok || hasConflict){
+                // insert conflict
+                std::string cid = generateUUID();
+                auto ins = backend->prepare("INSERT INTO Conflicts (ConflictID, ItemID, FieldName, BaseRevisionID, LocalRevisionID, RemoteRevisionID, OriginatorUserID, CreatedAt, Status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open');");
+                if(ins){
+                    ins->bindString(1, cid);
+                    ins->bindInt(2, itemID);
+                    ins->bindString(3, f);
+                    if(base.empty()) ins->bindNull(4); else ins->bindString(4, base);
+                    ins->bindString(5, localRevisionID);
+                    ins->bindString(6, remoteRevisionID);
+                    ins->bindInt(7, originatorUserID);
+                    ins->bindInt(8, static_cast<int64_t>(std::time(nullptr)));
+                    ins->execute();
+                }
+                createdConflicts.push_back(cid);
+                continue;
+            }
+            // auto-merged
+            mergedValues[f] = merged;
+        }
+
+        if(createdConflicts.empty() && !mergedValues.empty()){
+            // prepare fieldsForCommit
+            std::map<std::string,std::pair<std::string,std::string>> fieldsForCommit;
+            for(auto &p : mergedValues){
+                std::string oldVal = getFieldValueFromRevisionOrItemBackend(backend, remoteRevisionID, itemID, p.first);
+                fieldsForCommit[p.first] = std::make_pair(oldVal, p.second);
+            }
+            std::string mergeRevID = generateUUID();
+            auto insRev = backend->prepare("INSERT INTO Revisions (RevisionID, ItemID, AuthorUserID, CreatedAt, BaseRevisionID, RevisionType, ChangeSummary, UnifiedDiff) VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
+            if(insRev){
+                insRev->bindString(1, mergeRevID);
+                insRev->bindInt(2, itemID);
+                insRev->bindInt(3, originatorUserID);
+                insRev->bindInt(4, static_cast<int64_t>(std::time(nullptr)));
+                if(remoteRevisionID.empty()) insRev->bindNull(5); else insRev->bindString(5, remoteRevisionID);
+                insRev->bindString(6, "merge");
+                insRev->bindNull(7);
+                insRev->bindNull(8);
+                insRev->execute();
+            }
+            auto insField = backend->prepare("INSERT INTO RevisionFields (RevisionID, FieldName, OldValue, NewValue, FieldDiff) VALUES (?, ?, ?, ?, ?);");
+            for(auto &p : fieldsForCommit){
+                if(insField){
+                    insField->bindString(1, mergeRevID);
+                    insField->bindString(2, p.first);
+                    insField->bindString(3, p.second.first);
+                    insField->bindString(4, p.second.second);
+                    insField->bindNull(5);
+                    insField->execute();
+                }
+            }
+            // parents
+            if(!remoteRevisionID.empty()){
+                auto ip = backend->prepare("INSERT IGNORE INTO RevisionParents (RevisionID, ParentRevisionID) VALUES (?, ?);");
+                if(ip){ ip->bindString(1, mergeRevID); ip->bindString(2, remoteRevisionID); ip->execute(); }
+            }
+            if(!localRevisionID.empty()){
+                auto ip2 = backend->prepare("INSERT IGNORE INTO RevisionParents (RevisionID, ParentRevisionID) VALUES (?, ?);");
+                if(ip2){ ip2->bindString(1, mergeRevID); ip2->bindString(2, localRevisionID); ip2->execute(); }
+            }
+            // update VaultItems
+            std::string upd = "UPDATE VaultItems SET ";
+            bool first = true; for(auto &p : mergedValues){ if(!first) upd += ", "; first=false; upd += p.first + " = ?"; }
+            upd += " WHERE ID = ?;";
+            auto upst = backend->prepare(upd);
+            if(upst){ int idx=1; for(auto &p : mergedValues){ upst->bindString(idx++, p.second); } upst->bindInt(idx, itemID); upst->execute(); }
+            // ItemVersions: get MAX
+            auto maxStmt = backend->prepare("SELECT MAX(VersionSeq) FROM ItemVersions WHERE ItemID = ?;");
+            int64_t nextSeq = 1;
+            if(maxStmt){ maxStmt->bindInt(1, itemID); auto r2 = maxStmt->executeQuery(); if(r2 && r2->next()){ if(!r2->isNull(0)) nextSeq = r2->getInt64(0) + 1; } }
+            auto insV = backend->prepare("INSERT INTO ItemVersions (ItemID, VersionSeq, RevisionID, CreatedAt) VALUES (?, ?, ?, ?);");
+            if(insV){ insV->bindInt(1, itemID); insV->bindInt(2, nextSeq); insV->bindString(3, mergeRevID); insV->bindInt(4, static_cast<int64_t>(std::time(nullptr))); insV->execute(); }
+            auto upHead = backend->prepare("UPDATE VaultItems SET VersionSeq = ?, HeadRevision = ? WHERE ID = ?;");
+            if(upHead){ upHead->bindInt(1, nextSeq); upHead->bindString(2, mergeRevID); upHead->bindInt(3, itemID); upHead->execute(); }
+        }
+
+        return createdConflicts;
+    }
+
+    // SQLite path (existing)
     // Fetch all fields changed by local revision
     sqlite3_stmt* s = nullptr;
     const char* selFields = "SELECT FieldName, NewValue FROM RevisionFields WHERE RevisionID = ?;";
@@ -353,8 +558,56 @@ static bool threeWayMerge(const std::string &base, const std::string &local, con
 std::string VaultHistory::recordRevision(int64_t itemID, int64_t authorUserID, const std::string &revisionType,
                                          const std::map<std::string, std::pair<std::string,std::string>> &fieldChanges,
                                          const std::string &baseRevisionID){
-    if(!db) return std::string();
+    if(!db && !backend) return std::string();
     std::string revID = generateUUID();
+
+    // backend path
+    if(backend){
+        auto insRev = backend->prepare("INSERT INTO Revisions (RevisionID, ItemID, AuthorUserID, CreatedAt, BaseRevisionID, RevisionType, ChangeSummary, UnifiedDiff) VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
+        if(!insRev){ PLOGW << "VaultHistory: prepare insertRev failed (mysql)"; return std::string(); }
+        insRev->bindString(1, revID);
+        insRev->bindInt(2, itemID);
+        insRev->bindInt(3, authorUserID);
+        insRev->bindInt(4, static_cast<int64_t>(std::time(nullptr)));
+        if(baseRevisionID.empty()) insRev->bindNull(5); else insRev->bindString(5, baseRevisionID);
+        insRev->bindString(6, revisionType);
+        insRev->bindNull(7);
+        insRev->bindNull(8);
+        insRev->execute();
+
+        auto insField = backend->prepare("INSERT INTO RevisionFields (RevisionID, FieldName, OldValue, NewValue, FieldDiff) VALUES (?, ?, ?, ?, ?);");
+        for(const auto &p : fieldChanges){
+            if(!insField) break;
+            insField->bindString(1, revID);
+            insField->bindString(2, p.first);
+            insField->bindString(3, p.second.first);
+            insField->bindString(4, p.second.second);
+            insField->bindNull(5);
+            insField->execute();
+        }
+
+        // compute nextSeq
+        int64_t nextSeq = 1;
+        auto maxStmt = backend->prepare("SELECT MAX(VersionSeq) FROM ItemVersions WHERE ItemID = ?;");
+        if(maxStmt){ maxStmt->bindInt(1, itemID); auto r = maxStmt->executeQuery(); if(r && r->next()){ if(!r->isNull(0)) nextSeq = r->getInt64(0) + 1; } }
+
+        auto insV = backend->prepare("INSERT INTO ItemVersions (ItemID, VersionSeq, RevisionID, CreatedAt) VALUES (?, ?, ?, ?);");
+        if(insV){ insV->bindInt(1, itemID); insV->bindInt(2, nextSeq); insV->bindString(3, revID); insV->bindInt(4, static_cast<int64_t>(std::time(nullptr))); insV->execute(); }
+
+        // check current head
+        std::string curHead = getFieldValueFromRevisionOrItemBackend(backend, std::string(), itemID, "HeadRevision");
+        if(baseRevisionID.empty() || baseRevisionID == curHead){
+            auto up = backend->prepare("UPDATE VaultItems SET VersionSeq = ?, HeadRevision = ? WHERE ID = ?;");
+            if(up){ up->bindInt(1, nextSeq); up->bindString(2, revID); up->bindInt(3, itemID); up->execute(); }
+        } else {
+            std::vector<std::string> conflicts = detectAndEnqueueConflicts(itemID, revID, baseRevisionID, curHead, authorUserID);
+            if(!conflicts.empty()){ PLOGI << "recordRevision: enqueued " << conflicts.size() << " conflicts for item " << itemID; }
+        }
+
+        return revID;
+    }
+
+    // sqlite path
     sqlite3_stmt* ins = nullptr;
     const char* insertRev = "INSERT INTO Revisions (RevisionID, ItemID, AuthorUserID, CreatedAt, BaseRevisionID, RevisionType, ChangeSummary, UnifiedDiff) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
     if(sqlite3_prepare_v2(db, insertRev, -1, &ins, nullptr) != SQLITE_OK){ PLOGW << "VaultHistory: prepare insertRev failed"; return std::string(); }

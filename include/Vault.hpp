@@ -80,7 +80,8 @@ class Vault{
     std::unordered_set<std::string> importAssetSelectedFiles;
     bool showAssetUploadedModal = false;
     std::vector<std::string> lastUploadedExternalPaths; 
-    // Virtual path destination for import (e.g. "folder/subfolder") - empty = root
+
+
     char importAssetDestFolderBuf[1024] = "";
 
     // Overwrite / conflict modal state when an exact vault path collision occurs
@@ -298,6 +299,19 @@ public:
 
     // Enqueue a callable to be executed on the main/UI thread. Used to schedule GL uploads and other main-thread-only operations
     void enqueueMainThreadTask(std::function<void()> fn){ std::lock_guard<std::mutex> l(pendingTasksMutex); pendingMainThreadTasks.push_back(std::move(fn)); }
+
+    // Minimal item data accessor for external sync tools
+    struct ItemRecord { int64_t id = -1; std::string name; std::string content; std::string tags; int64_t versionSeq = 0; std::string headRevision; int isRoot = 0; };
+    ItemRecord getItemPublic(int64_t id){ ItemRecord out; out.id = id; if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT Name, Content, Tags, VersionSeq, HeadRevision, IsRoot FROM VaultItems WHERE ID = ? LIMIT 1;", &err);
+            if(stmt){ stmt->bindInt(1, id); auto rs = stmt->executeQuery(); if(rs && rs->next()){ out.name = rs->getString(0); out.content = rs->getString(1); out.tags = rs->getString(2); out.versionSeq = rs->getInt64(3); out.headRevision = rs->getString(4); out.isRoot = rs->getInt(5); } }
+        } else if(dbConnection){
+            sqlite3_stmt* s = nullptr; const char* q = "SELECT Name, Content, Tags, VersionSeq, HeadRevision, IsRoot FROM VaultItems WHERE ID = ? LIMIT 1;";
+            if(sqlite3_prepare_v2(dbConnection, q, -1, &s, nullptr) == SQLITE_OK){ sqlite3_bind_int64(s,1,id); if(sqlite3_step(s) == SQLITE_ROW){ const unsigned char* n = sqlite3_column_text(s,0); const unsigned char* c = sqlite3_column_text(s,1); const unsigned char* t = sqlite3_column_text(s,2); if(n) out.name = reinterpret_cast<const char*>(n); if(c) out.content = reinterpret_cast<const char*>(c); if(t) out.tags = reinterpret_cast<const char*>(t); if(sqlite3_column_type(s,3) != SQLITE_NULL) out.versionSeq = sqlite3_column_int64(s,3); const unsigned char* hr = sqlite3_column_text(s,4); if(hr) out.headRevision = reinterpret_cast<const char*>(hr); out.isRoot = sqlite3_column_int(s,5); } }
+            if(s) sqlite3_finalize(s);
+        }
+        return out; }
 
     Vault(std::filesystem::path dbPath,std::string vaultName){
         name = vaultName;
@@ -554,7 +568,12 @@ public:
         Vault(std::unique_ptr<LoreBook::IDBBackend> backend, const std::string& vaultName){
             name = vaultName;
             dbBackend = std::move(backend);
-            // No schema creation yet — existing schema expected or created elsewhere
+            // Initialize history helper for remote backends
+            history = std::make_unique<LoreBook::VaultHistory>(dbBackend.get());
+            std::string histErr;
+            if(!history->ensureSchema(&histErr)){
+                PLOGW << "VaultHistory: ensureSchema failed (remote): " << histErr;
+            }
         }
 
     void loadNodeFiltersFromDB(){

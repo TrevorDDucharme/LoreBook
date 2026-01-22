@@ -17,6 +17,7 @@
 #include "VaultChat.hpp"
 #include "MergeConflictUI.hpp"
 #include "MySQLTest.hpp"
+#include "VaultSync.hpp"
 #include <plog/Log.h>
 #include <plog/Init.h>
 #include <plog/Appenders/ConsoleAppender.h>
@@ -109,6 +110,18 @@ int main(int argc, char** argv)
     static char remoteCAFileBuf[1024] = "";
     static char remoteTestStatusBuf[512] = "";
     static bool remoteTestOk = false;
+
+    // Upload / Sync to Remote modal state (UI-owned)
+    static bool showSyncModal = false;
+    static char sync_remote_host[256] = "";
+    static int sync_remote_port = 3306;
+    static char sync_remote_db[128] = "";
+    static char sync_remote_user[128] = "";
+    static char sync_remote_pass[128] = "";
+    static bool sync_createRemote = true;
+    static bool sync_dryRun = true; // default to safe dry-run
+    static bool syncInProgress = false;
+    static char syncStatusBuf[512] = ""; // short status for UI
 
     // Auth/Login state
     static bool showLoginModal = false;
@@ -225,6 +238,11 @@ int main(int argc, char** argv)
                     showOpenRemoteVaultModal = true;
                     remoteTestStatusBuf[0] = '\0';
                     remoteTestOk = false;
+                }
+
+                // Upload / Sync to Remote (available when a local sqlite vault is open)
+                if(vault && vault->getDBBackendPublic() == nullptr){
+                    if (ImGui::MenuItem("Upload / Sync to Remote...")) { showSyncModal = true; }
                 }
                 if (ImGui::MenuItem("Close Vault", nullptr, false, vault != nullptr)){
                     if(vault) vault.reset();
@@ -514,6 +532,62 @@ int main(int argc, char** argv)
                 }
             }
             ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
+        // Upload / Sync to Remote modal
+        if(vault && showSyncModal){ ImGui::OpenPopup("Upload / Sync to Remote"); showSyncModal = false; }
+        if (ImGui::BeginPopupModal("Upload / Sync to Remote", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Upload or synchronize local vault to a remote MySQL vault");
+            ImGui::Separator();
+            ImGui::InputText("Host", sync_remote_host, sizeof(sync_remote_host)); ImGui::SameLine(); ImGui::SetNextItemWidth(80); ImGui::InputInt("Port", &sync_remote_port);
+            ImGui::InputText("Database", sync_remote_db, sizeof(sync_remote_db));
+            ImGui::InputText("Username", sync_remote_user, sizeof(sync_remote_user));
+            ImGui::InputText("Password", sync_remote_pass, sizeof(sync_remote_pass), ImGuiInputTextFlags_Password);
+            ImGui::Checkbox("Create remote DB if missing", &sync_createRemote);
+            ImGui::Checkbox("Dry run (no writes)", &sync_dryRun);
+            ImGui::Separator();
+            if(!syncInProgress){
+                if(ImGui::Button("Test Connection")){
+                    LoreBook::DBConnectionInfo ci;
+                    ci.backend = LoreBook::DBConnectionInfo::Backend::MySQL;
+                    ci.mysql_host = std::string(sync_remote_host);
+                    ci.mysql_port = sync_remote_port;
+                    ci.mysql_db = std::string(sync_remote_db);
+                    ci.mysql_user = std::string(sync_remote_user);
+                    ci.mysql_password = std::string(sync_remote_pass);
+                    std::string err;
+                    bool ok = TestMySQLConnection(ci.mysql_host, ci.mysql_port, ci.mysql_db, ci.mysql_user, ci.mysql_password, false, std::string(), err);
+                    if(ok) strncpy(syncStatusBuf, "Connection OK", sizeof(syncStatusBuf)); else strncpy(syncStatusBuf, (std::string("Connection failed: ") + err).c_str(), sizeof(syncStatusBuf));
+                }
+                ImGui::SameLine();
+                if(ImGui::Button("Start Upload")){
+                    // Prepare connection info
+                    LoreBook::DBConnectionInfo ci;
+                    ci.backend = LoreBook::DBConnectionInfo::Backend::MySQL;
+                    ci.mysql_host = std::string(sync_remote_host);
+                    ci.mysql_port = sync_remote_port;
+                    ci.mysql_db = std::string(sync_remote_db);
+                    ci.mysql_user = std::string(sync_remote_user);
+                    ci.mysql_password = std::string(sync_remote_pass);
+                    ci.mysql_use_ssl = false; // expose later if needed
+                    // start worker
+                    syncInProgress = true;
+                    strncpy(syncStatusBuf, "Starting upload...", sizeof(syncStatusBuf));
+                    int64_t uploader = vault->getCurrentUserID();
+                    // Launch background worker
+                    LoreBook::VaultSync::startUpload(vault.get(), ci, sync_dryRun, uploader, [&syncInProgress, &syncStatusBuf](int pct, const std::string &msg){ strncpy(syncStatusBuf, msg.c_str(), sizeof(syncStatusBuf)); if(pct >= 100 || pct < 0) syncInProgress = false; });
+                }
+                ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
+            } else {
+                ImGui::Text("Upload in progress...");
+                ImGui::TextWrapped("%s", syncStatusBuf);
+                if(ImGui::Button("Cancel (not implemented)")) { strncpy(syncStatusBuf, "Cancellation requested (not implemented)", sizeof(syncStatusBuf)); }
+            }
+
+            ImGui::Separator();
+            if(syncStatusBuf[0] != '\0') ImGui::TextWrapped("Status: %s", syncStatusBuf);
+            if(ImGui::Button("Close")){ ImGui::CloseCurrentPopup(); }
             ImGui::EndPopup();
         }
 

@@ -5,7 +5,32 @@ namespace LoreBook {
 
 std::vector<ConflictRecord> VaultHistory::listOpenConflicts(int64_t originatorFilter){
     std::vector<ConflictRecord> out;
-    if(!db) return out;
+    if(!db && !backend) return out;
+
+    if(backend){
+        std::string q = "SELECT ConflictID, ItemID, FieldName, BaseRevisionID, LocalRevisionID, RemoteRevisionID, OriginatorUserID, CreatedAt, Status FROM Conflicts WHERE Status='open'";
+        if(originatorFilter >= 0) q += " AND OriginatorUserID = ?";
+        q += " ORDER BY CreatedAt DESC;";
+        auto stmt = backend->prepare(q);
+        if(!stmt) return out;
+        if(originatorFilter >= 0) stmt->bindInt(1, originatorFilter);
+        auto rs = stmt->executeQuery();
+        while(rs && rs->next()){
+            ConflictRecord r;
+            r.ConflictID = rs->getString(0);
+            r.ItemID = rs->getInt64(1);
+            r.FieldName = rs->getString(2);
+            r.BaseRevisionID = rs->isNull(3) ? std::string() : rs->getString(3);
+            r.LocalRevisionID = rs->isNull(4) ? std::string() : rs->getString(4);
+            r.RemoteRevisionID = rs->isNull(5) ? std::string() : rs->getString(5);
+            r.OriginatorUserID = rs->getInt64(6);
+            r.CreatedAt = rs->getInt64(7);
+            r.Status = rs->getString(8);
+            out.push_back(r);
+        }
+        return out;
+    }
+
     sqlite3_stmt* s = nullptr;
     std::string q = "SELECT ConflictID, ItemID, FieldName, BaseRevisionID, LocalRevisionID, RemoteRevisionID, OriginatorUserID, CreatedAt, Status FROM Conflicts WHERE Status='open'";
     if(originatorFilter >= 0) q += " AND OriginatorUserID = ?";
@@ -31,7 +56,29 @@ std::vector<ConflictRecord> VaultHistory::listOpenConflicts(int64_t originatorFi
 
 ConflictRecord VaultHistory::getConflictDetail(const std::string &conflictID){
     ConflictRecord r;
-    if(!db) return r;
+    if(!db && !backend) return r;
+    if(backend){
+        auto stmt = backend->prepare("SELECT ConflictID, ItemID, FieldName, BaseRevisionID, LocalRevisionID, RemoteRevisionID, OriginatorUserID, CreatedAt, Status, ResolvedByAdminUserID, ResolvedAt, ResolutionPayload FROM Conflicts WHERE ConflictID = ? LIMIT 1;");
+        if(!stmt) return r;
+        stmt->bindString(1, conflictID);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()){
+            r.ConflictID = rs->getString(0);
+            r.ItemID = rs->getInt64(1);
+            r.FieldName = rs->getString(2);
+            r.BaseRevisionID = rs->isNull(3) ? std::string() : rs->getString(3);
+            r.LocalRevisionID = rs->isNull(4) ? std::string() : rs->getString(4);
+            r.RemoteRevisionID = rs->isNull(5) ? std::string() : rs->getString(5);
+            r.OriginatorUserID = rs->getInt64(6);
+            r.CreatedAt = rs->getInt64(7);
+            r.Status = rs->getString(8);
+            if(!rs->isNull(9)) r.ResolvedByAdminUserID = rs->getInt64(9);
+            if(!rs->isNull(10)) r.ResolvedAt = rs->getInt64(10);
+            r.ResolutionPayload = rs->isNull(11) ? std::string() : rs->getString(11);
+        }
+        return r;
+    }
+
     sqlite3_stmt* s = nullptr;
     const char* q = "SELECT ConflictID, ItemID, FieldName, BaseRevisionID, LocalRevisionID, RemoteRevisionID, OriginatorUserID, CreatedAt, Status, ResolvedByAdminUserID, ResolvedAt, ResolutionPayload FROM Conflicts WHERE ConflictID = ? LIMIT 1;";
     if(sqlite3_prepare_v2(db, q, -1, &s, nullptr) != SQLITE_OK) return r;
@@ -55,7 +102,27 @@ ConflictRecord VaultHistory::getConflictDetail(const std::string &conflictID){
 }
 
 std::string VaultHistory::getFieldValue(const std::string &revID, int64_t itemID, const std::string &fieldName){
-    if(!db) return std::string();
+    if(!db && !backend) return std::string();
+    if(backend){
+        if(!revID.empty()){
+            auto stmt = backend->prepare("SELECT NewValue FROM RevisionFields WHERE RevisionID = ? AND FieldName = ? LIMIT 1;");
+            if(!stmt) return std::string();
+            stmt->bindString(1, revID);
+            stmt->bindString(2, fieldName);
+            auto rs = stmt->executeQuery();
+            if(rs && rs->next()){ if(!rs->isNull(0)) return rs->getString(0); }
+        }
+        if(fieldName == "Name" || fieldName == "Content" || fieldName == "Tags" || fieldName == "HeadRevision"){
+            std::string sql = std::string("SELECT ") + fieldName + " FROM VaultItems WHERE ID = ? LIMIT 1;";
+            auto stmt = backend->prepare(sql);
+            if(!stmt) return std::string();
+            stmt->bindInt(1, itemID);
+            auto rs = stmt->executeQuery();
+            if(rs && rs->next()){ if(rs->isNull(0)) return std::string(); return rs->getString(0); }
+            return std::string();
+        }
+        return std::string();
+    }
     // Try RevisionFields first
     if(!revID.empty()){
         sqlite3_stmt* s = nullptr;
@@ -84,8 +151,43 @@ std::string VaultHistory::getFieldValue(const std::string &revID, int64_t itemID
 }
 
 bool VaultHistory::adminResolveConflict(const std::string &conflictID, int64_t adminUserID, const std::map<std::string,std::string> &mergedValues, const std::string &resolutionSummary, bool createMergeRevision){
-    if(!db) return false;
+    if(!db && !backend) return false;
     ConflictRecord cr = getConflictDetail(conflictID);
+    if(cr.ConflictID.empty()) return false;
+
+    if(backend){
+        // apply merged values, optionally creating a merge revision
+        if(createMergeRevision){
+            std::string mergeRevID = generateUUID();
+            auto insM = backend->prepare("INSERT INTO Revisions (RevisionID, ItemID, AuthorUserID, CreatedAt, BaseRevisionID, RevisionType, ChangeSummary, UnifiedDiff) VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
+            if(insM){ insM->bindString(1, mergeRevID); insM->bindInt(2, cr.ItemID); insM->bindInt(3, adminUserID); insM->bindInt(4, static_cast<int64_t>(std::time(nullptr))); if(cr.RemoteRevisionID.empty()) insM->bindNull(5); else insM->bindString(5, cr.RemoteRevisionID); insM->bindString(6, "merge"); insM->bindString(7, resolutionSummary); insM->bindNull(8); insM->execute(); }
+
+            auto insField = backend->prepare("INSERT INTO RevisionFields (RevisionID, FieldName, OldValue, NewValue, FieldDiff) VALUES (?, ?, ?, ?, ?);");
+            for(auto &p : mergedValues){ std::string oldVal = getFieldValue(cr.RemoteRevisionID, cr.ItemID, p.first); if(insField){ insField->bindString(1, mergeRevID); insField->bindString(2, p.first); insField->bindString(3, oldVal); insField->bindString(4, p.second); insField->bindNull(5); insField->execute(); } }
+
+            if(!cr.RemoteRevisionID.empty()){ auto ip = backend->prepare("INSERT IGNORE INTO RevisionParents (RevisionID, ParentRevisionID) VALUES (?, ?);"); if(ip){ ip->bindString(1, mergeRevID); ip->bindString(2, cr.RemoteRevisionID); ip->execute(); } }
+            if(!cr.LocalRevisionID.empty()){ auto ip2 = backend->prepare("INSERT IGNORE INTO RevisionParents (RevisionID, ParentRevisionID) VALUES (?, ?);"); if(ip2){ ip2->bindString(1, mergeRevID); ip2->bindString(2, cr.LocalRevisionID); ip2->execute(); } }
+
+            std::string upd = "UPDATE VaultItems SET "; bool first=true; for(auto &p : mergedValues){ if(!first) upd += ", "; first=false; upd += p.first + " = ?"; } upd += " WHERE ID = ?;";
+            auto upst = backend->prepare(upd);
+            if(upst){ int idx=1; for(auto &p : mergedValues){ upst->bindString(idx++, p.second); } upst->bindInt(idx, cr.ItemID); upst->execute(); }
+
+            // update ItemVersions & head
+            auto maxStmt = backend->prepare("SELECT MAX(VersionSeq) FROM ItemVersions WHERE ItemID = ?;"); int64_t nextSeq = 1; if(maxStmt){ maxStmt->bindInt(1, cr.ItemID); auto r = maxStmt->executeQuery(); if(r && r->next()){ if(!r->isNull(0)) nextSeq = r->getInt64(0) + 1; } }
+            auto insV = backend->prepare("INSERT INTO ItemVersions (ItemID, VersionSeq, RevisionID, CreatedAt) VALUES (?, ?, ?, ?);"); if(insV){ insV->bindInt(1, cr.ItemID); insV->bindInt(2, nextSeq); insV->bindString(3, mergeRevID); insV->bindInt(4, static_cast<int64_t>(std::time(nullptr))); insV->execute(); }
+            auto upHead = backend->prepare("UPDATE VaultItems SET VersionSeq = ?, HeadRevision = ? WHERE ID = ?;"); if(upHead){ upHead->bindInt(1, nextSeq); upHead->bindString(2, mergeRevID); upHead->bindInt(3, cr.ItemID); upHead->execute(); }
+        } else {
+            std::string upd = "UPDATE VaultItems SET "; bool first=true; for(auto &p : mergedValues){ if(!first) upd += ", "; first=false; upd += p.first + " = ?"; } upd += " WHERE ID = ?;";
+            auto upst = backend->prepare(upd);
+            if(upst){ int idx=1; for(auto &p : mergedValues){ upst->bindString(idx++, p.second); } upst->bindInt(idx, cr.ItemID); upst->execute(); }
+        }
+
+        // mark conflict resolved
+        auto res = backend->prepare("UPDATE Conflicts SET Status = 'resolved', ResolvedByAdminUserID = ?, ResolvedAt = ?, ResolutionPayload = ? WHERE ConflictID = ?;");
+        if(res){ res->bindInt(1, adminUserID); res->bindInt(2, static_cast<int64_t>(std::time(nullptr))); res->bindString(3, resolutionSummary); res->bindString(4, conflictID); res->execute(); }
+        return true;
+    }
+
     if(cr.ConflictID.empty()) return false;
     // apply merged values
     if(createMergeRevision){

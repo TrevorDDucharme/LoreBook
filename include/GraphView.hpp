@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <string>
 #include <imgui.h>
+#include <cstdint>
 
 struct Vault; // forward
 
