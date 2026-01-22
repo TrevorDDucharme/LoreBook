@@ -103,9 +103,14 @@ target_link_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
 
 #glut
-find_package(X11 REQUIRED)
 find_package(GLUT REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE GLUT::GLUT Xi Xrandr Xxf86vm)
+target_link_libraries(${PROJECT_NAME} PRIVATE GLUT::GLUT)
+
+if(UNIX AND NOT APPLE)
+    find_package(X11 REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE X11::Xi X11::Xrandr X11::Xxf86vm)
+endif()
+
 
 # assimp (3D model import)
 find_package(assimp CONFIG REQUIRED)
@@ -131,10 +136,30 @@ target_link_libraries(${PROJECT_NAME} PRIVATE lz4::lz4)
 # Some resolver functions (ns_initparse/ns_parserr) are provided by libresolv on
 # some platforms; link it after MySQL connector so static libraries get the
 # resolver library at the right place in the link order.
-target_link_libraries(${PROJECT_NAME} PRIVATE resolv)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE resolv)
+endif()
 
 find_package(libgit2 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE libgit2::libgit2package)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    unofficial::mysql-connector-cpp::connector
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
+if(MINGW)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        ws2_32
+        crypt32
+        dnsapi
+        bcrypt
+        user32
+        advapi32
+    )
+endif()
+
 
 #END YOUR LIBRARIES
 

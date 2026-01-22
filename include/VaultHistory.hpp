@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <sqlite3.h>
+#include "DBBackend.hpp"
 
 namespace LoreBook {
 
@@ -33,6 +34,8 @@ struct ConflictRecord {
 class VaultHistory {
 public:
     explicit VaultHistory(sqlite3* dbConnection);
+    explicit VaultHistory(LoreBook::IDBBackend* backend);
+
     bool ensureSchema(std::string* outError = nullptr);
 
     // recordRevision returns the created RevisionID (UUID) or empty on failure
@@ -57,7 +60,8 @@ public:
     std::string getFieldValue(const std::string &revID, int64_t itemID, const std::string &fieldName);
 
 private:
-    sqlite3* db;
+    sqlite3* db = nullptr;
+    LoreBook::IDBBackend* backend = nullptr;
     std::string generateUUID();
 };
 
