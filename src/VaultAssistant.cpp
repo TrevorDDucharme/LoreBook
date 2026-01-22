@@ -1,6 +1,7 @@
 #include "VaultAssistant.hpp"
 #include "LLMClient.hpp"
 #include "Vault.hpp"
+#include <plog/Log.h>
 #include <sstream>
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -85,35 +86,120 @@ std::vector<std::string> VaultAssistant::listModels(){
     return out;
 }
 
-std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const std::string& query, int k){
+std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const std::string& query, int k, const std::string& model){
+    // Per request: ask the LLM to produce a JSON array of keywords from the question, then use a SQL
+    // query to find nodes where any keyword appears in Name, Content, or Tags. The caller must supply
+    // the model to use (no fallback).
     std::vector<Node> out;
-    if(!vault_ || query.empty()) return out;
-    std::string lowerq = query;
-    std::transform(lowerq.begin(), lowerq.end(), lowerq.begin(), ::tolower);
+    if(!vault_ || query.empty() || !client_) return out;
 
-    // Use a simple SQL-based occurrence heuristic
-    const char* sql = "SELECT ID, Name, Content, Tags, "
-                      "( (LENGTH(lower(Name)) - LENGTH(REPLACE(lower(Name), ?, ''))) + "
-                      "  (LENGTH(lower(Content)) - LENGTH(REPLACE(lower(Content), ?, ''))) + "
-                      "  (LENGTH(lower(Tags)) - LENGTH(REPLACE(lower(Tags), ?, '')))) AS score "
-                      "FROM VaultItems "
-                      "WHERE lower(Name) LIKE '%' || ? || '%' OR lower(Content) LIKE '%' || ? || '%' OR lower(Tags) LIKE '%' || ? || '%' "
-                      "ORDER BY score DESC LIMIT ?;";
-    sqlite3_stmt* stmt = nullptr;
+    // Use structured output feature: request a JSON array of keywords via response_format/json_schema
+    nlohmann::json msg = nlohmann::json::array();
+    msg.push_back({{"role","system"},{"content","You are a keyword extractor. Given a user question, respond with a JSON array of keywords only. Do not include any other text."}});
+    msg.push_back({{"role","user"},{"content", query}});
+
+    nlohmann::json response_format = {
+        {"type","json_schema"},
+        {"json_schema", {
+            {"name","keyword_list"},
+            {"strict","true"},
+            {"schema", {
+                {"type","array"},
+                {"items", { {"type","string"} }}
+            }}
+        }}
+    };
+
+    nlohmann::json body = {{"model", model}, {"messages", msg}, {"response_format", response_format}, {"temperature", 0.0}};
+
+    auto r = client_->chatCompletions(body);
+    if(!r.ok()){
+        PLOGE << "[RAG][keywords] LLM request failed: " << r.curlError << " (" << r.httpCode << ")";
+        return out; // per instruction: no fallbacks
+    }
+    auto j = r.bodyJson();
+
+    std::string content;
+    try{
+        if(j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()){
+            auto &c = j["choices"][0];
+            if(c.contains("message") && c["message"].contains("content")) content = c["message"]["content"].get<std::string>();
+        }
+    }catch(...){
+        PLOGE << "[RAG][keywords] Exception while extracting content from LLM response";
+        return out;
+    }
+
+    if(content.empty()){
+        PLOGD << "[RAG][keywords] LLM returned empty content";
+        return out;
+    }
+
+    // Parse content as JSON and expect an array of strings
+    nlohmann::json parsed;
+    try{
+        parsed = nlohmann::json::parse(content);
+    } catch(...){
+        std::string ct = content.substr(0, std::min<size_t>(content.size(), 1000));
+        PLOGE << "[RAG][keywords] Failed to parse JSON from LLM response: " << ct << (content.size() > 1000 ? "...(truncated)" : "");
+        return out;
+    }
+    if(!parsed.is_array()){
+        PLOGE << "[RAG][keywords] Parsed JSON is not an array";
+        return out;
+    }
+
+    std::vector<std::string> keywords;
+    for(auto &it : parsed){
+        if(!it.is_string()) continue; // ignore non-strings
+        std::string t = it.get<std::string>();
+        // trim spaces
+        size_t start = 0; while(start < t.size() && isspace((unsigned char)t[start])) ++start;
+        size_t end = t.size(); while(end > start && isspace((unsigned char)t[end-1])) --end;
+        if(end <= start) continue;
+        std::string s = t.substr(start, end - start);
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        if(std::find(keywords.begin(), keywords.end(), s) == keywords.end()) keywords.push_back(s);
+    }
+
+    if(keywords.empty()){
+        PLOGD << "[RAG][keywords] no keywords extracted";
+        return out;
+    }
+    PLOGI << "[RAG][keywords] extracted " << keywords.size() << " keywords";
+    try{
+        std::ostringstream ks;
+        for(size_t i=0;i<keywords.size();++i){ if(i) ks << ", "; ks << keywords[i]; }
+        PLOGD << "[RAG][keywords] keywords: " << ks.str();
+    } catch(...){ }
+
+    // Build SQL that checks lower(Name) LIKE '%kw%' OR lower(Content) LIKE '%kw%' OR lower(Tags) LIKE '%kw%'
     sqlite3* db = vault_->getDBPublic();
     if(!db) return out;
-    if(sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK){
-        // bind 1..3 for REPLACE count, 4..6 for LIKE, 7 for limit
-        for(int i=1;i<=3;++i) sqlite3_bind_text(stmt, i, lowerq.c_str(), -1, SQLITE_TRANSIENT);
-        for(int i=4;i<=6;++i) sqlite3_bind_text(stmt, i, lowerq.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt,7,k);
+
+    std::string sql = "SELECT ID, Name, Content, Tags FROM VaultItems WHERE ";
+    for(size_t i=0;i<keywords.size();++i){
+        if(i) sql += " OR ";
+        sql += "(lower(Name) LIKE ? OR lower(Content) LIKE ? OR lower(Tags) LIKE ? )";
+    }
+    sql += " LIMIT ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK){
+        int bindIdx = 1;
+        for(const auto &kw : keywords){
+            std::string pattern = std::string("%") + kw + "%";
+            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, bindIdx++, pattern.c_str(), -1, SQLITE_TRANSIENT);
+        }
+        sqlite3_bind_int(stmt, bindIdx++, k);
         while(sqlite3_step(stmt) == SQLITE_ROW){
             Node n;
             n.id = sqlite3_column_int64(stmt,0);
             const unsigned char* nm = sqlite3_column_text(stmt,1);
             const unsigned char* cont = sqlite3_column_text(stmt,2);
             const unsigned char* tags = sqlite3_column_text(stmt,3);
-            n.score = sqlite3_column_double(stmt,4);
             n.name = nm ? reinterpret_cast<const char*>(nm) : std::string();
             n.content = cont ? reinterpret_cast<const char*>(cont) : std::string();
             n.tags = tags ? reinterpret_cast<const char*>(tags) : std::string();
@@ -139,7 +225,7 @@ std::string VaultAssistant::buildRAGContext(const std::vector<Node>& nodes, int 
 
 std::string VaultAssistant::askTextWithRAG(const std::string& question, const std::string& model, int k){
     if(!client_) return std::string();
-    auto nodes = retrieveRelevantNodes(question, k);
+    auto nodes = retrieveRelevantNodes(question, k, model);
     std::string context = buildRAGContext(nodes);
     nlohmann::json msg = nlohmann::json::array();
     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
@@ -173,7 +259,7 @@ std::string VaultAssistant::askTextWithRAG(const std::string& question, const st
 
 std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model, int k){
     if(!client_) return std::nullopt;
-    auto nodes = retrieveRelevantNodes(question, k);
+    auto nodes = retrieveRelevantNodes(question, k, model);
     std::string context = buildRAGContext(nodes);
     std::string sys = "You are an assistant that must respond only with a JSON document that conforms to the following JSON schema. Do not include any other text. Only output valid JSON.\nSchema: ";
     sys += schema.dump();
