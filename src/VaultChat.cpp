@@ -275,8 +275,8 @@ void RenderVaultChat(Vault* vault){
                 }
                 pending->fut = std::async(std::launch::async, [assistantPtr = assistant, clientPtr = &client, inCopy, modelCopy, vault, streamPartialsPtr = &streamPartials, streamMutexPtr = &streamMutex](){
                     // build context and body similar to askTextWithRAG
-                    auto nodes = assistant->retrieveRelevantNodes(inCopy, 5);
-                    std::string context = assistant->getRAGContext(nodes);
+                    auto nodes = assistantPtr->retrieveRelevantNodes(inCopy, 5, modelCopy);
+                    std::string context = assistantPtr->getRAGContext(nodes);
                     nlohmann::json msg = nlohmann::json::array();
                     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
                     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + inCopy}});

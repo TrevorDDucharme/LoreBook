@@ -16,8 +16,9 @@ public:
     // Return a list of available model ids
     std::vector<std::string> listModels();
 
-    // Retrieve up to k relevant nodes by simple substring-occurrence heuristic
-    std::vector<Node> retrieveRelevantNodes(const std::string& query, int k = 5);
+    // Retrieve up to k relevant nodes by asking the LLM for keywords and SQL matching. The LLM model to use
+    // must be supplied via `model` (no fallback).
+    std::vector<Node> retrieveRelevantNodes(const std::string& query, int k, const std::string& model);
 
     // Ask a free-text question using RAG (returns assistant text or empty on error)
     std::string askTextWithRAG(const std::string& question, const std::string& model="gpt-4o-mini", int k=5);
