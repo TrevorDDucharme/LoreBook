@@ -51,6 +51,11 @@ void RenderVaultChat(Vault* vault){
     // timeout & streaming default controls (declare early so UI can use them)
     static int timeoutSeconds = 30;
     static bool streamingEnabled = false;
+    // Context length per node (characters) used when building RAG context
+    static int contextCharLimit = 800;
+    // RAG parameters: number of nodes to fetch and max LLM tokens
+    static int ragNodeCount = 5;
+    static int llmMaxTokens = 1024;
 
     if(!clientInitialized){
         const char* env = std::getenv("OPENAI_API_KEY");
@@ -93,6 +98,15 @@ void RenderVaultChat(Vault* vault){
         ImGui::InputTextMultiline("Extra Headers (one per line)", &extraHeadersText, ImVec2(0,80));
         ImGui::InputInt("Timeout (s)", &timeoutSeconds);
         ImGui::Checkbox("Enable Streaming", &streamingEnabled);
+        ImGui::InputInt("Context length per node (chars)", &contextCharLimit);
+        if(contextCharLimit < 0) contextCharLimit = 0;
+        if(contextCharLimit > 10000) contextCharLimit = 10000;
+        ImGui::InputInt("RAG node count", &ragNodeCount);
+        if(ragNodeCount < 1) ragNodeCount = 1;
+        if(ragNodeCount > 100) ragNodeCount = 100;
+        ImGui::InputInt("LLM max_tokens", &llmMaxTokens);
+        if(llmMaxTokens < 1) llmMaxTokens = 1;
+        if(llmMaxTokens > 65536) llmMaxTokens = 65536;
         if(ImGui::Button("Apply")){
             client.setBaseUrl(endpointUrl);
             client.setApiKey(apiKeyInput);
@@ -275,8 +289,8 @@ void RenderVaultChat(Vault* vault){
                 }
                 pending->fut = std::async(std::launch::async, [assistantPtr = assistant, clientPtr = &client, inCopy, modelCopy, vault, streamPartialsPtr = &streamPartials, streamMutexPtr = &streamMutex](){
                     // build context and body similar to askTextWithRAG
-                    auto nodes = assistantPtr->retrieveRelevantNodes(inCopy, 5, modelCopy);
-                    std::string context = assistantPtr->getRAGContext(nodes);
+                    auto nodes = assistantPtr->retrieveRelevantNodes(inCopy, ragNodeCount, modelCopy, llmMaxTokens);
+                    std::string context = assistantPtr->getRAGContext(nodes, contextCharLimit);
                     nlohmann::json msg = nlohmann::json::array();
                     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
                     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + inCopy}});
@@ -325,8 +339,8 @@ void RenderVaultChat(Vault* vault){
                     return accumulated;
                 });
             } else {
-                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy](){
-                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, 5);
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, contextCharLimit, ragNodeCount, llmMaxTokens](){
+                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, ragNodeCount, contextCharLimit, llmMaxTokens);
                     if(r.empty()) r = "(no response)";
                     return r;
                 });
@@ -353,8 +367,8 @@ void RenderVaultChat(Vault* vault){
             auto modelCopy = selectedModel;
             auto vaultPtr = vault;
             pending->type = PendingRequest::Create;
-            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vaultPtr](){
-                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, 5);
+            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vaultPtr, contextCharLimit, ragNodeCount, llmMaxTokens](){
+                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, ragNodeCount, contextCharLimit, llmMaxTokens);
                 if(!j) return std::string("Failed to parse JSON from model response");
                 int64_t parent = vaultPtr->getSelectedItemID() >= 0 ? vaultPtr->getSelectedItemID() : -1;
                 int64_t id = assistantPtr->createNodeFromJSON(*j, parent);

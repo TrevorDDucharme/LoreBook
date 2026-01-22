@@ -86,7 +86,7 @@ std::vector<std::string> VaultAssistant::listModels(){
     return out;
 }
 
-std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const std::string& query, int k, const std::string& model){
+std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const std::string& query, int k, const std::string& model, int maxTokens){
     // Per request: ask the LLM to produce a JSON array of keywords from the question, then use a SQL
     // query to find nodes where any keyword appears in Name, Content, or Tags. The caller must supply
     // the model to use (no fallback).
@@ -110,7 +110,7 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
         }}
     };
 
-    nlohmann::json body = {{"model", model}, {"messages", msg}, {"response_format", response_format}, {"temperature", 0.0}};
+    nlohmann::json body = {{"model", model}, {"messages", msg}, {"response_format", response_format}, {"temperature", 0.0}, {"max_tokens", maxTokens}};
 
     auto r = client_->chatCompletions(body);
     if(!r.ok()){
@@ -223,17 +223,18 @@ std::string VaultAssistant::buildRAGContext(const std::vector<Node>& nodes, int 
     return ss.str();
 }
 
-std::string VaultAssistant::askTextWithRAG(const std::string& question, const std::string& model, int k){
+std::string VaultAssistant::askTextWithRAG(const std::string& question, const std::string& model, int k, int charLimitPerNode, int maxTokens){
     if(!client_) return std::string();
-    auto nodes = retrieveRelevantNodes(question, k, model);
-    std::string context = buildRAGContext(nodes);
+    auto nodes = retrieveRelevantNodes(question, k, model, maxTokens);
+    std::string context = buildRAGContext(nodes, charLimitPerNode);
     nlohmann::json msg = nlohmann::json::array();
     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + question}});
 
     nlohmann::json body = {
         {"model", model},
-        {"messages", msg}
+        {"messages", msg},
+        {"max_tokens", maxTokens}
     };
 
     // Log RAG inputs for debugging (truncate context to avoid huge logs)
@@ -257,10 +258,10 @@ std::string VaultAssistant::askTextWithRAG(const std::string& question, const st
     return std::string();
 }
 
-std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model, int k){
+std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model, int k, int charLimitPerNode, int maxTokens){
     if(!client_) return std::nullopt;
-    auto nodes = retrieveRelevantNodes(question, k, model);
-    std::string context = buildRAGContext(nodes);
+    auto nodes = retrieveRelevantNodes(question, k, model, maxTokens);
+    std::string context = buildRAGContext(nodes, charLimitPerNode);
     std::string sys = "You are an assistant that must respond only with a JSON document that conforms to the following JSON schema. Do not include any other text. Only output valid JSON.\nSchema: ";
     sys += schema.dump();
     nlohmann::json msg = nlohmann::json::array();
@@ -270,7 +271,8 @@ std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& 
     nlohmann::json body = {
         {"model", model},
         {"messages", msg},
-        {"temperature", 0.2}
+        {"temperature", 0.2},
+        {"max_tokens", maxTokens}
     };
 
     // Log RAG JSON request (include schema and truncated context for debugging)

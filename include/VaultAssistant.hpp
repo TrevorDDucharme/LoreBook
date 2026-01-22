@@ -17,14 +17,18 @@ public:
     std::vector<std::string> listModels();
 
     // Retrieve up to k relevant nodes by asking the LLM for keywords and SQL matching. The LLM model to use
-    // must be supplied via `model` (no fallback).
-    std::vector<Node> retrieveRelevantNodes(const std::string& query, int k, const std::string& model);
+    // must be supplied via `model` (no fallback). `maxTokens` controls the LLM request's max_tokens.
+    std::vector<Node> retrieveRelevantNodes(const std::string& query, int k, const std::string& model, int maxTokens);
 
     // Ask a free-text question using RAG (returns assistant text or empty on error)
-    std::string askTextWithRAG(const std::string& question, const std::string& model="gpt-4o-mini", int k=5);
+    // `charLimitPerNode` controls how much of each retrieved node is included in context (characters).
+    // `maxTokens` is the LLM request's `max_tokens` param.
+    std::string askTextWithRAG(const std::string& question, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int maxTokens=1024);
 
     // Ask a question and request JSON output that should match a schema. Returns parsed JSON if success.
-    std::optional<nlohmann::json> askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model="gpt-4o-mini", int k=5);
+    // `charLimitPerNode` controls how much of each retrieved node is included in context (characters).
+    // `maxTokens` is the LLM request's `max_tokens` param.
+    std::optional<nlohmann::json> askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int maxTokens=1024);
 
     // Create a node in the vault from JSON that contains at least {title, content}; returns created ID or -1
     int64_t createNodeFromJSON(const nlohmann::json& doc, int64_t parentIfAny = -1);
