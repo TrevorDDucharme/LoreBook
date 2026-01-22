@@ -105,6 +105,68 @@ std::unique_ptr<Vault> Vault::Open(const VaultConfig& cfg, std::string* outError
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
             if(!mb->execute(createPerms, &err)) PLOGW << "MySQL: failed creating ItemPermissions: " << err;
 
+            // Revisions and conflict tables for history and sync
+            const char* createRevisions = R"SQL(CREATE TABLE IF NOT EXISTS Revisions (
+                RevisionID CHAR(36) PRIMARY KEY,
+                ItemID BIGINT,
+                AuthorUserID BIGINT,
+                CreatedAt BIGINT,
+                BaseRevisionID CHAR(36),
+                RevisionType VARCHAR(32),
+                ChangeSummary VARCHAR(1024),
+                UnifiedDiff MEDIUMTEXT,
+                INDEX idx_Revisions_ItemID (ItemID),
+                INDEX idx_Revisions_CreatedAt (CreatedAt)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createRevisions, &err)) PLOGW << "MySQL: failed creating Revisions: " << err;
+
+            const char* createRevisionFields = R"SQL(CREATE TABLE IF NOT EXISTS RevisionFields (
+                RevisionID CHAR(36),
+                FieldName VARCHAR(128),
+                OldValue MEDIUMTEXT,
+                NewValue MEDIUMTEXT,
+                FieldDiff MEDIUMTEXT,
+                PRIMARY KEY (RevisionID, FieldName),
+                FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createRevisionFields, &err)) PLOGW << "MySQL: failed creating RevisionFields: " << err;
+
+            const char* createItemVersions = R"SQL(CREATE TABLE IF NOT EXISTS ItemVersions (
+                ItemID BIGINT,
+                VersionSeq BIGINT,
+                RevisionID CHAR(36),
+                CreatedAt BIGINT,
+                PRIMARY KEY (ItemID, VersionSeq),
+                INDEX idx_ItemVersions_Item (ItemID),
+                FOREIGN KEY (RevisionID) REFERENCES Revisions(RevisionID) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createItemVersions, &err)) PLOGW << "MySQL: failed creating ItemVersions: " << err;
+
+            const char* createRevisionParents = R"SQL(CREATE TABLE IF NOT EXISTS RevisionParents (
+                RevisionID CHAR(36),
+                ParentRevisionID CHAR(36),
+                PRIMARY KEY (RevisionID, ParentRevisionID)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createRevisionParents, &err)) PLOGW << "MySQL: failed creating RevisionParents: " << err;
+
+            const char* createConflicts = R"SQL(CREATE TABLE IF NOT EXISTS Conflicts (
+                ConflictID CHAR(36) PRIMARY KEY,
+                ItemID BIGINT,
+                FieldName VARCHAR(128),
+                BaseRevisionID CHAR(36),
+                LocalRevisionID CHAR(36),
+                RemoteRevisionID CHAR(36),
+                OriginatorUserID BIGINT,
+                CreatedAt BIGINT,
+                Status VARCHAR(32) DEFAULT 'open',
+                ResolvedByAdminUserID BIGINT,
+                ResolvedAt BIGINT,
+                ResolutionPayload MEDIUMTEXT,
+                INDEX idx_Conflicts_Status (Status),
+                INDEX idx_Conflicts_Origin (OriginatorUserID)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createConflicts, &err)) PLOGW << "MySQL: failed creating Conflicts: " << err;
+
             // Ensure schema version entry
             const char* insertSchemaVer = "INSERT INTO VaultMeta (`Key`,`Value`) VALUES ('SchemaVersion','3') ON DUPLICATE KEY UPDATE `Value`='3';";
             if(!mb->execute(insertSchemaVer, &err)) PLOGW << "MySQL: failed inserting SchemaVersion: " << err;

@@ -24,6 +24,7 @@
 #include "ModelViewer.hpp"
 #include "CryptoHelpers.hpp"
 #include "DBBackend.hpp"
+#include "VaultHistory.hpp"
 
 // Configuration for opening a vault with either local sqlite or remote MySQL
 struct VaultConfig {
@@ -39,6 +40,8 @@ class Vault{
     int64_t selectedItemID = -1;
     sqlite3* dbConnection = nullptr;
     std::unique_ptr<LoreBook::IDBBackend> dbBackend = nullptr;
+    std::unique_ptr<LoreBook::VaultHistory> history;
+
 
     // Content editor state
     std::string currentContent;
@@ -151,6 +154,9 @@ public:
     std::vector<int64_t> getParentsOfPublic(int64_t id){ return getParentsOf(id); }
     void selectItemByID(int64_t id){ selectedItemID = id; }
     int64_t getSelectedItemID() const { return selectedItemID; }
+
+    // Expose history helper for admin UIs (nullable)
+    LoreBook::VaultHistory* getHistoryPublic(){ return history.get(); } 
 
     // Tags helpers for UI
     std::vector<std::string> getTagsOfPublic(int64_t id){ return parseTags(getTagsOf(id)); }
@@ -500,6 +506,43 @@ public:
                 char* aErr = nullptr;
                 if(sqlite3_exec(dbConnection, alter, nullptr, nullptr, &aErr) != SQLITE_OK){
                     sqlite3_free(aErr);
+                }
+            }
+
+            // Ensure per-item VersionSeq and HeadRevision columns exist for revision history
+            {
+                sqlite3_stmt* pragma2 = nullptr;
+                bool hasVersionSeq = false, hasHeadRevision = false;
+                const char* pragmaSQL2 = "PRAGMA table_info(VaultItems);";
+                if(sqlite3_prepare_v2(dbConnection, pragmaSQL2, -1, &pragma2, nullptr) == SQLITE_OK){
+                    while(sqlite3_step(pragma2) == SQLITE_ROW){
+                        const unsigned char* colName = sqlite3_column_text(pragma2, 1);
+                        if(colName){
+                            std::string cname = reinterpret_cast<const char*>(colName);
+                            if(cname == "VersionSeq") hasVersionSeq = true;
+                            if(cname == "HeadRevision") hasHeadRevision = true;
+                        }
+                    }
+                }
+                if(pragma2) sqlite3_finalize(pragma2);
+                if(!hasVersionSeq){
+                    const char* alter = "ALTER TABLE VaultItems ADD COLUMN VersionSeq INTEGER DEFAULT 0;";
+                    char* aErr = nullptr;
+                    if(sqlite3_exec(dbConnection, alter, nullptr, nullptr, &aErr) != SQLITE_OK){ if(aErr) sqlite3_free(aErr); }
+                }
+                if(!hasHeadRevision){
+                    const char* alter2 = "ALTER TABLE VaultItems ADD COLUMN HeadRevision TEXT DEFAULT NULL;";
+                    char* aErr = nullptr;
+                    if(sqlite3_exec(dbConnection, alter2, nullptr, nullptr, &aErr) != SQLITE_OK){ if(aErr) sqlite3_free(aErr); }
+                }
+            }
+
+            // Initialize VaultHistory helper and ensure schema for revisions & conflicts
+            history = std::make_unique<LoreBook::VaultHistory>(dbConnection);
+            {
+                std::string histErr;
+                if(!history->ensureSchema(&histErr)){
+                    PLOGW << "VaultHistory: ensureSchema failed: " << histErr;
                 }
             }
         }
@@ -2192,6 +2235,8 @@ public:
             if(id <= 0) return -1;
             if(parentID == -1) parentID = getOrCreateRoot();
             addParentRelation(parentID, id);
+            // TODO: emit remote revision via dbBackend (remote revision storage not implemented yet)
+            PLOGD << "createItem: remote backend - revision emission TODO for item=" << id;
             return id;
         }
 
@@ -2209,6 +2254,16 @@ public:
         if(id <= 0) return -1;
         if(parentID == -1) parentID = getOrCreateRoot();
         addParentRelation(parentID, id);
+        // Emit local revision for creation
+        if(history){
+            std::map<std::string,std::pair<std::string,std::string>> fields;
+            fields["Name"] = std::make_pair(std::string(), name);
+            fields["Content"] = std::make_pair(std::string(), std::string());
+            fields["Tags"] = std::make_pair(std::string(), std::string());
+            int64_t author = (currentUserID > 0) ? currentUserID : 0;
+            std::string rid = history->recordRevision(id, author, "create", fields);
+            if(rid.empty()) PLOGW << "recordRevision failed for create item " << id;
+        }
         return id;
     }
 
@@ -2225,6 +2280,8 @@ public:
             stmt->bindString(2, joined);
             stmt->bindInt(3, id);
             if(!stmt->execute()) PLOGE << "createItemWithContent execute failed";
+            // TODO: remote backend revision emission
+            PLOGD << "createItemWithContent: remote backend - revision emission TODO for item=" << id;
             return id;
         }
 
@@ -2237,6 +2294,15 @@ public:
             sqlite3_step(stmt);
         }
         if(stmt) sqlite3_finalize(stmt);
+        // Record local revision for content & tags
+        if(history){
+            std::map<std::string,std::pair<std::string,std::string>> fields;
+            fields["Content"] = std::make_pair(std::string(), content);
+            fields["Tags"] = std::make_pair(std::string(), joined);
+            int64_t author = (currentUserID > 0) ? currentUserID : 0;
+            std::string rid = history->recordRevision(id, author, "update", fields);
+            if(rid.empty()) PLOGW << "recordRevision failed for createItemWithContent id=" << id;
+        }
         return id;
     }
 
@@ -2805,12 +2871,20 @@ private:
         const char* updateSQL = "UPDATE VaultItems SET Tags = ? WHERE ID = ?;";
         sqlite3_stmt* stmt = nullptr;
         std::string joined = joinTags(tags);
+        std::string oldTags = getTagsOf(id);
         if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_text(stmt,1, joined.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt,2, id);
             sqlite3_step(stmt);
         }
         if(stmt) sqlite3_finalize(stmt);
+        if(history){
+            std::map<std::string,std::pair<std::string,std::string>> fields;
+            fields["Tags"] = std::make_pair(oldTags, joined);
+            int64_t author = (currentUserID > 0) ? currentUserID : 0;
+            std::string rid = history->recordRevision(id, author, "update", fields);
+            if(rid.empty()) PLOGW << "recordRevision failed for setTagsFor id=" << id;
+        }
         return true;
     }
 
@@ -2833,12 +2907,20 @@ private:
         if(id < 0) return false;
         const char* sql = "UPDATE VaultItems SET Name = ? WHERE ID = ?;";
         sqlite3_stmt* stmt = nullptr;
+        std::string oldName = getItemName(id);
         if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_text(stmt,1,newName.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt,2, id);
             sqlite3_step(stmt);
         }
         if(stmt) sqlite3_finalize(stmt);
+        if(history){
+            std::map<std::string,std::pair<std::string,std::string>> fields;
+            fields["Name"] = std::make_pair(oldName, newName);
+            int64_t author = (currentUserID > 0) ? currentUserID : 0;
+            std::string rid = history->recordRevision(id, author, "update", fields);
+            if(rid.empty()) PLOGW << "recordRevision failed for renameItem id=" << id;
+        }
         return true;
     }
 
@@ -2861,7 +2943,20 @@ private:
         }
         if(stmt) sqlite3_finalize(stmt);
 
-        // delete the item itself
+        // delete the item itself (record a deletion revision first)
+        std::string oldName = getItemName(id);
+        std::string oldContent = getItemContentPublic(id);
+        std::string oldTags = getTagsOf(id);
+        // insert deletion revision
+        if(history){
+            std::map<std::string,std::pair<std::string,std::string>> fields;
+            fields["Name"] = std::make_pair(oldName, std::string());
+            fields["Content"] = std::make_pair(oldContent, std::string());
+            fields["Tags"] = std::make_pair(oldTags, std::string());
+            int64_t author = (currentUserID > 0) ? currentUserID : 0;
+            std::string rid = history->recordRevision(id, author, "delete", fields);
+            if(rid.empty()) PLOGW << "recordRevision failed for delete id=" << id;
+        }
         const char* delItem = "DELETE FROM VaultItems WHERE ID = ?;";
         if(sqlite3_prepare_v2(dbConnection, delItem, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt,1,id);
