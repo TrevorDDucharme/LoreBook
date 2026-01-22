@@ -22,6 +22,14 @@
 #include <thread>
 #include <memory>
 #include "ModelViewer.hpp"
+#include "CryptoHelpers.hpp"
+#include "DBBackend.hpp"
+
+// Configuration for opening a vault with either local sqlite or remote MySQL
+struct VaultConfig {
+    LoreBook::DBConnectionInfo connInfo;
+    bool createIfMissing = true; // if true attempt to create DB/tables when opening remote
+};
 
 class Vault{
     // forward declaration for chat render helper
@@ -30,6 +38,7 @@ class Vault{
     std::string name;
     int64_t selectedItemID = -1;
     sqlite3* dbConnection = nullptr;
+    std::unique_ptr<LoreBook::IDBBackend> dbBackend = nullptr;
 
     // Content editor state
     std::string currentContent;
@@ -110,6 +119,11 @@ class Vault{
 
     // DB mutex for background fetch updates
     std::mutex dbMutex;
+
+    // Current authenticated user
+    int64_t currentUserID = -1;
+    std::string currentUserDisplayName;
+
     // UI state for Set Filter modal
     bool showSetFilterModal = false;
     int64_t setFilterTargetID = -1;
@@ -122,10 +136,15 @@ class Vault{
 
 public:
     // Return whether the underlying DB is open
-    bool isOpen() const { return dbConnection != nullptr; }
+    bool isOpen() const { return dbConnection != nullptr || (dbBackend && dbBackend->isOpen()); }
+
+    // Factory: open a vault with a VaultConfig (supports local SQLite and remote MySQL)
+    static std::unique_ptr<Vault> Open(const VaultConfig& cfg, std::string* outError = nullptr);
 
     // Expose raw DB connection for helpers (use carefully)
     sqlite3* getDBPublic() const { return dbConnection; }
+    // Expose backend pointer for remote DBs (MySQL)
+    LoreBook::IDBBackend* getDBBackendPublic() const { return dbBackend.get(); }
 
     // Public API for GraphView and other UI integrations
     std::vector<std::pair<int64_t,std::string>> getAllItemsPublic(){ return getAllItems(); }
@@ -137,23 +156,62 @@ public:
     std::vector<std::string> getTagsOfPublic(int64_t id){ return parseTags(getTagsOf(id)); }
     std::vector<std::string> getAllTagsPublic(){
         std::unordered_set<std::string> s;
-        const char* sql = "SELECT Tags FROM VaultItems;";
-        sqlite3_stmt* stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
-            while(sqlite3_step(stmt) == SQLITE_ROW){
-                const unsigned char* text = sqlite3_column_text(stmt, 0);
-                if(text){
-                    auto tags = parseTags(reinterpret_cast<const char*>(text));
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT Tags FROM VaultItems;", &err);
+            if(!stmt){ PLOGW << "getAllTags prepare failed: " << err; }
+            else{
+                auto rs = stmt->executeQuery();
+                while(rs && rs->next()){
+                    auto tags = parseTags(rs->getString(0));
                     for(auto &t : tags) s.insert(t);
                 }
             }
+        } else {
+            const char* sql = "SELECT Tags FROM VaultItems;";
+            sqlite3_stmt* stmt = nullptr;
+            if(dbConnection && sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+                while(sqlite3_step(stmt) == SQLITE_ROW){
+                    const unsigned char* text = sqlite3_column_text(stmt, 0);
+                    if(text){
+                        auto tags = parseTags(reinterpret_cast<const char*>(text));
+                        for(auto &t : tags) s.insert(t);
+                    }
+                }
+            }
+            if(stmt) sqlite3_finalize(stmt);
         }
-        if(stmt) sqlite3_finalize(stmt);
         std::vector<std::string> out; out.reserve(s.size());
         for(auto &t : s) out.push_back(t);
         std::sort(out.begin(), out.end());
         return out;
     }
+
+    // User & Auth API
+    bool hasUsers() const;
+    int64_t createUser(const std::string& username, const std::string& displayName, const std::string& passwordPlain, bool isAdmin);
+    int64_t authenticateUser(const std::string& username, const std::string& passwordPlain);
+    int64_t getCurrentUserID() const;
+    std::string getCurrentUserDisplayName() const;
+    void setCurrentUser(int64_t userID);
+    void clearCurrentUser();
+    struct User { int64_t id; std::string username; std::string displayName; bool isAdmin; };
+    std::vector<User> listUsers() const;
+    bool isUserAdmin(int64_t userID) const;
+    bool updateUserDisplayName(int64_t userID, const std::string& newDisplayName);
+    bool changeUserPassword(int64_t userID, const std::string& newPasswordPlain);
+    bool setUserAdminFlag(int64_t userID, bool isAdmin);
+    bool deleteUser(int64_t userID);
+
+    // Permissions API
+    struct ItemPermission { int64_t id; int64_t itemID; int64_t userID; int level; int64_t createdAt; };
+    bool setItemPermission(int64_t itemID, int64_t userID, int level);
+    bool removeItemPermission(int64_t itemID, int64_t userID);
+    std::vector<ItemPermission> listItemPermissions(int64_t itemID) const;
+    bool isItemVisibleToUser(int64_t itemID, int64_t userID) const;
+    bool isItemEditableByUser(int64_t itemID, int64_t userID) const;
+    std::vector<std::pair<int64_t,std::string>> getAllItemsForUser(int64_t userID);
+
 
     // Tag filter API (used by GraphView to filter tree)
     void setTagFilter(const std::vector<std::string>& tags, bool modeAll){ activeTagFilter = tags; tagFilterModeAll = modeAll; }
@@ -370,17 +428,53 @@ public:
         errMsg = nullptr;
         if(sqlite3_exec(dbConnection, createAttachmentsSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
 
-        // Ensure SchemaVersion entry exists (set to 2 for attachment support)
+        // Ensure Users and ItemPermissions tables exist for user & permission support
+        const char* createUsersSQL = "CREATE TABLE IF NOT EXISTS Users ("
+                                     "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                     "Username TEXT NOT NULL UNIQUE, "
+                                     "DisplayName TEXT, "
+                                     "PasswordHash TEXT, "
+                                     "Salt TEXT, "
+                                     "Iterations INTEGER DEFAULT 100000, "
+                                     "IsAdmin INTEGER DEFAULT 0, "
+                                     "CreatedAt INTEGER DEFAULT (strftime('%s','now'))"
+                                     ");";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createUsersSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        const char* createPermsSQL = "CREATE TABLE IF NOT EXISTS ItemPermissions ("
+                                     "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                     "ItemID INTEGER NOT NULL, "
+                                     "UserID INTEGER NOT NULL, "
+                                     "Level INTEGER NOT NULL DEFAULT 0, "
+                                     "CreatedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                     "UNIQUE(ItemID, UserID), "
+                                     "FOREIGN KEY(ItemID) REFERENCES VaultItems(ID), "
+                                     "FOREIGN KEY(UserID) REFERENCES Users(ID)"
+                                     ");";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, createPermsSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        const char* idxPermsSQL = "CREATE INDEX IF NOT EXISTS idx_ItemPermissions_ItemUser ON ItemPermissions(ItemID, UserID);";
+        errMsg = nullptr;
+        if(sqlite3_exec(dbConnection, idxPermsSQL, nullptr, nullptr, &errMsg) != SQLITE_OK){ if(errMsg) sqlite3_free(errMsg); }
+
+        // Ensure SchemaVersion entry exists (set to 3 for user support)
         {
             sqlite3_stmt* verStmt = nullptr;
             const char* selectVer = "SELECT Value FROM VaultMeta WHERE Key = 'SchemaVersion';";
             bool hasVer = false;
+            int verInt = 0;
             if(sqlite3_prepare_v2(dbConnection, selectVer, -1, &verStmt, nullptr) == SQLITE_OK){
-                if(sqlite3_step(verStmt) == SQLITE_ROW) hasVer = true;
+                if(sqlite3_step(verStmt) == SQLITE_ROW){
+                    const unsigned char* v = sqlite3_column_text(verStmt, 0);
+                    if(v) verInt = std::atoi(reinterpret_cast<const char*>(v));
+                    hasVer = true;
+                }
             }
             if(verStmt) sqlite3_finalize(verStmt);
-            if(!hasVer){
-                const char* insertVer = "INSERT OR REPLACE INTO VaultMeta (Key, Value) VALUES ('SchemaVersion', '2');";
+            if(!hasVer || verInt < 3){
+                const char* insertVer = "INSERT OR REPLACE INTO VaultMeta (Key, Value) VALUES ('SchemaVersion', '3');";
                 char* iErr = nullptr;
                 if(sqlite3_exec(dbConnection, insertVer, nullptr, nullptr, &iErr) != SQLITE_OK){ if(iErr) sqlite3_free(iErr); }
             }
@@ -413,7 +507,43 @@ public:
     }
 
     // Load persisted node filters from DB into memory
+            // New constructor: accept IDBBackend for remote backends (MySQL)
+        Vault(std::unique_ptr<LoreBook::IDBBackend> backend, const std::string& vaultName){
+            name = vaultName;
+            dbBackend = std::move(backend);
+            // No schema creation yet — existing schema expected or created elsewhere
+        }
+
     void loadNodeFiltersFromDB(){
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT NodeID, Mode, Tags, Expr FROM VaultNodeFilters;", &err);
+            if(!stmt){ PLOGW << "loadNodeFilters prepare failed: " << err; return; }
+            auto rs = stmt->executeQuery();
+            while(rs && rs->next()){
+                int64_t nid = rs->getInt64(0);
+                ChildFilterSpec s;
+                s.mode = rs->getString(1);
+                std::string tags = rs->getString(2);
+                if(!tags.empty()){
+                    size_t pos = 0;
+                    while(pos < tags.size()){
+                        size_t comma = tags.find(',', pos);
+                        std::string part = tags.substr(pos, (comma==std::string::npos? tags.size()-pos : comma-pos));
+                        // trim
+                        while(!part.empty() && std::isspace((unsigned char)part.front())) part.erase(part.begin());
+                        while(!part.empty() && std::isspace((unsigned char)part.back())) part.pop_back();
+                        if(!part.empty()) s.tags.push_back(part);
+                        if(comma==std::string::npos) break;
+                        pos = comma+1;
+                    }
+                }
+                s.expr = rs->getString(3);
+                nodeChildFilters[nid] = s;
+            }
+            return;
+        }
+
         if(!dbConnection) return;
         const char* sql = "SELECT NodeID, Mode, Tags, Expr FROM VaultNodeFilters;";
         sqlite3_stmt* stmt = nullptr;
@@ -447,6 +577,20 @@ public:
     }
 
     void saveNodeFilterToDB(int64_t nodeID, const ChildFilterSpec& spec){
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("INSERT OR REPLACE INTO VaultNodeFilters (NodeID, Mode, Tags, Expr) VALUES (?, ?, ?, ?);", &err);
+            if(!stmt){ PLOGW << "saveNodeFilter prepare failed: " << err; return; }
+            stmt->bindInt(1, nodeID);
+            stmt->bindString(2, spec.mode);
+            std::string joined;
+            for(size_t i=0;i<spec.tags.size();++i){ if(i) joined += ","; joined += spec.tags[i]; }
+            stmt->bindString(3, joined);
+            stmt->bindString(4, spec.expr);
+            stmt->execute();
+            return;
+        }
+
         if(!dbConnection) return;
         const char* sql = "INSERT OR REPLACE INTO VaultNodeFilters (NodeID, Mode, Tags, Expr) VALUES (?, ?, ?, ?);";
         sqlite3_stmt* stmt = nullptr;
@@ -463,6 +607,15 @@ public:
     }
 
     void clearNodeFilterFromDB(int64_t nodeID){
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("DELETE FROM VaultNodeFilters WHERE NodeID = ?;", &err);
+            if(!stmt){ PLOGW << "clearNodeFilter prepare failed: " << err; return; }
+            stmt->bindInt(1, nodeID);
+            stmt->execute();
+            return;
+        }
+
         if(!dbConnection) return;
         const char* sql = "DELETE FROM VaultNodeFilters WHERE NodeID = ?;";
         sqlite3_stmt* stmt = nullptr;
@@ -476,11 +629,53 @@ public:
     
 
     int64_t getOrCreateRoot(){
+        // If a remote backend is in use, prefer it
+        if(dbBackend && dbBackend->isOpen()){
+            int64_t id = -1;
+            // Try IsRoot flag
+            {
+                std::string err;
+                auto stmt = dbBackend->prepare("SELECT ID FROM VaultItems WHERE IsRoot = 1 LIMIT 1;", &err);
+                if(stmt){ auto rs = stmt->executeQuery(); if(rs && rs->next()) return rs->getInt64(0); }
+            }
+            // Fall back to name-based lookup and set IsRoot
+            {
+                std::string err;
+                auto stmt = dbBackend->prepare("SELECT ID FROM VaultItems WHERE Name = ? LIMIT 1;", &err);
+                if(stmt){ stmt->bindString(1, name); auto rs = stmt->executeQuery(); if(rs && rs->next()){ id = rs->getInt64(0); } }
+                if(id != -1){ auto u = dbBackend->prepare("UPDATE VaultItems SET IsRoot = 1 WHERE ID = ?;", &err); if(u){ u->bindInt(1, id); u->execute(); } return id; }
+            }
+            // Find candidate with no parents
+            {
+                std::string err;
+                auto stmt = dbBackend->prepare("SELECT ID FROM VaultItems WHERE ID NOT IN (SELECT ChildID FROM VaultItemChildren) LIMIT 1;", &err);
+                if(stmt){ auto rs = stmt->executeQuery(); if(rs && rs->next()){ id = rs->getInt64(0); } }
+                if(id != -1){ std::string err2; auto u = dbBackend->prepare("UPDATE VaultItems SET IsRoot = 1 WHERE ID = ?;", &err2); if(u){ u->bindInt(1, id); u->execute(); } return id; }
+            }
+            // Ensure IsRoot column exists (add if missing)
+            if(!dbBackend->hasColumn("VaultItems", "IsRoot")){
+                std::string err;
+                if(!dbBackend->execute("ALTER TABLE VaultItems ADD COLUMN IsRoot TINYINT DEFAULT 0;", &err)) PLOGW << "MySQL: failed to add IsRoot column: " << err;
+            }
+            // Insert new root
+            {
+                std::string err;
+                auto stmt = dbBackend->prepare("INSERT INTO VaultItems (Name, Content, Tags, IsRoot) VALUES (?, ?, ?, 1);", &err);
+                if(!stmt){ PLOGE << "getOrCreateRoot prepare failed: " << err; return -1; }
+                stmt->bindString(1, name);
+                stmt->bindString(2, "");
+                stmt->bindString(3, "");
+                if(!stmt->execute()){ PLOGE << "getOrCreateRoot insert failed"; return -1; }
+                return dbBackend->lastInsertId();
+            }
+        }
+
+        // Local SQLite path
         // Prefer explicit IsRoot flag (so the root is identified by ID, not by mutable Name)
         const char* findByFlag = "SELECT ID FROM VaultItems WHERE IsRoot = 1 LIMIT 1;";
         sqlite3_stmt* stmt = nullptr;
         int64_t id = -1;
-        if(sqlite3_prepare_v2(dbConnection, findByFlag, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, findByFlag, -1, &stmt, nullptr) == SQLITE_OK){
             if(sqlite3_step(stmt) == SQLITE_ROW){
                 id = sqlite3_column_int64(stmt, 0);
             }
@@ -490,7 +685,7 @@ public:
 
         // Fall back to legacy name-based lookup (for older DBs), and mark it IsRoot for future runs
         const char* findByName = "SELECT ID FROM VaultItems WHERE Name = ? LIMIT 1;";
-        if(sqlite3_prepare_v2(dbConnection, findByName, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, findByName, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
             if(sqlite3_step(stmt) == SQLITE_ROW){
                 id = sqlite3_column_int64(stmt, 0);
@@ -499,7 +694,7 @@ public:
         if(stmt) sqlite3_finalize(stmt);
         if(id != -1){
             const char* setFlag = "UPDATE VaultItems SET IsRoot = 1 WHERE ID = ?;";
-            if(sqlite3_prepare_v2(dbConnection, setFlag, -1, &stmt, nullptr) == SQLITE_OK){
+            if(dbConnection && sqlite3_prepare_v2(dbConnection, setFlag, -1, &stmt, nullptr) == SQLITE_OK){
                 sqlite3_bind_int64(stmt, 1, id);
                 sqlite3_step(stmt);
             }
@@ -509,7 +704,7 @@ public:
 
         // Another fallback: find an item that has no parents (candidate for root)
         const char* findNoParents = "SELECT ID FROM VaultItems WHERE ID NOT IN (SELECT ChildID FROM VaultItemChildren) LIMIT 1;";
-        if(sqlite3_prepare_v2(dbConnection, findNoParents, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, findNoParents, -1, &stmt, nullptr) == SQLITE_OK){
             if(sqlite3_step(stmt) == SQLITE_ROW){
                 id = sqlite3_column_int64(stmt, 0);
             }
@@ -517,7 +712,7 @@ public:
         if(stmt) sqlite3_finalize(stmt);
         if(id != -1){
             const char* setFlag = "UPDATE VaultItems SET IsRoot = 1 WHERE ID = ?;";
-            if(sqlite3_prepare_v2(dbConnection, setFlag, -1, &stmt, nullptr) == SQLITE_OK){
+            if(dbConnection && sqlite3_prepare_v2(dbConnection, setFlag, -1, &stmt, nullptr) == SQLITE_OK){
                 sqlite3_bind_int64(stmt, 1, id);
                 sqlite3_step(stmt);
             }
@@ -527,14 +722,15 @@ public:
 
         // Otherwise, create a new root record and mark it IsRoot
         const char* insertSQL = "INSERT INTO VaultItems (Name, Content, Tags, IsRoot) VALUES (?, ?, ?, 1);";
-        if(sqlite3_prepare_v2(dbConnection, insertSQL, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, insertSQL, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 2, "", -1, SQLITE_STATIC);
             sqlite3_bind_text(stmt, 3, "", -1, SQLITE_STATIC);
             sqlite3_step(stmt);
         }
         if(stmt) sqlite3_finalize(stmt);
-        return sqlite3_last_insert_rowid(dbConnection);
+        if(dbConnection) return sqlite3_last_insert_rowid(dbConnection);
+        return -1;
     }
 
     void drawVaultTree(){
@@ -991,6 +1187,17 @@ public:
         return false;
     }
 
+    // Return whether node or any descendant is visible to the user
+    bool nodeOrDescendantVisible(int64_t nodeID, int64_t userID, std::unordered_set<int64_t> &visited){
+        if(visited.find(nodeID) != visited.end()) return false; // cycle protection
+        visited.insert(nodeID);
+        if(isItemVisibleToUser(nodeID, userID)) return true;
+        std::vector<int64_t> children;
+        getChildren(nodeID, children);
+        for(auto c : children){ if(nodeOrDescendantVisible(c, userID, visited)) return true; }
+        return false;
+    }
+
     // Backwards-compat wrapper used elsewhere where no filters are passed
     bool nodeOrDescendantMatches(int64_t nodeID, std::unordered_set<int64_t> &visited){
         std::vector<ChildFilterSpec> specs;
@@ -1047,38 +1254,68 @@ public:
 
         // If selection changed, save previous content if dirty then load content from DB
         if(loadedItemID != selectedItemID){
-            if(contentDirty && loadedItemID >= 0 && dbConnection){
-                const char* updateSQL = "UPDATE VaultItems SET Content = ? WHERE ID = ?;";
-                sqlite3_stmt* stmt = nullptr;
-                if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
-                    sqlite3_bind_text(stmt, 1, currentContent.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(stmt, 2, loadedItemID);
-                    sqlite3_step(stmt);
+            if(contentDirty && loadedItemID >= 0){
+                // Prefer remote backend
+                if(dbBackend && dbBackend->isOpen()){
+                    std::string err;
+                    auto stmt = dbBackend->prepare("UPDATE VaultItems SET Content = ? WHERE ID = ?;", &err);
+                    if(!stmt){ PLOGW << "save content prepare failed: " << err; }
+                    else { stmt->bindString(1, currentContent); stmt->bindInt(2, loadedItemID); if(!stmt->execute()) PLOGW << "save content execute failed"; }
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
+                } else if(dbConnection){
+                    const char* updateSQL = "UPDATE VaultItems SET Content = ? WHERE ID = ?;";
+                    sqlite3_stmt* stmt = nullptr;
+                    if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
+                        sqlite3_bind_text(stmt, 1, currentContent.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_int64(stmt, 2, loadedItemID);
+                        sqlite3_step(stmt);
+                    }
+                    if(stmt) sqlite3_finalize(stmt);
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
                 }
-                if(stmt) sqlite3_finalize(stmt);
-                contentDirty = false;
-                lastSaveTime = ImGui::GetTime();
             }
 
-            const char* sql = "SELECT Name, Content, Tags FROM VaultItems WHERE ID = ?;";
-            sqlite3_stmt* stmt = nullptr;
-            currentContent.clear();
-            currentTitle.clear();
-            currentTags.clear();
-            if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
-                sqlite3_bind_int64(stmt, 1, selectedItemID);
-                if(sqlite3_step(stmt) == SQLITE_ROW){
-                    const unsigned char* nameText = sqlite3_column_text(stmt, 0);
-                    const unsigned char* contentText = sqlite3_column_text(stmt, 1);
-                    const unsigned char* tagsText = sqlite3_column_text(stmt, 2);
-                    if(nameText) currentTitle = reinterpret_cast<const char*>(nameText);
-                    if(contentText) currentContent = reinterpret_cast<const char*>(contentText);
-                    if(tagsText) currentTags = reinterpret_cast<const char*>(tagsText);
+            currentContent.clear(); currentTitle.clear(); currentTags.clear();
+            // Load content from DB (prefer remote)
+            if(dbBackend && dbBackend->isOpen()){
+                std::string err;
+                auto stmt = dbBackend->prepare("SELECT Name, Content, Tags FROM VaultItems WHERE ID = ? LIMIT 1;", &err);
+                if(!stmt){ PLOGW << "load content prepare failed: " << err; }
+                else {
+                    stmt->bindInt(1, selectedItemID);
+                    auto rs = stmt->executeQuery();
+                    if(rs && rs->next()){
+                        currentTitle = rs->getString(0);
+                        currentContent = rs->getString(1);
+                        currentTags = rs->getString(2);
+                    } else {
+                        PLOGW << "load content: no row for ID=" << selectedItemID;
+                    }
                 }
+            } else if(dbConnection){
+                const char* sql = "SELECT Name, Content, Tags FROM VaultItems WHERE ID = ?;";
+                sqlite3_stmt* stmt = nullptr;
+                if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+                    sqlite3_bind_int64(stmt, 1, selectedItemID);
+                    if(sqlite3_step(stmt) == SQLITE_ROW){
+                        const unsigned char* nameText = sqlite3_column_text(stmt, 0);
+                        const unsigned char* contentText = sqlite3_column_text(stmt, 1);
+                        const unsigned char* tagsText = sqlite3_column_text(stmt, 2);
+                        if(nameText) currentTitle = reinterpret_cast<const char*>(nameText);
+                        if(contentText) currentContent = reinterpret_cast<const char*>(contentText);
+                        if(tagsText) currentTags = reinterpret_cast<const char*>(tagsText);
+                    }
+                }
+                if(stmt) sqlite3_finalize(stmt);
             }
-            if(stmt) sqlite3_finalize(stmt);
             loadedItemID = selectedItemID;
             contentDirty = false;
+        }
+
+        // Compute edit permissions for current user
+        bool canEdit = true;
+        if(loadedItemID >= 0 && currentUserID > 0){
+            canEdit = isItemEditableByUser(loadedItemID, currentUserID);
         }
 
         // Live Markdown editor + preview (split view)
@@ -1117,46 +1354,67 @@ public:
         // Title editable
         char titleBuf[256];
         strncpy(titleBuf, currentTitle.c_str(), sizeof(titleBuf)); titleBuf[sizeof(titleBuf)-1] = '\0';
+        if(!canEdit) ImGui::BeginDisabled();
         if(ImGui::InputText("Title", titleBuf, sizeof(titleBuf))){
             std::string newTitle = std::string(titleBuf);
-            if(dbConnection && loadedItemID >= 0){
-                const char* updateSQL = "UPDATE VaultItems SET Name = ? WHERE ID = ?;";
-                sqlite3_stmt* stmt = nullptr;
-                if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
-                    sqlite3_bind_text(stmt, 1, newTitle.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(stmt, 2, loadedItemID);
-                    sqlite3_step(stmt);
+            if(loadedItemID >= 0){
+                if(dbBackend && dbBackend->isOpen()){
+                    std::string err;
+                    auto stmt = dbBackend->prepare("UPDATE VaultItems SET Name = ? WHERE ID = ?;", &err);
+                    if(!stmt){ PLOGW << "update title prepare failed: " << err; }
+                    else { stmt->bindString(1, newTitle); stmt->bindInt(2, loadedItemID); if(!stmt->execute()) PLOGW << "update title execute failed"; }
+                    currentTitle = newTitle; statusMessage = "Title saved"; statusTime = ImGui::GetTime();
+                } else if(dbConnection){
+                    const char* updateSQL = "UPDATE VaultItems SET Name = ? WHERE ID = ?;";
+                    sqlite3_stmt* stmt = nullptr;
+                    if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
+                        sqlite3_bind_text(stmt, 1, newTitle.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_int64(stmt, 2, loadedItemID);
+                        sqlite3_step(stmt);
+                    }
+                    if(stmt) sqlite3_finalize(stmt);
+                    currentTitle = newTitle; statusMessage = "Title saved"; statusTime = ImGui::GetTime();
+                } else {
+                    currentTitle = newTitle;
                 }
-                if(stmt) sqlite3_finalize(stmt);
-                currentTitle = newTitle;
-                statusMessage = "Title saved";
-                statusTime = ImGui::GetTime();
             } else {
                 currentTitle = newTitle;
             }
         }
+        if(!canEdit) ImGui::EndDisabled();
 
         ImGui::Separator();
 
         // Editor content
         ImVec2 editorSize = ImVec2(leftWidth - 16, mainHeight - 40);
+        if(!canEdit) ImGui::BeginDisabled();
         if(ImGui::InputTextMultiline("##md_editor", &currentContent, editorSize, ImGuiInputTextFlags_AllowTabInput)){
             // Immediate save on modification
-            if(dbConnection && loadedItemID >= 0){
-                const char* updateSQL = "UPDATE VaultItems SET Content = ? WHERE ID = ?;";
-                sqlite3_stmt* stmt = nullptr;
-                if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
-                    sqlite3_bind_text(stmt, 1, currentContent.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int64(stmt, 2, loadedItemID);
-                    sqlite3_step(stmt);
+            if(loadedItemID >= 0){
+                if(dbBackend && dbBackend->isOpen()){
+                    std::string err;
+                    auto stmt = dbBackend->prepare("UPDATE VaultItems SET Content = ? WHERE ID = ?;", &err);
+                    if(!stmt){ PLOGW << "update content prepare failed: " << err; }
+                    else { stmt->bindString(1, currentContent); stmt->bindInt(2, loadedItemID); if(!stmt->execute()) PLOGW << "update content execute failed"; }
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
+                } else if(dbConnection){
+                    const char* updateSQL = "UPDATE VaultItems SET Content = ? WHERE ID = ?;";
+                    sqlite3_stmt* stmt = nullptr;
+                    if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
+                        sqlite3_bind_text(stmt, 1, currentContent.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_int64(stmt, 2, loadedItemID);
+                        sqlite3_step(stmt);
+                    }
+                    if(stmt) sqlite3_finalize(stmt);
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
+                } else {
+                    contentDirty = true;
                 }
-                if(stmt) sqlite3_finalize(stmt);
-                contentDirty = false;
-                lastSaveTime = ImGui::GetTime();
             } else {
                 contentDirty = true;
             }
         }
+        if(!canEdit) ImGui::EndDisabled();
 
         // Show saved indicator in editor if recently saved
         if(lastSaveTime > 0.0f && (ImGui::GetTime() - lastSaveTime) < 1.5f){
@@ -1239,7 +1497,8 @@ public:
             ImGui::Separator();
         }
         // Use a reserved height for meta area to prevent preview from stealing space
-        ImGui::BeginChild("VaultMeta", ImVec2(0, bottomMetaHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        // Make the meta area scrollable so content isn't cut off when it exceeds the reserved height
+        ImGui::BeginChild("VaultMeta", ImVec2(0, bottomMetaHeight), true); 
 
         // Tags UI as chips with remove X
         ImGui::TextDisabled("Tags:");
@@ -1248,12 +1507,16 @@ public:
         for(size_t i = 0; i < tags.size(); ++i){
             ImGui::PushID(static_cast<int>(i));
             ImGui::Button(tags[i].c_str()); ImGui::SameLine();
-            if(ImGui::SmallButton((std::string("x##tag") + std::to_string(i)).c_str())){
-                if(removeTagFromItem(loadedItemID, tags[i])){
-                    currentTags = getTagsOf(loadedItemID);
-                    statusMessage = "Tag removed";
-                    statusTime = ImGui::GetTime();
+            if(canEdit){
+                if(ImGui::SmallButton((std::string("x##tag") + std::to_string(i)).c_str())){
+                    if(removeTagFromItem(loadedItemID, tags[i])){
+                        currentTags = getTagsOf(loadedItemID);
+                        statusMessage = "Tag removed";
+                        statusTime = ImGui::GetTime();
+                    }
                 }
+            } else {
+                ImGui::BeginDisabled(); ImGui::SmallButton((std::string("x##tag") + std::to_string(i)).c_str()); ImGui::EndDisabled();
             }
             ImGui::SameLine();
             ImGui::PopID();
@@ -1261,37 +1524,44 @@ public:
         ImGui::NewLine();
         static char addTagBuf[64] = "";
         ImGui::SetNextItemWidth(200);
-        if(ImGui::InputTextWithHint("##addtag", "Add tag and press Enter", addTagBuf, sizeof(addTagBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
-            std::string t = std::string(addTagBuf);
-            // trim
-            while(!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
-            while(!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
-            if(!t.empty()){
-                if(addTagToItem(loadedItemID, t)){
-                    currentTags = getTagsOf(loadedItemID);
-                    statusMessage = "Tag added";
-                } else {
-                    statusMessage = "Tag already exists or failed";
+        if(canEdit){
+            if(ImGui::InputTextWithHint("##addtag", "Add tag and press Enter", addTagBuf, sizeof(addTagBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
+                std::string t = std::string(addTagBuf);
+                // trim
+                while(!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
+                while(!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
+                if(!t.empty()){
+                    if(addTagToItem(loadedItemID, t)){
+                        currentTags = getTagsOf(loadedItemID);
+                        statusMessage = "Tag added";
+                    } else {
+                        statusMessage = "Tag already exists or failed";
+                    }
+                    statusTime = ImGui::GetTime();
+                    addTagBuf[0] = '\0';
                 }
-                statusTime = ImGui::GetTime();
-                addTagBuf[0] = '\0';
             }
-        }
-        ImGui::SameLine();
-        if(ImGui::Button("Add Tag")){
-            std::string t = std::string(addTagBuf);
-            while(!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
-            while(!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
-            if(!t.empty()){
-                if(addTagToItem(loadedItemID, t)){
-                    currentTags = getTagsOf(loadedItemID);
-                    statusMessage = "Tag added";
-                } else {
-                    statusMessage = "Tag already exists or failed";
+            ImGui::SameLine();
+            if(ImGui::Button("Add Tag")){
+                std::string t = std::string(addTagBuf);
+                while(!t.empty() && std::isspace((unsigned char)t.front())) t.erase(t.begin());
+                while(!t.empty() && std::isspace((unsigned char)t.back())) t.pop_back();
+                if(!t.empty()){
+                    if(addTagToItem(loadedItemID, t)){
+                        currentTags = getTagsOf(loadedItemID);
+                        statusMessage = "Tag added";
+                    } else {
+                        statusMessage = "Tag already exists or failed";
+                    }
+                    statusTime = ImGui::GetTime();
+                    addTagBuf[0] = '\0';
                 }
-                statusTime = ImGui::GetTime();
-                addTagBuf[0] = '\0';
             }
+        } else {
+            ImGui::BeginDisabled();
+            ImGui::InputTextWithHint("##addtag", "Add tag and press Enter", addTagBuf, sizeof(addTagBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine(); ImGui::Button("Add Tag");
+            ImGui::EndDisabled();
         }
 
         ImGui::Separator();
@@ -1344,14 +1614,73 @@ public:
                 std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
                 if(filter.size() && lowerName.find(filter) == std::string::npos) continue;
                 std::string selLabel = name + "##" + std::to_string(id);
-                if(ImGui::Selectable(selLabel.c_str())){
-                    if(addParentRelation(id, loadedItemID)){
-                        statusMessage = "Parent added";
-                    } else {
-                        statusMessage = "Failed to add parent";
+                if(canEdit){
+                    if(ImGui::Selectable(selLabel.c_str())){
+                        if(addParentRelation(id, loadedItemID)){
+                            statusMessage = "Parent added";
+                        } else {
+                            statusMessage = "Failed to add parent";
+                        }
+                        statusTime = ImGui::GetTime();
                     }
-                    statusTime = ImGui::GetTime();
+                } else {
+                    ImGui::BeginDisabled(); ImGui::Selectable(selLabel.c_str()); ImGui::EndDisabled();
                 }
+            }
+            ImGui::EndChild();
+        }
+
+        // Visibility UI (per-user None/View/Edit). Only admins can change permissions.
+        ImGui::Separator();
+        ImGui::TextDisabled("Visibility:");
+        ImGui::SameLine();
+        {
+            // determine if current user is admin (to allow edits to perms)
+            bool currentIsAdmin = false;
+            if(currentUserID > 0){
+                sqlite3_stmt* astmt = nullptr;
+                const char* aSql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+                if(sqlite3_prepare_v2(dbConnection, aSql, -1, &astmt, nullptr) == SQLITE_OK){
+                    sqlite3_bind_int64(astmt, 1, currentUserID);
+                    if(sqlite3_step(astmt) == SQLITE_ROW) currentIsAdmin = (sqlite3_column_int(astmt,0) != 0);
+                }
+                if(astmt) sqlite3_finalize(astmt);
+            }
+            ImGui::BeginChild("VisibilityList", ImVec2(0, 100), true);
+            auto users = listUsers();
+            if(users.empty()) ImGui::TextDisabled("No users defined");
+            for(auto &u : users){
+                ImGui::PushID(static_cast<int>(u.id));
+                std::string label = (u.displayName.empty() ? u.username : u.displayName);
+                ImGui::TextUnformatted(label.c_str()); ImGui::SameLine(220);
+                // read explicit permission (default to View when not present)
+                int sel = 1;
+                sqlite3_stmt* pstm = nullptr;
+                const char* q = "SELECT Level FROM ItemPermissions WHERE ItemID = ? AND UserID = ? LIMIT 1;";
+                if(sqlite3_prepare_v2(dbConnection, q, -1, &pstm, nullptr) == SQLITE_OK){
+                    sqlite3_bind_int64(pstm, 1, loadedItemID);
+                    sqlite3_bind_int64(pstm, 2, u.id);
+                    if(sqlite3_step(pstm) == SQLITE_ROW) sel = sqlite3_column_int(pstm, 0);
+                }
+                if(pstm) sqlite3_finalize(pstm);
+                // If target user is an admin, treat as Edit and do not allow changing their perms (prevents self-lockout)
+                if(u.isAdmin){ sel = 2; }
+                const char* opts[] = {"None", "View", "Edit"};
+                if(u.id == currentUserID && u.isAdmin){
+                    // Show that the current admin has permanent Edit access and disable changing it
+                    ImGui::BeginDisabled();
+                    ImGui::TextDisabled("Admin (always Edit)");
+                    ImGui::EndDisabled();
+                } else if(currentIsAdmin){
+                    if(ImGui::Combo((std::string("##perm") + std::to_string(u.id)).c_str(), &sel, opts, 3)){
+                        setItemPermission(loadedItemID, u.id, sel);
+                        statusMessage = "Permissions updated"; statusTime = ImGui::GetTime();
+                    }
+                } else {
+                    ImGui::BeginDisabled(); ImGui::Combo((std::string("##perm") + std::to_string(u.id)).c_str(), &sel, opts, 3); ImGui::EndDisabled();
+                }
+                ImGui::SameLine(); ImGui::TextDisabled("(%s)", u.username.c_str());
+                ImGui::PopID();
             }
             ImGui::EndChild();
         }
@@ -1361,43 +1690,50 @@ public:
         ImGui::TextDisabled("Attachments:");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(400);
-        if(ImGui::InputTextWithHint("##attach_path", "Path or URL (files only)", attachPathBuf, sizeof(attachPathBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
-            std::string p(attachPathBuf);
-            if(!p.empty()){
-                std::ifstream in(p, std::ios::binary);
-                if(in){
-                    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                    std::string name = std::filesystem::path(p).filename().string();
-                    std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                    std::string mime = "application/octet-stream";
-                    if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
-                    int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
-                    if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
-                    else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
-                } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+        if(canEdit){
+            if(ImGui::InputTextWithHint("##attach_path", "Path or URL (files only)", attachPathBuf, sizeof(attachPathBuf), ImGuiInputTextFlags_EnterReturnsTrue)){
+                std::string p(attachPathBuf);
+                if(!p.empty()){
+                    std::ifstream in(p, std::ios::binary);
+                    if(in){
+                        std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                        std::string name = std::filesystem::path(p).filename().string();
+                        std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        std::string mime = "application/octet-stream";
+                        if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
+                        int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
+                        if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
+                        else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
+                    } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+                }
             }
-        }
-        ImGui::SameLine(); if(ImGui::Button("Import Attachment")){
-            std::string p(attachPathBuf);
-            if(!p.empty()){
-                std::ifstream in(p, std::ios::binary);
-                if(in){
-                    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                    std::string name = std::filesystem::path(p).filename().string();
-                    std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                    std::string mime = "application/octet-stream";
-                    if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
-                    int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
-                    if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
-                    else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
-                } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+            ImGui::SameLine(); if(ImGui::Button("Import Attachment")){
+                std::string p(attachPathBuf);
+                if(!p.empty()){
+                    std::ifstream in(p, std::ios::binary);
+                    if(in){
+                        std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                        std::string name = std::filesystem::path(p).filename().string();
+                        std::string ext = std::filesystem::path(p).extension().string(); std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        std::string mime = "application/octet-stream";
+                        if(ext==".png" || ext==".jpg" || ext==".jpeg" || ext==".bmp" || ext==".gif") mime = std::string("image/") + (ext.size()>1? ext.substr(1) : "");
+                        int64_t aid = addAttachment(loadedItemID, name, mime, data, p);
+                        if(aid != -1){ statusMessage = "Attachment added"; statusTime = ImGui::GetTime(); attachPathBuf[0]='\0'; }
+                        else { statusMessage = "Failed to add attachment"; statusTime = ImGui::GetTime(); }
+                    } else { statusMessage = "Failed to open file"; statusTime = ImGui::GetTime(); }
+                }
             }
+            ImGui::SameLine(); if(ImGui::Button("Add Asset...")){
+                showImportAssetModal = true;
+                importAssetPath = std::filesystem::current_path();
+                importAssetSelectedFiles.clear();
+            }
+        } else {
+            ImGui::BeginDisabled();
+            ImGui::InputTextWithHint("##attach_path", "Path or URL (files only)", attachPathBuf, sizeof(attachPathBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine(); ImGui::Button("Import Attachment"); ImGui::SameLine(); ImGui::Button("Add Asset...");
+            ImGui::EndDisabled();
         }
-        ImGui::SameLine(); if(ImGui::Button("Add Asset...")){
-            showImportAssetModal = true;
-            importAssetPath = std::filesystem::current_path();
-            importAssetSelectedFiles.clear();
-        } 
 
         // List attachments
         auto attachments = listAttachments(loadedItemID);
@@ -1742,20 +2078,23 @@ public:
     // Manage DB lifetime safely and prevent accidental copies
     ~Vault(){
         if(dbConnection) sqlite3_close(dbConnection);
+        if(dbBackend && dbBackend->isOpen()) dbBackend->close();
     }
     Vault(const Vault&) = delete;
     Vault& operator=(const Vault&) = delete;
-    Vault(Vault&& other) noexcept : id(other.id), name(std::move(other.name)), selectedItemID(other.selectedItemID), dbConnection(other.dbConnection){
+    Vault(Vault&& other) noexcept : id(other.id), name(std::move(other.name)), selectedItemID(other.selectedItemID), dbConnection(other.dbConnection), dbBackend(std::move(other.dbBackend)){
         other.dbConnection = nullptr;
     }
     Vault& operator=(Vault&& other) noexcept{
         if(this != &other){
             if(dbConnection) sqlite3_close(dbConnection);
+            if(dbBackend && dbBackend->isOpen()) dbBackend->close();
             id = other.id;
             name = std::move(other.name);
             selectedItemID = other.selectedItemID;
             dbConnection = other.dbConnection;
             other.dbConnection = nullptr;
+            dbBackend = std::move(other.dbBackend);
         }
         return *this;
     }
@@ -1840,6 +2179,22 @@ public:
     }
 
     int64_t createItem(const std::string& name, int64_t parentID = -1){
+        // Backend-aware insertion
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("INSERT INTO VaultItems (Name, Content, Tags) VALUES (?, ?, ?);", &err);
+            if(!stmt){ PLOGE << "createItem prepare failed: " << err; return -1; }
+            stmt->bindString(1, name);
+            stmt->bindString(2, "");
+            stmt->bindString(3, "");
+            if(!stmt->execute()){ PLOGE << "createItem execute failed"; return -1; }
+            int64_t id = dbBackend->lastInsertId();
+            if(id <= 0) return -1;
+            if(parentID == -1) parentID = getOrCreateRoot();
+            addParentRelation(parentID, id);
+            return id;
+        }
+
         if(!dbConnection) return -1;
         sqlite3_stmt* stmt = nullptr;
         const char* insertSQL = "INSERT INTO VaultItems (Name, Content, Tags) VALUES (?, ?, ?);";
@@ -1861,9 +2216,20 @@ public:
     int64_t createItemWithContent(const std::string& name, const std::string& content, const std::vector<std::string>& tags, int64_t parentID = -1){
         int64_t id = createItem(name, parentID);
         if(id <= 0) return id;
+        std::string joined = joinTags(tags);
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("UPDATE VaultItems SET Content = ?, Tags = ? WHERE ID = ?;", &err);
+            if(!stmt){ PLOGE << "createItemWithContent prepare failed: " << err; return id; }
+            stmt->bindString(1, content);
+            stmt->bindString(2, joined);
+            stmt->bindInt(3, id);
+            if(!stmt->execute()) PLOGE << "createItemWithContent execute failed";
+            return id;
+        }
+
         const char* updateSQL = "UPDATE VaultItems SET Content = ?, Tags = ? WHERE ID = ?;";
         sqlite3_stmt* stmt = nullptr;
-        std::string joined = joinTags(tags);
         if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_text(stmt,1,content.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt,2,joined.c_str(), -1, SQLITE_TRANSIENT);
@@ -1894,30 +2260,70 @@ public:
 
 private:
     std::string getItemName(int64_t id){
+        // Prefer remote backend when available
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT Name FROM VaultItems WHERE ID = ? LIMIT 1;", &err);
+            if(stmt){
+                stmt->bindInt(1, id);
+                auto rs = stmt->executeQuery();
+                if(rs && rs->next()){
+                    std::string nm = rs->getString(0);
+                    if(nm.empty()){
+                        PLOGW << "getItemName: empty name for id=" << id;
+                        return std::string("<unknown>");
+                    }
+                    return nm;
+                } else {
+                    PLOGW << "getItemName: no row for id=" << id;
+                }
+            } else {
+                PLOGW << "getItemName: prepare failed: " << err;
+            }
+            return std::string("<unknown>");
+        }
+
+        // Local SQLite path
         const char* sql = "SELECT Name FROM VaultItems WHERE ID = ?;";
-        sqlite3_stmt* stmt;
+        sqlite3_stmt* stmt = nullptr;
         std::string name = "<unknown>";
-        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt, 1, id);
             if(sqlite3_step(stmt) == SQLITE_ROW){
                 const unsigned char* text = sqlite3_column_text(stmt, 0);
                 if(text) name = reinterpret_cast<const char*>(text);
             }
         }
-        sqlite3_finalize(stmt);
+        if(stmt) sqlite3_finalize(stmt);
         return name;
     }
 
     void getChildren(int64_t parentID, std::vector<int64_t>& outChildren){
+        // Remote backend preferred
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT ChildID FROM VaultItemChildren WHERE ParentID = ?;", &err);
+            if(stmt){
+                stmt->bindInt(1, parentID);
+                auto rs = stmt->executeQuery();
+                while(rs && rs->next()){
+                    outChildren.push_back(rs->getInt64(0));
+                }
+            } else {
+                PLOGW << "getChildren: prepare failed: " << err;
+            }
+            return;
+        }
+
         const char* sql = "SELECT ChildID FROM VaultItemChildren WHERE ParentID = ?;";
-        sqlite3_stmt* stmt;
-        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_stmt* stmt = nullptr;
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt, 1, parentID);
             while(sqlite3_step(stmt) == SQLITE_ROW){
                 outChildren.push_back(sqlite3_column_int64(stmt, 0));
             }
         }
-        sqlite3_finalize(stmt);
+        if(stmt) sqlite3_finalize(stmt);
     }
 
     void drawVaultNode(int64_t parentID, int64_t nodeID, std::vector<int64_t>& path){
@@ -1925,6 +2331,11 @@ private:
         if(!activeTagFilter.empty()){
             std::unordered_set<int64_t> visited;
             if(!nodeOrDescendantMatches(nodeID, visited)) return;
+        }
+        // If a user is logged in, skip nodes that are not visible to them (and have no visible descendants)
+        if(currentUserID != -1){
+            std::unordered_set<int64_t> vvisited;
+            if(!nodeOrDescendantVisible(nodeID, currentUserID, vvisited)) return;
         }
         // Cycle protection: if node already in the current path, render as leaf with a cycle marker
         if(std::find(path.begin(), path.end(), nodeID) != path.end()){
@@ -2117,9 +2528,20 @@ private:
     // Helper: get all items (id,name)
     std::vector<std::pair<int64_t,std::string>> getAllItems(){
         std::vector<std::pair<int64_t,std::string>> out;
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT ID, Name FROM VaultItems ORDER BY Name;", &err);
+            if(!stmt){ PLOGW << "getAllItems prepare failed: " << err; return out; }
+            auto rs = stmt->executeQuery();
+            while(rs && rs->next()){
+                out.emplace_back(rs->getInt64(0), rs->getString(1));
+            }
+            return out;
+        }
+
         const char* sql = "SELECT ID, Name FROM VaultItems ORDER BY Name;";
         sqlite3_stmt* stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
             while(sqlite3_step(stmt) == SQLITE_ROW){
                 int64_t id = sqlite3_column_int64(stmt, 0);
                 const unsigned char* text = sqlite3_column_text(stmt, 1);
@@ -2127,36 +2549,54 @@ private:
                 out.emplace_back(id, name);
             }
         }
-        sqlite3_finalize(stmt);
+        if(stmt) sqlite3_finalize(stmt);
         return out;
     }
 
     // Get parents of a child
     std::vector<int64_t> getParentsOf(int64_t childID){
         std::vector<int64_t> out;
-        const char* sql = "SELECT ParentID FROM VaultItemChildren WHERE ChildID = ?;";
-        sqlite3_stmt* stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
-            sqlite3_bind_int64(stmt, 1, childID);
-            while(sqlite3_step(stmt) == SQLITE_ROW){
-                int64_t pid = sqlite3_column_int64(stmt, 0);
-                // Skip self-parent relations (defensive fix) and remove them from DB if found
-                if(pid == childID){
-                    // remove invalid self-relation
-                    const char* del = "DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;";
-                    sqlite3_stmt* dstmt = nullptr;
-                    if(sqlite3_prepare_v2(dbConnection, del, -1, &dstmt, nullptr) == SQLITE_OK){
-                        sqlite3_bind_int64(dstmt, 1, pid);
-                        sqlite3_bind_int64(dstmt, 2, childID);
-                        sqlite3_step(dstmt);
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            auto stmt = dbBackend->prepare("SELECT ParentID FROM VaultItemChildren WHERE ChildID = ?;", &err);
+            if(!stmt){ PLOGW << "getParentsOf prepare failed: " << err; }
+            else{
+                stmt->bindInt(1, childID);
+                auto rs = stmt->executeQuery();
+                while(rs && rs->next()){
+                    int64_t pid = rs->getInt64(0);
+                    if(pid == childID){
+                        // remove invalid self relation
+                        auto del = dbBackend->prepare("DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;", &err);
+                        if(del){ del->bindInt(1, pid); del->bindInt(2, childID); del->execute(); }
+                        continue;
                     }
-                    if(dstmt) sqlite3_finalize(dstmt);
-                    continue;
+                    out.push_back(pid);
                 }
-                out.push_back(pid);
             }
+        } else {
+            const char* sql = "SELECT ParentID FROM VaultItemChildren WHERE ChildID = ?;";
+            sqlite3_stmt* stmt = nullptr;
+            if(dbConnection && sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+                sqlite3_bind_int64(stmt, 1, childID);
+                while(sqlite3_step(stmt) == SQLITE_ROW){
+                    int64_t pid = sqlite3_column_int64(stmt, 0);
+                    if(pid == childID){
+                        const char* del = "DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;";
+                        sqlite3_stmt* dstmt = nullptr;
+                        if(sqlite3_prepare_v2(dbConnection, del, -1, &dstmt, nullptr) == SQLITE_OK){
+                            sqlite3_bind_int64(dstmt, 1, pid);
+                            sqlite3_bind_int64(dstmt, 2, childID);
+                            sqlite3_step(dstmt);
+                        }
+                        if(dstmt) sqlite3_finalize(dstmt);
+                        continue;
+                    }
+                    out.push_back(pid);
+                }
+            }
+            if(stmt) sqlite3_finalize(stmt);
         }
-        if(stmt) sqlite3_finalize(stmt);
 
         // If there are no parents, ensure the item is attached to the root
         int64_t root = getOrCreateRoot();
@@ -2173,10 +2613,32 @@ private:
         // Root may not have parents
         int64_t root = getOrCreateRoot();
         if(childID == root) return false;
+
+        // Remote backend path
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            // prevent duplicate
+            auto chk = dbBackend->prepare("SELECT 1 FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ? LIMIT 1;", &err);
+            if(!chk){ PLOGW << "addParentRelation: prepare check failed: " << err; return false; }
+            chk->bindInt(1, parentID);
+            chk->bindInt(2, childID);
+            auto rs = chk->executeQuery();
+            if(rs && rs->next()) return false;
+
+            // insert relation
+            auto ins = dbBackend->prepare("INSERT INTO VaultItemChildren (ParentID, ChildID) VALUES (?, ?);", &err);
+            if(!ins){ PLOGW << "addParentRelation: prepare insert failed: " << err; return false; }
+            ins->bindInt(1, parentID);
+            ins->bindInt(2, childID);
+            if(!ins->execute()){ PLOGW << "addParentRelation: insert execute failed"; return false; }
+            return true;
+        }
+
+        // Local SQLite path
         // prevent duplicate
         const char* exists = "SELECT 1 FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;";
         sqlite3_stmt* stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, exists, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, exists, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt,1,parentID);
             sqlite3_bind_int64(stmt,2,childID);
             if(sqlite3_step(stmt) == SQLITE_ROW){
@@ -2189,7 +2651,7 @@ private:
         // NOTE: cycles are allowed now, so we don't prevent them here
 
         const char* insert = "INSERT INTO VaultItemChildren (ParentID, ChildID) VALUES (?, ?);";
-        if(sqlite3_prepare_v2(dbConnection, insert, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, insert, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt,1,parentID);
             sqlite3_bind_int64(stmt,2,childID);
             sqlite3_step(stmt);
@@ -2203,11 +2665,35 @@ private:
         // Never allow modifying parents of the root itself
         if(childID == root) return false;
 
+        // Remote backend path
+        if(dbBackend && dbBackend->isOpen()){
+            std::string err;
+            // Count current parents
+            auto cnt = dbBackend->prepare("SELECT COUNT(*) FROM VaultItemChildren WHERE ChildID = ?;", &err);
+            if(!cnt){ PLOGW << "removeParentRelation: count prepare failed: " << err; return false; }
+            cnt->bindInt(1, childID);
+            auto rs = cnt->executeQuery();
+            int parentCount = 0;
+            if(rs && rs->next()) parentCount = rs->getInt(0);
+
+            // Disallow removing the last remaining parent (never leave a node parentless)
+            if(parentCount <= 1) return false;
+
+            // Otherwise, removal is allowed
+            auto del = dbBackend->prepare("DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;", &err);
+            if(!del){ PLOGW << "removeParentRelation: delete prepare failed: " << err; return false; }
+            del->bindInt(1, parentID);
+            del->bindInt(2, childID);
+            if(!del->execute()){ PLOGW << "removeParentRelation: delete execute failed"; return false; }
+            return true;
+        }
+
+        // Local SQLite path
         // Count current parents
         int parentCount = 0;
         const char* countSQL = "SELECT COUNT(*) FROM VaultItemChildren WHERE ChildID = ?;";
         sqlite3_stmt* stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, countSQL, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, countSQL, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt, 1, childID);
             if(sqlite3_step(stmt) == SQLITE_ROW) parentCount = sqlite3_column_int(stmt, 0);
         }
@@ -2219,7 +2705,7 @@ private:
         // Otherwise, removal is allowed (including removing the root if there are other parents)
         const char* del = "DELETE FROM VaultItemChildren WHERE ParentID = ? AND ChildID = ?;";
         stmt = nullptr;
-        if(sqlite3_prepare_v2(dbConnection, del, -1, &stmt, nullptr) == SQLITE_OK){
+        if(dbConnection && sqlite3_prepare_v2(dbConnection, del, -1, &stmt, nullptr) == SQLITE_OK){
             sqlite3_bind_int64(stmt,1,parentID);
             sqlite3_bind_int64(stmt,2,childID);
             sqlite3_step(stmt);
@@ -2421,6 +2907,21 @@ private:
 };
 
 inline int64_t Vault::addAttachment(int64_t itemID, const std::string& name, const std::string& mimeType, const std::vector<uint8_t>& data, const std::string& externalPath){
+    // Prefer backend abstraction when available (remote MySQL); fall back to SQLite when local
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("INSERT INTO Attachments (ItemID, Name, MimeType, Data, ExternalPath, Size) VALUES (?, ?, ?, ?, ?, ?);", &err);
+        if(!stmt){ PLOGE << "addAttachment prepare failed: " << err; return -1; }
+        if(itemID >= 0) stmt->bindInt(1, itemID); else stmt->bindNull(1);
+        stmt->bindString(2, name);
+        stmt->bindString(3, mimeType);
+        if(!data.empty()) stmt->bindBlob(4, reinterpret_cast<const void*>(data.data()), data.size()); else stmt->bindNull(4);
+        if(!externalPath.empty()) stmt->bindString(5, externalPath); else stmt->bindNull(5);
+        stmt->bindInt(6, static_cast<int64_t>(data.size()));
+        if(!stmt->execute()) { PLOGE << "addAttachment execute failed"; return -1; }
+        return dbBackend->lastInsertId();
+    }
+
     if(!dbConnection) return -1;
     const char* sql = "INSERT INTO Attachments (ItemID, Name, MimeType, Data, ExternalPath, Size) VALUES (?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
@@ -2441,8 +2942,30 @@ inline int64_t Vault::addAttachment(int64_t itemID, const std::string& name, con
 
 inline Vault::Attachment Vault::getAttachmentMeta(int64_t attachmentID){
     Attachment a;
-    if(!dbConnection) return a;
     PLOGV << "vault:getAttachmentMeta id=" << attachmentID;
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt, DisplayWidth, DisplayHeight FROM Attachments WHERE ID = ? LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "getAttachmentMeta prepare failed: " << err; return a; }
+        stmt->bindInt(1, attachmentID);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()){
+            a.id = rs->getInt64(0);
+            a.itemID = rs->getInt64(1);
+            a.name = rs->getString(2);
+            a.mimeType = rs->getString(3);
+            a.size = rs->getInt64(4);
+            a.externalPath = rs->getString(5);
+            a.createdAt = rs->getInt64(6);
+            // Display prefs might be nullable; attempt to read but tolerate empty
+            try{ a.displayWidth = rs->getInt(7); } catch(...){}
+            try{ a.displayHeight = rs->getInt(8); } catch(...){}
+            PLOGV << "vault:getAttachmentMeta got row id=" << a.id << " name='" << a.name << "' size=" << a.size << " externalPath='" << a.externalPath << "' mime='" << a.mimeType << "'";
+        }
+        return a;
+    }
+
+    if(!dbConnection) return a;
     const char* sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt, DisplayWidth, DisplayHeight FROM Attachments WHERE ID = ? LIMIT 1;";
     sqlite3_stmt* stmt = nullptr;
     if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
@@ -2472,6 +2995,26 @@ inline Vault::Attachment Vault::getAttachmentMeta(int64_t attachmentID){
 
 inline std::vector<Vault::Attachment> Vault::listAttachments(int64_t itemID){
     std::vector<Attachment> out;
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ItemID = ? ORDER BY ID ASC;", &err);
+        if(!stmt){ PLOGE << "listAttachments prepare failed: " << err; return out; }
+        stmt->bindInt(1, itemID);
+        auto rs = stmt->executeQuery();
+        while(rs && rs->next()){
+            Attachment a;
+            a.id = rs->getInt64(0);
+            a.itemID = rs->getInt64(1);
+            a.name = rs->getString(2);
+            a.mimeType = rs->getString(3);
+            a.size = rs->getInt64(4);
+            a.externalPath = rs->getString(5);
+            a.createdAt = rs->getInt64(6);
+            out.push_back(a);
+        }
+        return out;
+    }
+
     if(!dbConnection) return out;
     const char* sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ItemID = ? ORDER BY ID ASC;";
     sqlite3_stmt* stmt = nullptr;
@@ -2495,6 +3038,18 @@ inline std::vector<Vault::Attachment> Vault::listAttachments(int64_t itemID){
 
 inline std::vector<uint8_t> Vault::getAttachmentData(int64_t attachmentID){
     std::vector<uint8_t> out;
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT Data FROM Attachments WHERE ID = ? LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "getAttachmentData prepare failed: " << err; return out; }
+        stmt->bindInt(1, attachmentID);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()){
+            out = rs->getBlob(0);
+        }
+        return out;
+    }
+
     if(!dbConnection) return out;
     const char* sql = "SELECT Data FROM Attachments WHERE ID = ? LIMIT 1;";
     sqlite3_stmt* stmt = nullptr;
@@ -2511,6 +3066,14 @@ inline std::vector<uint8_t> Vault::getAttachmentData(int64_t attachmentID){
 }
 
 inline bool Vault::removeAttachment(int64_t attachmentID){
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("DELETE FROM Attachments WHERE ID = ?;", &err);
+        if(!stmt){ PLOGE << "removeAttachment prepare failed: " << err; return false; }
+        stmt->bindInt(1, attachmentID);
+        return stmt->execute();
+    }
+
     if(!dbConnection) return false;
     const char* sql = "DELETE FROM Attachments WHERE ID = ?;";
     sqlite3_stmt* stmt = nullptr;
@@ -2524,6 +3087,18 @@ inline bool Vault::removeAttachment(int64_t attachmentID){
 }
 
 inline bool Vault::setAttachmentDisplaySize(int64_t attachmentID, int width, int height){
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("UPDATE Attachments SET DisplayWidth = ?, DisplayHeight = ? WHERE ID = ?;", &err);
+        if(!stmt){ PLOGE << "setAttachmentDisplaySize prepare failed: " << err; return false; }
+        if(width >= 0) stmt->bindInt(1, width); else stmt->bindNull(1);
+        if(height >= 0) stmt->bindInt(2, height); else stmt->bindNull(2);
+        stmt->bindInt(3, attachmentID);
+        bool ok = stmt->execute();
+        if(ok) { statusMessage = "Display settings saved"; statusTime = ImGui::GetTime(); }
+        return ok;
+    }
+
     if(!dbConnection) return false;
     const char* sql = "UPDATE Attachments SET DisplayWidth = ?, DisplayHeight = ? WHERE ID = ?;";
     sqlite3_stmt* stmt = nullptr;
@@ -3121,3 +3696,446 @@ inline int64_t Vault::addAssetFromFile(const std::string& filepath, const std::s
     if(aid != -1){ statusMessage = "Asset added"; statusTime = ImGui::GetTime(); }
     return aid;
 }  
+
+// ------------------------- User & Auth implementations -------------------------
+inline bool Vault::hasUsers() const{
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT 1 FROM Users LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "hasUsers prepare failed: " << err; return false; }
+        auto rs = stmt->executeQuery();
+        return rs && rs->next();
+    }
+
+    if(!dbConnection) return false;
+    const char* sql = "SELECT 1 FROM Users LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    bool any = false;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        if(sqlite3_step(stmt) == SQLITE_ROW) any = true;
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return any;
+}
+
+inline int64_t Vault::createUser(const std::string& username, const std::string& displayName, const std::string& passwordPlain, bool isAdmin){
+    // generate salt and derive hash
+    const int iterations = 100000;
+    std::string saltB64 = CryptoHelpers::generateSaltBase64(16);
+    std::string hashB64 = CryptoHelpers::derivePBKDF2_Base64(passwordPlain, saltB64, iterations);
+
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("INSERT INTO Users (Username, DisplayName, PasswordHash, Salt, Iterations, IsAdmin) VALUES (?, ?, ?, ?, ?, ?);", &err);
+        if(!stmt){ PLOGE << "createUser prepare failed: " << err; return -1; }
+        stmt->bindString(1, username);
+        stmt->bindString(2, displayName);
+        stmt->bindString(3, hashB64);
+        stmt->bindString(4, saltB64);
+        stmt->bindInt(5, iterations);
+        stmt->bindInt(6, isAdmin ? 1 : 0);
+        if(!stmt->execute()) return -1;
+        return dbBackend->lastInsertId();
+    }
+
+    if(!dbConnection) return -1;
+    const char* insSQL = "INSERT INTO Users (Username, DisplayName, PasswordHash, Salt, Iterations, IsAdmin) VALUES (?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, insSQL, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, displayName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, hashB64.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, saltB64.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 5, iterations);
+        sqlite3_bind_int(stmt, 6, isAdmin ? 1 : 0);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return -1; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return sqlite3_last_insert_rowid(dbConnection);
+}
+
+inline int64_t Vault::authenticateUser(const std::string& username, const std::string& passwordPlain){
+    // Trim username input to avoid accidental whitespace errors
+    std::string uname = username;
+    while(!uname.empty() && std::isspace((unsigned char)uname.front())) uname.erase(uname.begin());
+    while(!uname.empty() && std::isspace((unsigned char)uname.back())) uname.pop_back();
+
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT ID, PasswordHash, Salt, Iterations, IsAdmin, DisplayName FROM Users WHERE Username = ? LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "authenticateUser prepare failed: " << err; return -1; }
+        stmt->bindString(1, uname);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()){
+            int64_t id = rs->getInt64(0);
+            std::string phs = rs->getString(1);
+            std::string salts = rs->getString(2);
+            int iters = rs->getInt(3);
+            PLOGI << "authenticateUser: found user id=" << id << " username='" << uname << "' iters=" << iters << " ph_len=" << phs.size() << " salt_len=" << salts.size();
+            if(phs.empty() || salts.empty()){
+                PLOGW << "authenticateUser: missing hash/salt for user '" << uname << "' id=" << id;
+                return -1;
+            }
+            if(CryptoHelpers::pbkdf2_verify(passwordPlain, salts, iters, phs)) return id;
+            PLOGW << "authenticateUser: password verification failed for user '" << uname << "' id=" << id << " iters=" << iters;
+        } else {
+            PLOGW << "authenticateUser: user not found: '" << uname << "'";
+        }
+        return -1;
+    }
+
+    if(!dbConnection) return -1;
+    const char* sql = "SELECT ID, PasswordHash, Salt, Iterations, IsAdmin, DisplayName FROM Users WHERE Username = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        // Trim username before lookup
+        std::string uname = username;
+        while(!uname.empty() && std::isspace((unsigned char)uname.front())) uname.erase(uname.begin());
+        while(!uname.empty() && std::isspace((unsigned char)uname.back())) uname.pop_back();
+        sqlite3_bind_text(stmt, 1, uname.c_str(), -1, SQLITE_TRANSIENT);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            int64_t id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* ph = sqlite3_column_text(stmt, 1);
+            const unsigned char* salt = sqlite3_column_text(stmt, 2);
+            int iters = sqlite3_column_int(stmt, 3);
+            const unsigned char* dname = sqlite3_column_text(stmt, 5);
+            std::string phs = ph ? reinterpret_cast<const char*>(ph) : std::string();
+            std::string salts = salt ? reinterpret_cast<const char*>(salt) : std::string();
+            PLOGI << "authenticateUser (sqlite): found user id=" << id << " username='" << uname << "' iters=" << iters << " ph_len=" << phs.size() << " salt_len=" << salts.size();
+            if(phs.empty() || salts.empty()){
+                PLOGW << "authenticateUser: missing hash/salt for user '" << uname << "' id=" << id;
+                sqlite3_finalize(stmt);
+                return -1;
+            }
+            if(CryptoHelpers::pbkdf2_verify(passwordPlain, salts, iters, phs)){
+                sqlite3_finalize(stmt);
+                return id;
+            }
+            PLOGW << "authenticateUser: password verification failed for user '" << uname << "' id=" << id << " iters=" << iters;
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return -1;
+}
+
+inline int64_t Vault::getCurrentUserID() const { return currentUserID; }
+inline std::string Vault::getCurrentUserDisplayName() const { return currentUserDisplayName; }
+
+inline void Vault::setCurrentUser(int64_t userID){
+    if(userID <= 0){ currentUserID = -1; currentUserDisplayName.clear(); return; }
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT DisplayName FROM Users WHERE ID = ? LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "setCurrentUser prepare failed: " << err; return; }
+        stmt->bindInt(1, userID);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()){
+            currentUserDisplayName = rs->getString(0);
+            currentUserID = userID;
+        }
+        return;
+    }
+
+    const char* sql = "SELECT DisplayName FROM Users WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, userID);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            const unsigned char* d = sqlite3_column_text(stmt, 0);
+            currentUserDisplayName = d ? reinterpret_cast<const char*>(d) : std::string();
+            currentUserID = userID;
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+}
+
+inline void Vault::clearCurrentUser(){ currentUserID = -1; currentUserDisplayName.clear(); }
+
+inline std::vector<Vault::User> Vault::listUsers() const{
+    std::vector<User> out;
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT ID, Username, DisplayName, IsAdmin FROM Users ORDER BY Username;", &err);
+        if(!stmt){ PLOGE << "listUsers prepare failed: " << err; return out; }
+        auto rs = stmt->executeQuery();
+        while(rs && rs->next()){
+            User u;
+            u.id = rs->getInt64(0);
+            u.username = rs->getString(1);
+            u.displayName = rs->getString(2);
+            u.isAdmin = rs->getInt(3) != 0;
+            out.push_back(u);
+        }
+        return out;
+    }
+
+    if(!dbConnection) return out;
+    const char* sql = "SELECT ID, Username, DisplayName, IsAdmin FROM Users ORDER BY Username;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        while(sqlite3_step(stmt) == SQLITE_ROW){
+            User u;
+            u.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* un = sqlite3_column_text(stmt, 1);
+            const unsigned char* dn = sqlite3_column_text(stmt, 2);
+            u.username = un ? reinterpret_cast<const char*>(un) : std::string();
+            u.displayName = dn ? reinterpret_cast<const char*>(dn) : std::string();
+            u.isAdmin = sqlite3_column_int(stmt, 3) != 0;
+            out.push_back(u);
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return out;
+}
+
+inline bool Vault::isUserAdmin(int64_t userID) const{
+    if(userID <= 0) return false;
+    if(dbBackend && dbBackend->isOpen()){
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;", &err);
+        if(!stmt){ PLOGE << "isUserAdmin prepare failed: " << err; return false; }
+        stmt->bindInt(1, userID);
+        auto rs = stmt->executeQuery();
+        if(rs && rs->next()) return rs->getInt(0) != 0;
+        return false;
+    }
+
+    if(!dbConnection || userID <= 0) return false;
+    const char* sql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    bool isAdmin = false;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, userID);
+        if(sqlite3_step(stmt) == SQLITE_ROW) isAdmin = (sqlite3_column_int(stmt,0) != 0);
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return isAdmin;
+}
+
+inline bool Vault::updateUserDisplayName(int64_t userID, const std::string& newDisplayName){
+    if(!dbConnection) return false;
+    const char* sql = "UPDATE Users SET DisplayName = ? WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_text(stmt, 1, newDisplayName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, userID);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::changeUserPassword(int64_t userID, const std::string& newPasswordPlain){
+    if(!dbConnection) return false;
+    const int iterations = 100000;
+    std::string saltB64 = CryptoHelpers::generateSaltBase64(16);
+    std::string hashB64 = CryptoHelpers::derivePBKDF2_Base64(newPasswordPlain, saltB64, iterations);
+    const char* sql = "UPDATE Users SET PasswordHash = ?, Salt = ?, Iterations = ? WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_text(stmt, 1, hashB64.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, saltB64.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, iterations);
+        sqlite3_bind_int64(stmt, 4, userID);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::setUserAdminFlag(int64_t userID, bool isAdmin){
+    if(!dbConnection) return false;
+    // Prevent downgrading the currently logged-in admin to avoid lockout
+    if(userID == currentUserID && !isAdmin) return false;
+    // If clearing admin, ensure at least one other admin will remain
+    if(!isAdmin){
+        const char* countSql = "SELECT COUNT(1) FROM Users WHERE IsAdmin = 1;";
+        sqlite3_stmt* stmt = nullptr;
+        int cnt = 0;
+        if(sqlite3_prepare_v2(dbConnection, countSql, -1, &stmt, nullptr) == SQLITE_OK){
+            if(sqlite3_step(stmt) == SQLITE_ROW) cnt = sqlite3_column_int(stmt,0);
+        }
+        if(stmt) sqlite3_finalize(stmt);
+        if(cnt <= 1) return false;
+    }
+    const char* sql = "UPDATE Users SET IsAdmin = ? WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int(stmt, 1, isAdmin ? 1 : 0);
+        sqlite3_bind_int64(stmt, 2, userID);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::deleteUser(int64_t userID){
+    if(!dbConnection) return false;
+    // Prevent deleting the currently logged-in user
+    if(userID == currentUserID) return false;
+    // If target is admin ensure another admin remains
+    sqlite3_stmt* stmt = nullptr;
+    const char* adminCheck = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    bool targetIsAdmin = false;
+    if(sqlite3_prepare_v2(dbConnection, adminCheck, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt,1,userID);
+        if(sqlite3_step(stmt) == SQLITE_ROW) targetIsAdmin = sqlite3_column_int(stmt,0) != 0;
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    if(targetIsAdmin){
+        const char* countSql = "SELECT COUNT(1) FROM Users WHERE IsAdmin = 1;";
+        sqlite3_stmt* cstmt = nullptr;
+        int cnt = 0;
+        if(sqlite3_prepare_v2(dbConnection, countSql, -1, &cstmt, nullptr) == SQLITE_OK){
+            if(sqlite3_step(cstmt) == SQLITE_ROW) cnt = sqlite3_column_int(cstmt,0);
+        }
+        if(cstmt) sqlite3_finalize(cstmt);
+        if(cnt <= 1) return false;
+    }
+    // Remove any permissions references first
+    const char* deletePerms = "DELETE FROM ItemPermissions WHERE UserID = ?;";
+    if(sqlite3_prepare_v2(dbConnection, deletePerms, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, userID);
+        sqlite3_step(stmt);
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    const char* deleteUserSql = "DELETE FROM Users WHERE ID = ?;";
+    if(sqlite3_prepare_v2(dbConnection, deleteUserSql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, userID);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::setItemPermission(int64_t itemID, int64_t userID, int level){
+    if(!dbConnection) return false;
+    // If target user is admin, always ensure EDIT level (prevent downgrading own/other admin permissions)
+    sqlite3_stmt* astmt = nullptr;
+    const char* aSql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    bool targetIsAdmin = false;
+    if(sqlite3_prepare_v2(dbConnection, aSql, -1, &astmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(astmt, 1, userID);
+        if(sqlite3_step(astmt) == SQLITE_ROW) targetIsAdmin = (sqlite3_column_int(astmt,0) != 0);
+    }
+    if(astmt) sqlite3_finalize(astmt);
+    if(targetIsAdmin && level < 2) level = 2; // force EDIT for admins
+
+    const char* sql = "INSERT OR REPLACE INTO ItemPermissions (ItemID, UserID, Level) VALUES (?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        sqlite3_bind_int64(stmt, 2, userID);
+        sqlite3_bind_int(stmt, 3, level);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::removeItemPermission(int64_t itemID, int64_t userID){
+    if(!dbConnection) return false;
+    // Prevent removal of permissions for admin users to avoid accidental lockout
+    sqlite3_stmt* astmt = nullptr;
+    const char* aSql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    bool targetIsAdmin = false;
+    if(sqlite3_prepare_v2(dbConnection, aSql, -1, &astmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(astmt, 1, userID);
+        if(sqlite3_step(astmt) == SQLITE_ROW) targetIsAdmin = (sqlite3_column_int(astmt,0) != 0);
+    }
+    if(astmt) sqlite3_finalize(astmt);
+    if(targetIsAdmin) return false; // disallow removal
+
+    const char* sql = "DELETE FROM ItemPermissions WHERE ItemID = ? AND UserID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        sqlite3_bind_int64(stmt, 2, userID);
+        if(sqlite3_step(stmt) != SQLITE_DONE){ sqlite3_finalize(stmt); return false; }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline std::vector<Vault::ItemPermission> Vault::listItemPermissions(int64_t itemID) const{
+    std::vector<ItemPermission> out;
+    if(!dbConnection) return out;
+    const char* sql = "SELECT ID, ItemID, UserID, Level, CreatedAt FROM ItemPermissions WHERE ItemID = ? ORDER BY UserID;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        while(sqlite3_step(stmt) == SQLITE_ROW){
+            ItemPermission p;
+            p.id = sqlite3_column_int64(stmt, 0);
+            p.itemID = sqlite3_column_int64(stmt, 1);
+            p.userID = sqlite3_column_int64(stmt, 2);
+            p.level = sqlite3_column_int(stmt, 3);
+            p.createdAt = sqlite3_column_int64(stmt, 4);
+            out.push_back(p);
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    return out;
+}
+
+inline bool Vault::isItemVisibleToUser(int64_t itemID, int64_t userID) const{
+    // Default: if no DB or invalid user id treat as visible (backwards compatible)
+    if(!dbConnection || userID <= 0) return true;
+    // Admin override
+    const char* adminSql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* s = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, adminSql, -1, &s, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(s, 1, userID);
+        if(sqlite3_step(s) == SQLITE_ROW){ if(sqlite3_column_int(s,0) != 0){ if(s) sqlite3_finalize(s); return true; } }
+    }
+    if(s) sqlite3_finalize(s);
+    // Check explicit permission
+    const char* sql = "SELECT Level FROM ItemPermissions WHERE ItemID = ? AND UserID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        sqlite3_bind_int64(stmt, 2, userID);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            int lvl = sqlite3_column_int(stmt, 0);
+            if(stmt) sqlite3_finalize(stmt);
+            return lvl >= 1; // VIEW or EDIT
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    // No explicit permission -> default visible
+    return true;
+}
+
+inline bool Vault::isItemEditableByUser(int64_t itemID, int64_t userID) const{
+    if(!dbConnection || userID <= 0) return true; // no auth = editable
+    // Admin override
+    const char* adminSql = "SELECT IsAdmin FROM Users WHERE ID = ? LIMIT 1;";
+    sqlite3_stmt* s = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, adminSql, -1, &s, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(s, 1, userID);
+        if(sqlite3_step(s) == SQLITE_ROW){ if(sqlite3_column_int(s,0) != 0){ if(s) sqlite3_finalize(s); return true; } }
+    }
+    if(s) sqlite3_finalize(s);
+    const char* sql = "SELECT Level FROM ItemPermissions WHERE ItemID = ? AND UserID = ? LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if(sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK){
+        sqlite3_bind_int64(stmt, 1, itemID);
+        sqlite3_bind_int64(stmt, 2, userID);
+        if(sqlite3_step(stmt) == SQLITE_ROW){
+            int lvl = sqlite3_column_int(stmt, 0);
+            if(stmt) sqlite3_finalize(stmt);
+            return lvl >= 2; // EDIT
+        }
+    }
+    if(stmt) sqlite3_finalize(stmt);
+    // No explicit permission: default editable only for no-auth; otherwise not editable
+    return false;
+}
+
+inline std::vector<std::pair<int64_t,std::string>> Vault::getAllItemsForUser(int64_t userID){
+    auto all = getAllItems();
+    if(userID <= 0) return all;
+    std::vector<std::pair<int64_t,std::string>> out;
+    for(auto &p : all){ if(isItemVisibleToUser(p.first, userID)) out.push_back(p); }
+    return out;
+}

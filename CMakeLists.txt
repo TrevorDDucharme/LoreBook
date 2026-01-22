@@ -61,6 +61,10 @@ find_package(OpenSSL REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::SSL)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::Crypto)
 
+# Crypto++
+find_package(cryptopp CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE cryptopp::cryptopp)
+
 #curl
 find_package(CURL REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE CURL::libcurl)
@@ -107,27 +111,27 @@ target_link_libraries(${PROJECT_NAME} PRIVATE GLUT::GLUT Xi Xrandr Xxf86vm)
 find_package(assimp CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE assimp::assimp)
 
-# Some resolver functions (ns_initparse/ns_parserr) are provided by libresolv on
-# some platforms; link it to resolve ns_* undefined references.
-target_link_libraries(${PROJECT_NAME} PRIVATE resolv)
-
-
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::sqlite3::sqlite3)
-#llvm
-# find_package(LLVM CONFIG REQUIRED)
 
-# list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-# include(HandleLLVMOptions)
-# add_definitions(${LLVM_DEFINITIONS})
+# MySQL Connector/C++ (required via vcpkg "unofficial" port)
+find_package(unofficial-mysql-connector-cpp CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::mysql-connector-cpp::connector)
+# The mysql connector X devapi currently links against protobuf and absl components which
+# may not be transitively added by the connector imported target on all platforms.
+# Add explicit links so the global executable is satisfied.
+find_package(protobuf CONFIG REQUIRED)
+find_package(absl CONFIG REQUIRED)
+# Link to protobuf and a few absl components that the connector's protobuf code may need
+target_link_libraries(${PROJECT_NAME} PRIVATE protobuf::libprotobuf absl::strings absl::raw_logging_internal absl::log_severity)
+# Link LZ4 from vcpkg install path when system -llz4 is not available
+find_package(lz4 CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE lz4::lz4)
 
-# target_include_directories(${PROJECT_NAME} PRIVATE ${LLVM_INCLUDE_DIRS})
-
-# # Find the libraries that correspond to the LLVM components that we wish to use
-# llvm_map_components_to_libnames(llvm_libs Support Core IRReader ...)
-
-# # Link against LLVM libraries
-# target_link_libraries(${PROJECT_NAME} PRIVATE ${llvm_libs})
+# Some resolver functions (ns_initparse/ns_parserr) are provided by libresolv on
+# some platforms; link it after MySQL connector so static libraries get the
+# resolver library at the right place in the link order.
+target_link_libraries(${PROJECT_NAME} PRIVATE resolv)
 
 #END YOUR LIBRARIES
 

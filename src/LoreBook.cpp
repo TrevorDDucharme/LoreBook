@@ -15,6 +15,7 @@
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
+#include "MySQLTest.hpp"
 #include <plog/Log.h>
 #include <plog/Init.h>
 #include <plog/Appenders/ConsoleAppender.h>
@@ -92,9 +93,51 @@ int main(int argc, char** argv)
     static char createVaultError[512] = "";
     // Open Vault modal state
     static bool showOpenVaultModal = false;
+    static bool showOpenRemoteVaultModal = false;
     static char openVaultDirBuf[1024];
     static char openVaultNameBuf[256] = "";
     static char openVaultError[512] = "";
+
+    // Open Remote Vault modal state
+    static char remoteHostBuf[256] = "127.0.0.1";
+    static int remotePort = 33060; // default to X Protocol port for mysqlx (33060)
+    static char remoteDBBuf[256] = "";
+    static char remoteUserBuf[128] = "";
+    static char remotePassBuf[128] = "";
+    static bool remoteUseSSL = false;
+    static char remoteCAFileBuf[1024] = "";
+    static char remoteTestStatusBuf[512] = "";
+    static bool remoteTestOk = false;
+
+    // Auth/Login state
+    static bool showLoginModal = false;
+    static bool showCreateAdminModal = false;
+    static char loginUserBuf[128] = "";
+    static char loginPassBuf[128] = "";
+    static char createAdminUserBuf[128] = "";
+    static char createAdminDisplayBuf[128] = "";
+    static char createAdminPassBuf[128] = "";
+    static char createAdminPassConfirmBuf[128] = "";
+    static char authErrorBuf[256] = "";
+
+    // Settings modal state (accessible from menu bar)
+    static bool showSettingsModal = false;
+    static bool settingsModalInit = false;
+    static char settings_displayNameBuf[128] = "";
+    static char settings_newPassBuf[128] = "";
+    static char settings_newPassConfirmBuf[128] = "";
+    // User Management form fields (admin-only)
+    static char userMgmt_newUsernameBuf[128] = "";
+    static char userMgmt_newDisplayBuf[128] = "";
+    static char userMgmt_newPassBuf[128] = "";
+    static char userMgmt_newPassConfirmBuf[128] = "";
+    static bool userMgmt_newIsAdmin = false;
+    static char userMgmt_errorBuf[256] = "";
+    static int64_t userMgmt_resetUserID = -1;
+    static char userMgmt_resetPassBuf[128] = "";
+    static char userMgmt_resetPassConfirmBuf[128] = "";
+    static int64_t userMgmt_deleteUserID = -1;
+    static char userMgmt_statusMsg[256] = "";
 
     // File browser state
     enum class BrowserMode { None, BrowseForCreateDir, BrowseForOpenDir, BrowseForOpenFile };
@@ -115,7 +158,7 @@ int main(int argc, char** argv)
 
     // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
-    plog::init(plog::warning, &consoleAppender);
+    plog::init(plog::info, &consoleAppender);
     PLOGI << "plog initialized (verbose -> stderr)";
 
     // Main loop
@@ -176,8 +219,15 @@ int main(int argc, char** argv)
                     showOpenVaultModal = true;
                     openVaultError[0] = '\0';
                 }
+                if (ImGui::MenuItem("Open Remote Vault")) {
+                    // Request remote open modal
+                    showOpenRemoteVaultModal = true;
+                    remoteTestStatusBuf[0] = '\0';
+                    remoteTestOk = false;
+                }
                 if (ImGui::MenuItem("Close Vault", nullptr, false, vault != nullptr)){
                     if(vault) vault.reset();
+                    showSettingsModal = false;
                 }
 
                 if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -185,15 +235,29 @@ int main(int argc, char** argv)
             }
 
             if (ImGui::BeginMenu("View")){
-                if(ImGui::MenuItem("Vault Graph", nullptr, showGraphWindow)){
+                bool canViewVault = (vault != nullptr && vault->getCurrentUserID() > 0);
+                if(ImGui::MenuItem("Vault Graph", nullptr, showGraphWindow, canViewVault)){
                     showGraphWindow = !showGraphWindow;
                 }
-                if(ImGui::MenuItem("Vault Chat", nullptr, showChatWindow)){
+                if(ImGui::MenuItem("Vault Chat", nullptr, showChatWindow, canViewVault)){
                     showChatWindow = !showChatWindow;
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("Settings")){
+                bool canOpenSettings = (vault != nullptr && vault->getCurrentUserID() > 0);
+                if(ImGui::MenuItem("Settings...", nullptr, false, canOpenSettings)){
+                    showSettingsModal = true;
+                }
+                ImGui::EndMenu();
+            }
             ImGui::EndMenuBar();
+        }
+
+        // Ensure Settings popup cannot remain open when there's no vault or no logged-in user
+        if(ImGui::IsPopupOpen("Settings") && (!vault || vault->getCurrentUserID() <= 0)){
+            ImGui::CloseCurrentPopup();
+            showSettingsModal = false;
         }
 
         // If requested, open the popup now (outside of the menu) so it isn't parented/blocked by the menu
@@ -239,6 +303,7 @@ int main(int argc, char** argv)
                             strncpy(createVaultError, "Failed to open database file.", sizeof(createVaultError));
                         } else {
                             vault = std::make_unique<Vault>(std::move(v));
+                            if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
                             ImGui::CloseCurrentPopup();
                             showCreateVaultModal = false;
                         }
@@ -316,6 +381,7 @@ int main(int argc, char** argv)
                                 strncpy(openVaultError, "Failed to open database file.", sizeof(openVaultError));
                             } else {
                                 vault = std::make_unique<Vault>(std::move(v));
+                                if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
                                 ImGui::CloseCurrentPopup();
                                 showOpenVaultModal = false;
                             }
@@ -363,6 +429,7 @@ int main(int argc, char** argv)
                                 strncpy(openVaultError, "Failed to open database file.", sizeof(openVaultError));
                             } else {
                                 vault = std::make_unique<Vault>(std::move(v));
+                                if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
                                 ImGui::CloseCurrentPopup();
                                 showOpenVaultModal = false;
                             }
@@ -378,6 +445,74 @@ int main(int argc, char** argv)
                 showOpenVaultModal = false;
             }
 
+            ImGui::EndPopup();
+        }
+
+        // Open Remote Vault modal (MySQL)
+        if (showOpenRemoteVaultModal) {
+            ImGui::OpenPopup("Open Remote Vault");
+            showOpenRemoteVaultModal = false;
+            remoteTestStatusBuf[0] = '\0';
+            remoteTestOk = false;
+        }
+        if (ImGui::BeginPopupModal("Open Remote Vault", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Connect to a remote MySQL vault");
+            ImGui::Separator();
+            ImGui::InputText("Host", remoteHostBuf, sizeof(remoteHostBuf));
+            ImGui::SameLine(); ImGui::SetNextItemWidth(80); ImGui::InputInt("Port", &remotePort);
+            ImGui::InputText("Database", remoteDBBuf, sizeof(remoteDBBuf));
+            ImGui::InputText("Username", remoteUserBuf, sizeof(remoteUserBuf));
+            ImGui::InputText("Password", remotePassBuf, sizeof(remotePassBuf), ImGuiInputTextFlags_Password);
+            ImGui::Checkbox("Use SSL", &remoteUseSSL);
+            if(remoteUseSSL){ ImGui::InputText("CA File", remoteCAFileBuf, sizeof(remoteCAFileBuf)); }
+            if(remoteTestStatusBuf[0] != '\0'){
+                ImGui::Separator();
+                ImGui::TextWrapped("%s", remoteTestStatusBuf);
+            }
+            ImGui::Separator();
+            if(ImGui::Button("Test Connection")){
+                std::string err;
+                remoteTestOk = TestMySQLConnection(std::string(remoteHostBuf), remotePort, std::string(remoteDBBuf), std::string(remoteUserBuf), std::string(remotePassBuf), remoteUseSSL, std::string(remoteCAFileBuf), err);
+                if(remoteTestOk){ strncpy(remoteTestStatusBuf, "Connection OK", sizeof(remoteTestStatusBuf)); }
+                else {
+                    // If the server reports SSL/TLS messages, suggest enabling SSL but do NOT toggle the checkbox automatically
+                    std::string low = err;
+                    std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                    if((low.find("ssl") != std::string::npos || low.find("tls") != std::string::npos)){
+                        std::string msg = std::string(err) + " -- Tip: If your server requires SSL/TLS, enable 'Use SSL' and provide a CA file if necessary, then press Test Connection again.";
+                        strncpy(remoteTestStatusBuf, msg.c_str(), sizeof(remoteTestStatusBuf));
+                    } else {
+                        strncpy(remoteTestStatusBuf, err.c_str(), sizeof(remoteTestStatusBuf));
+                    }
+                }
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Open")){
+                if(!remoteTestOk){ strncpy(remoteTestStatusBuf, "Please test the connection before opening", sizeof(remoteTestStatusBuf)); }
+                else {
+                    // Attempt to open a remote MySQL-backed Vault using the provided connection info
+                    LoreBook::DBConnectionInfo ci;
+                    ci.backend = LoreBook::DBConnectionInfo::Backend::MySQL;
+                    ci.mysql_host = std::string(remoteHostBuf);
+                    ci.mysql_port = remotePort;
+                    ci.mysql_db = std::string(remoteDBBuf);
+                    ci.mysql_user = std::string(remoteUserBuf);
+                    ci.mysql_password = std::string(remotePassBuf);
+                    ci.mysql_use_ssl = remoteUseSSL;
+                    ci.mysql_ca_file = std::string(remoteCAFileBuf);
+                    VaultConfig cfg; cfg.connInfo = ci; cfg.createIfMissing = true;
+                    std::string err;
+                    auto v = Vault::Open(cfg, &err);
+                    if(!v){ strncpy(remoteTestStatusBuf, err.c_str(), sizeof(remoteTestStatusBuf)); }
+                    else {
+                        vault = std::move(v);
+                        if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
+                        ImGui::CloseCurrentPopup();
+                        showOpenRemoteVaultModal = false;
+                    }
+                }
+            }
+            ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
             ImGui::EndPopup();
         }
 
@@ -506,6 +641,7 @@ int main(int argc, char** argv)
                                 } else {
                                     vault = std::make_unique<Vault>(std::move(v));
                                     openVaultError[0] = '\0';
+                                    if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
                                     // Close the file picker now and request the parent Open modal to close too
                                     ImGui::CloseCurrentPopup();
                                     showOpenVaultModal = false;
@@ -544,6 +680,7 @@ int main(int argc, char** argv)
                                 } else {
                                     vault = std::make_unique<Vault>(std::move(v));
                                     openVaultError[0] = '\0';
+                                    if(vault){ if(!vault->hasUsers()) showCreateAdminModal = true; else showLoginModal = true; showSettingsModal = false; }
                                     ImGui::CloseCurrentPopup();
                                     showOpenVaultModal = false;
                                     requestCloseOpenVaultModal = true;
@@ -570,23 +707,215 @@ int main(int argc, char** argv)
             ImGui::EndPopup();
         }
 
+        // Auth modals: Create Admin (required when no users) and Login (block until authenticated)
+        if (showCreateAdminModal && vault) { ImGui::OpenPopup("Create Admin"); showCreateAdminModal = false; }
+        if (ImGui::BeginPopupModal("Create Admin", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Create the vault administrator (required)");
+            ImGui::Separator();
+            ImGui::InputText("Username", createAdminUserBuf, sizeof(createAdminUserBuf));
+            ImGui::InputText("Display Name", createAdminDisplayBuf, sizeof(createAdminDisplayBuf));
+            ImGui::InputText("Password", createAdminPassBuf, sizeof(createAdminPassBuf), ImGuiInputTextFlags_Password);
+            ImGui::InputText("Confirm Password", createAdminPassConfirmBuf, sizeof(createAdminPassConfirmBuf), ImGuiInputTextFlags_Password);
+            if(authErrorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", authErrorBuf);
+            if(ImGui::Button("Create Admin")){
+                if(!vault){ strncpy(authErrorBuf, "No vault", sizeof(authErrorBuf)); }
+                else {
+                    std::string u(createAdminUserBuf); std::string d(createAdminDisplayBuf); std::string p(createAdminPassBuf); std::string q(createAdminPassConfirmBuf);
+                    if(u.empty() || p.empty()) strncpy(authErrorBuf, "Username and password required", sizeof(authErrorBuf));
+                    else if(p != q) strncpy(authErrorBuf, "Passwords do not match", sizeof(authErrorBuf));
+                    else {
+                        int64_t uid = vault->createUser(u, d, p, true);
+                        if(uid <= 0) strncpy(authErrorBuf, "Failed to create user (username may exist)", sizeof(authErrorBuf));
+                        else { vault->setCurrentUser(uid); ImGui::CloseCurrentPopup(); authErrorBuf[0] = '\0'; }
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        if (showLoginModal && vault) { ImGui::OpenPopup("Login"); showLoginModal = false; authErrorBuf[0] = '\0'; }
+        if (ImGui::BeginPopupModal("Login", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            ImGui::Text("Please login to open the vault");
+            ImGui::Separator();
+            ImGui::InputText("Username", loginUserBuf, sizeof(loginUserBuf));
+            ImGui::InputText("Password", loginPassBuf, sizeof(loginPassBuf), ImGuiInputTextFlags_Password);
+            if(authErrorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", authErrorBuf);
+            if(ImGui::Button("Login")){
+                if(!vault){ strncpy(authErrorBuf, "No vault", sizeof(authErrorBuf)); }
+                else {
+                    std::string u(loginUserBuf); std::string p(loginPassBuf);
+                    int64_t uid = vault->authenticateUser(u, p);
+                    if(uid <= 0) strncpy(authErrorBuf, "Invalid username or password", sizeof(authErrorBuf));
+                    else { vault->setCurrentUser(uid); ImGui::CloseCurrentPopup(); authErrorBuf[0] = '\0'; }
+                }
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Cancel")){
+                // Cancel opening the vault
+                vault.reset();
+                ImGui::CloseCurrentPopup();
+                authErrorBuf[0] = '\0';
+            }
+            ImGui::EndPopup();
+        }
+
+        // Settings modal
+        if(showSettingsModal && vault){
+            ImGui::OpenPopup("Settings"); showSettingsModal = false; settingsModalInit = true;
+            // initialize buffers
+            int64_t cu = vault->getCurrentUserID();
+            if(cu > 0){ strncpy(settings_displayNameBuf, vault->getCurrentUserDisplayName().c_str(), sizeof(settings_displayNameBuf)); settings_displayNameBuf[sizeof(settings_displayNameBuf)-1] = '\0'; }
+            settings_newPassBuf[0] = settings_newPassConfirmBuf[0] = '\0';
+            userMgmt_errorBuf[0] = userMgmt_statusMsg[0] = '\0';
+            userMgmt_newUsernameBuf[0] = userMgmt_newDisplayBuf[0] = userMgmt_newPassBuf[0] = userMgmt_newPassConfirmBuf[0] = '\0';
+            userMgmt_newIsAdmin = false; userMgmt_resetUserID = -1; userMgmt_deleteUserID = -1;
+        }
+        if(ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+            if(ImGui::BeginTabBar("SettingsTabs")){
+                if(ImGui::BeginTabItem("User Settings")){
+                    int64_t cu = vault->getCurrentUserID();
+                    if(cu <= 0){ ImGui::Text("Not logged in"); }
+                    else {
+                        ImGui::Text("Username: %s", vault->listUsers().size() == 0 ? "" : "");
+                        ImGui::TextDisabled("(Username cannot be changed)");
+                        ImGui::InputText("Display Name", settings_displayNameBuf, sizeof(settings_displayNameBuf));
+                        if(ImGui::Button("Save")){
+                            if(vault->updateUserDisplayName(cu, std::string(settings_displayNameBuf))){ strncpy(userMgmt_statusMsg, "Display name saved", sizeof(userMgmt_statusMsg)); }
+                            else { strncpy(userMgmt_statusMsg, "Failed to save display name", sizeof(userMgmt_statusMsg)); }
+                        }
+                        ImGui::Separator();
+                        ImGui::InputText("New Password", settings_newPassBuf, sizeof(settings_newPassBuf), ImGuiInputTextFlags_Password);
+                        ImGui::InputText("Confirm Password", settings_newPassConfirmBuf, sizeof(settings_newPassConfirmBuf), ImGuiInputTextFlags_Password);
+                        if(ImGui::Button("Change Password")){
+                            std::string a(settings_newPassBuf); std::string b(settings_newPassConfirmBuf);
+                            if(a.empty()) strncpy(userMgmt_errorBuf, "Password cannot be empty", sizeof(userMgmt_errorBuf));
+                            else if(a != b) strncpy(userMgmt_errorBuf, "Passwords do not match", sizeof(userMgmt_errorBuf));
+                            else {
+                                if(vault->changeUserPassword(cu, a)){ strncpy(userMgmt_statusMsg, "Password changed", sizeof(userMgmt_statusMsg)); settings_newPassBuf[0]=settings_newPassConfirmBuf[0]='\0'; userMgmt_errorBuf[0] = '\0'; }
+                                else strncpy(userMgmt_errorBuf, "Failed to change password", sizeof(userMgmt_errorBuf));
+                            }
+                        }
+                        if(userMgmt_errorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", userMgmt_errorBuf);
+                    }
+                    ImGui::EndTabItem();
+                }
+
+                // User Management tab (admin only)
+                if(vault->isUserAdmin(vault->getCurrentUserID()) && ImGui::BeginTabItem("User Management")){
+                    ImGui::Text("Create new user");
+                    ImGui::InputText("Username", userMgmt_newUsernameBuf, sizeof(userMgmt_newUsernameBuf));
+                    ImGui::InputText("Display Name", userMgmt_newDisplayBuf, sizeof(userMgmt_newDisplayBuf));
+                    ImGui::InputText("Password", userMgmt_newPassBuf, sizeof(userMgmt_newPassBuf), ImGuiInputTextFlags_Password);
+                    ImGui::InputText("Confirm Password", userMgmt_newPassConfirmBuf, sizeof(userMgmt_newPassConfirmBuf), ImGuiInputTextFlags_Password);
+                    ImGui::Checkbox("Admin", &userMgmt_newIsAdmin);
+                    if(ImGui::Button("Create User")){
+                        std::string u(userMgmt_newUsernameBuf); std::string d(userMgmt_newDisplayBuf); std::string p(userMgmt_newPassBuf); std::string q(userMgmt_newPassConfirmBuf);
+                        if(u.empty() || p.empty()) strncpy(userMgmt_errorBuf, "Username and password required", sizeof(userMgmt_errorBuf));
+                        else if(p != q) strncpy(userMgmt_errorBuf, "Passwords do not match", sizeof(userMgmt_errorBuf));
+                        else {
+                            int64_t uid = vault->createUser(u,d,p,userMgmt_newIsAdmin);
+                            if(uid <= 0) strncpy(userMgmt_errorBuf, "Failed to create user (username may exist)", sizeof(userMgmt_errorBuf));
+                            else { strncpy(userMgmt_statusMsg, "User created", sizeof(userMgmt_statusMsg)); userMgmt_newUsernameBuf[0]=userMgmt_newDisplayBuf[0]=userMgmt_newPassBuf[0]=userMgmt_newPassConfirmBuf[0]='\0'; userMgmt_newIsAdmin=false; userMgmt_errorBuf[0]='\0'; }
+                        }
+                    }
+                    if(userMgmt_errorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", userMgmt_errorBuf);
+                    ImGui::Separator();
+                    ImGui::Text("Existing users:");
+                    ImGui::BeginChild("UserList", ImVec2(0,200), true);
+                    auto users = vault->listUsers();
+                    for(auto &u : users){
+                        ImGui::PushID((int)u.id);
+                        ImGui::Text("%s", u.username.c_str()); ImGui::SameLine();
+                        char dBuf[128]; strncpy(dBuf, u.displayName.c_str(), sizeof(dBuf)); dBuf[sizeof(dBuf)-1]='\0';
+                        if(ImGui::InputText("Display", dBuf, sizeof(dBuf))){ vault->updateUserDisplayName(u.id, std::string(dBuf)); strncpy(userMgmt_statusMsg, "Display updated", sizeof(userMgmt_statusMsg)); }
+                        ImGui::SameLine();
+                        bool isAdmin = u.isAdmin;
+                        if(ImGui::Checkbox("Admin", &isAdmin)){
+                            if(!vault->setUserAdminFlag(u.id, isAdmin)) strncpy(userMgmt_errorBuf, "Failed to set admin flag (cannot remove last admin or change your own admin)", sizeof(userMgmt_errorBuf));
+                            else strncpy(userMgmt_statusMsg, "Admin flag updated", sizeof(userMgmt_statusMsg));
+                        }
+                        ImGui::SameLine();
+                        if(ImGui::Button("Reset Password")){
+                            userMgmt_resetUserID = u.id; userMgmt_resetPassBuf[0]=userMgmt_resetPassConfirmBuf[0]='\0'; ImGui::OpenPopup("Reset Password");
+                        }
+                        ImGui::SameLine();
+                        bool canDelete = (vault->getCurrentUserID() != u.id);
+                        if(ImGui::Button("Delete")){
+                            if(!canDelete) strncpy(userMgmt_errorBuf, "Cannot delete the currently logged-in user", sizeof(userMgmt_errorBuf));
+                            else { userMgmt_deleteUserID = u.id; ImGui::OpenPopup("Delete User"); }
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::EndChild();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+
+            if(userMgmt_statusMsg[0] != '\0') ImGui::TextColored(ImVec4(0.4f,1,0.4f,1.0f), "%s", userMgmt_statusMsg);
+            ImGui::Separator();
+
+            // Reset Password modal (admin triggers)
+            if(ImGui::BeginPopupModal("Reset Password", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                ImGui::Text("Set a new password for this user");
+                ImGui::Separator();
+                ImGui::InputText("New Password", userMgmt_resetPassBuf, sizeof(userMgmt_resetPassBuf), ImGuiInputTextFlags_Password);
+                ImGui::InputText("Confirm", userMgmt_resetPassConfirmBuf, sizeof(userMgmt_resetPassConfirmBuf), ImGuiInputTextFlags_Password);
+                if(ImGui::Button("Set")){
+                    std::string a(userMgmt_resetPassBuf); std::string b(userMgmt_resetPassConfirmBuf);
+                    if(a.empty()) strncpy(userMgmt_errorBuf, "Password cannot be empty", sizeof(userMgmt_errorBuf));
+                    else if(a != b) strncpy(userMgmt_errorBuf, "Passwords do not match", sizeof(userMgmt_errorBuf));
+                    else {
+                        if(userMgmt_resetUserID > 0 && vault->changeUserPassword(userMgmt_resetUserID, a)){
+                            strncpy(userMgmt_statusMsg, "Password reset", sizeof(userMgmt_statusMsg)); userMgmt_resetUserID = -1; userMgmt_resetPassBuf[0]=userMgmt_resetPassConfirmBuf[0]='\0'; userMgmt_errorBuf[0] = '\0'; ImGui::CloseCurrentPopup();
+                        } else strncpy(userMgmt_errorBuf, "Failed to reset password", sizeof(userMgmt_errorBuf));
+                    }
+                }
+                ImGui::SameLine(); if(ImGui::Button("Cancel")){ userMgmt_resetUserID = -1; ImGui::CloseCurrentPopup(); }
+                if(userMgmt_errorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", userMgmt_errorBuf);
+                ImGui::EndPopup();
+            }
+
+            // Delete User confirmation
+            if(ImGui::BeginPopupModal("Delete User", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+                ImGui::Text("Delete this user? This will remove the user and their permissions."); ImGui::Separator();
+                if(ImGui::Button("Delete")){
+                    if(userMgmt_deleteUserID > 0){ if(vault->deleteUser(userMgmt_deleteUserID)){ strncpy(userMgmt_statusMsg, "User deleted", sizeof(userMgmt_statusMsg)); } else { strncpy(userMgmt_errorBuf, "Failed to delete user (cannot delete last admin or yourself)", sizeof(userMgmt_errorBuf)); } }
+                    userMgmt_deleteUserID = -1; ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine(); if(ImGui::Button("Cancel")){ userMgmt_deleteUserID = -1; ImGui::CloseCurrentPopup(); }
+                if(userMgmt_errorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", userMgmt_errorBuf);
+                ImGui::EndPopup();
+            }
+
+            if(ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
         ImGui::End(); // DockSpaceHost
 
-        // Render Vault windows if available
+        // Render Vault windows only when a user is logged in
         if(vault){
-            vault->drawVaultTree();
-            vault->drawVaultContent();
+            if(vault->getCurrentUserID() > 0){
+                vault->drawVaultTree();
+                vault->drawVaultContent();
+                graphView.setVault(vault.get());
+            } else {
+                // Do not render any vault UI while logged out; disconnect GraphView to avoid leaks
+                graphView.setVault(nullptr);
+            }
+        } else {
+            graphView.setVault(nullptr);
         }
 
         // Graph view and Chat (dockable)
-        graphView.setVault(vault.get());
-        if(showGraphWindow){
+        if(showGraphWindow && vault && vault->getCurrentUserID() > 0){
             // pass dt as ImGui frame delta
             graphView.updateAndDraw(ImGui::GetIO().DeltaTime);
         }
 
         // Render Vault Chat as its own window (docked with the graph by default)
-        if(showChatWindow && vault){
+        if(showChatWindow && vault && vault->getCurrentUserID() > 0){
             ImGui::Begin("Vault Chat");
             RenderVaultChat(vault.get());
             ImGui::End();
