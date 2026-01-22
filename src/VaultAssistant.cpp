@@ -9,6 +9,28 @@ VaultAssistant::VaultAssistant(Vault* v, OpenAIClient* c): vault_(v), client_(c)
 
 bool VaultAssistant::ensureFTSIndex(){
     if(!vault_) return false;
+    // Prefer backend-managed FTS when a remote backend is in use
+    auto b = vault_->getDBBackendPublic();
+    if(b && b->isOpen()){
+        if(!b->supportsFullText()) return false;
+        std::string err;
+        // create FTS entries/indices for Name, Content, Tags as appropriate
+        if(!b->ensureFullTextIndex("VaultItems", "Name", &err)){
+            PLOGW << "ensureFTSIndex: failed to create Name FTS index: " << err;
+            return false;
+        }
+        if(!b->ensureFullTextIndex("VaultItems", "Content", &err)){
+            PLOGW << "ensureFTSIndex: failed to create Content FTS index: " << err;
+            return false;
+        }
+        if(!b->ensureFullTextIndex("VaultItems", "Tags", &err)){
+            PLOGW << "ensureFTSIndex: failed to create Tags FTS index: " << err;
+            return false;
+        }
+        return true;
+    }
+
+    // Fallback to SQLite local DB behavior
     sqlite3* db = vault_->getDBPublic();
     if(!db) return false;
     const char* createFTS = "CREATE VIRTUAL TABLE IF NOT EXISTS VaultItemsFTS USING fts5(Name, Content, Tags);";

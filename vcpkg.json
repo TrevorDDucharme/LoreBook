@@ -21,6 +21,7 @@
 		"stb",
 		"nlohmann-json",
 		"openssl",
+		"cryptopp",
 		"curl",
 		{
 			"name": "lua",
@@ -38,6 +39,7 @@
 		"implot",
 		"implot3d",
 		"md4c",
-		"assimp"
+		"assimp",
+		"mysql-connector-cpp"
 	]
 }

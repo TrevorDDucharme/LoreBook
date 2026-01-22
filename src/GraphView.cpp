@@ -46,7 +46,7 @@ void GraphView::rebuildFromVault(){
     nodes.clear(); edges.clear(); nodeIndexById.clear();
     if(!vault) return;
 
-    auto items = vault->getAllItemsPublic();
+    auto items = (vault && vault->getCurrentUserID() > 0) ? vault->getAllItemsForUser(vault->getCurrentUserID()) : vault->getAllItemsPublic();
     // Layout nodes in a circle initially and ensure uniqueness
     const float centerX = 0.0f, centerY = 0.0f;
     const float radius = 200.0f;
