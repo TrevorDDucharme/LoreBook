@@ -1,11 +1,11 @@
 #include "VaultAssistant.hpp"
-#include "OpenAIClient.hpp"
+#include "LLMClient.hpp"
 #include "Vault.hpp"
 #include <sstream>
 #include <algorithm>
 #include <nlohmann/json.hpp>
 
-VaultAssistant::VaultAssistant(Vault* v, OpenAIClient* c): vault_(v), client_(c){}
+VaultAssistant::VaultAssistant(Vault* v, LLMClient* c): vault_(v), client_(c){}
 
 bool VaultAssistant::ensureFTSIndex(){
     if(!vault_) return false;
@@ -149,6 +149,16 @@ std::string VaultAssistant::askTextWithRAG(const std::string& question, const st
         {"model", model},
         {"messages", msg}
     };
+
+    // Log RAG inputs for debugging (truncate context to avoid huge logs)
+    try{
+        std::string ctxLog = context;
+        if(ctxLog.size() > 2000) ctxLog = ctxLog.substr(0,2000) + "...(truncated)";
+        PLOGI << "[RAG] askTextWithRAG model=" << model << " question=" << question << " context_len=" << context.size();
+        PLOGI << "[RAG] context: \n" << ctxLog;
+        PLOGI << "[RAG] messages: " << body.dump();
+    } catch(...){}
+
     auto r = client_->chatCompletions(body);
     if(!r.ok()) return std::string("[error]") + r.curlError + " " + std::to_string(r.httpCode);
     auto j = r.bodyJson();
@@ -176,6 +186,17 @@ std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& 
         {"messages", msg},
         {"temperature", 0.2}
     };
+
+    // Log RAG JSON request (include schema and truncated context for debugging)
+    try{
+        std::string ctxLog = context;
+        if(ctxLog.size() > 2000) ctxLog = ctxLog.substr(0,2000) + "...(truncated)";
+        PLOGI << "[RAG] askJSONWithRAG model=" << model << " question=" << question << " context_len=" << context.size();
+        PLOGI << "[RAG] schema: " << schema.dump();
+        PLOGI << "[RAG] context: \n" << ctxLog;
+        PLOGI << "[RAG] messages: " << body.dump();
+    } catch(...){}
+
     auto r = client_->chatCompletions(body);
     if(!r.ok()) return std::nullopt;
     auto j = r.bodyJson();
