@@ -10,7 +10,7 @@
 // - Returns Response containing status, body, and any libcurl error
 // - Supports streaming completions via a callback
 
-class OpenAIClient {
+class LLMClient {
 public:
     struct Response {
         long httpCode = 0;
@@ -20,9 +20,9 @@ public:
         nlohmann::json bodyJson() const { try { return nlohmann::json::parse(body); } catch(...) { return nlohmann::json(); } }
     };
 
-    OpenAIClient();
-    explicit OpenAIClient(const std::string& apiKey);
-    ~OpenAIClient();
+    LLMClient();
+    explicit LLMClient(const std::string& apiKey);
+    ~LLMClient();
 
     void setApiKey(const std::string& key) { apiKey_ = key; }
     void setBaseUrl(const std::string& url) { baseUrl_ = url; }
@@ -51,7 +51,7 @@ public:
 private:
     std::string buildUrl(const std::string& path) const;
     std::string apiKey_;
-    std::string baseUrl_ = "https://api.openai.com/v1";
+    std::string baseUrl_ = "http://127.0.0.1:1234/v1";
     long timeoutSeconds_ = 30;
 
     // Default headers applied to every request

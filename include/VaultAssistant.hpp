@@ -5,13 +5,13 @@
 #include <optional>
 
 class Vault;
-class OpenAIClient;
+class LLMClient;
 
 class VaultAssistant {
 public:
     struct Node { int64_t id; std::string name; std::string content; std::string tags; double score = 0.0; };
 
-    VaultAssistant(Vault* v, OpenAIClient* c);
+    VaultAssistant(Vault* v, LLMClient* c);
 
     // Return a list of available model ids
     std::vector<std::string> listModels();
@@ -33,7 +33,7 @@ public:
 
 private:
     Vault* vault_ = nullptr;
-    OpenAIClient* client_ = nullptr;
+    LLMClient* client_ = nullptr;
 
     std::string buildRAGContext(const std::vector<Node>& nodes, int charLimitPerNode = 800);
 

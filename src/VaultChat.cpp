@@ -1,7 +1,7 @@
 #include "VaultChat.hpp"
 #include "Vault.hpp"
 #include "VaultAssistant.hpp"
-#include "OpenAIClient.hpp"
+#include "LLMClient.hpp"
 #include <imgui.h>
 #include <cstdlib>
 #include <vector>
@@ -31,7 +31,7 @@ void RenderVaultChat(Vault* vault){
     static std::map<Vault*, std::string> selectedModelMap;
 
     if(!vault) return;
-    static OpenAIClient client;
+    static LLMClient client;
     static bool clientInitialized = false;
     if(!clientInitialized){
         const char* env = std::getenv("OPENAI_API_KEY");
@@ -44,7 +44,7 @@ void RenderVaultChat(Vault* vault){
 
     // UI/endpoint state
     static std::string apiKeyInput;
-    static std::string endpointUrl = "https://api.openai.com/v1";
+    static std::string endpointUrl = "http://127.0.0.1:1234/v1";
     static std::string extraHeadersText;
     static std::map<Vault*, std::vector<std::string>> pendingSystemMessages;
     static std::mutex pendingSystemMutex;
@@ -62,7 +62,7 @@ void RenderVaultChat(Vault* vault){
 
     // endpoint presets
     static std::vector<std::pair<std::string,std::string>> presets = {
-        {"OpenAI (default)", "https://api.openai.com/v1"},
+        {"LMStudio (default)", "http://127.0.0.1:1234/v1"},
         {"Azure OpenAI (example)", "https://<your-resource>.openai.azure.com/openai"},
         {"Hugging Face (example)", "https://api-inference.huggingface.co/models"},
         {"Custom", ""}
@@ -114,8 +114,8 @@ void RenderVaultChat(Vault* vault){
             // run async test and queue result for main thread to display
             std::lock_guard<std::mutex> lk(pendingSystemMutex);
             pendingSystemMessages[vault].push_back("Testing endpoint...");
-            std::thread([vaultPtr = vault, url = endpointUrl, key = apiKeyInput, headers = extraHeadersText, &client, &pendingSystemMessages, &pendingSystemMutex](){
-                OpenAIClient testClient = client; // copy config
+            std::thread([vaultPtr = vault, url = endpointUrl, key = apiKeyInput, headers = extraHeadersText, clientPtr = &client, pendingSystemMessagesPtr = &pendingSystemMessages, pendingSystemMutexPtr = &pendingSystemMutex](){
+                LLMClient testClient = *clientPtr; // copy config
                 testClient.setBaseUrl(url);
                 testClient.setApiKey(key);
                 // apply headers
@@ -129,16 +129,16 @@ void RenderVaultChat(Vault* vault){
                 }
                 testClient.setDefaultHeaders(hvec);
                 auto r = testClient.listModels();
-                std::lock_guard<std::mutex> lk2(pendingSystemMutex);
+                std::lock_guard<std::mutex> lk2(*pendingSystemMutexPtr);
                 if(!r.ok()){
-                    pendingSystemMessages[vaultPtr].push_back(std::string("Endpoint test failed: ") + r.curlError + " (" + std::to_string(r.httpCode) + ")");
+                    (*pendingSystemMessagesPtr)[vaultPtr].push_back(std::string("Endpoint test failed: ") + r.curlError + " (" + std::to_string(r.httpCode) + ")");
                 } else {
                     auto j = r.bodyJson();
                     if(j.contains("data") && j["data"].is_array()){
                         size_t n = j["data"].size();
-                        pendingSystemMessages[vaultPtr].push_back(std::string("Endpoint test success: found ") + std::to_string(n) + " models");
+                        (*pendingSystemMessagesPtr)[vaultPtr].push_back(std::string("Endpoint test success: found ") + std::to_string(n) + " models");
                     } else {
-                        pendingSystemMessages[vaultPtr].push_back(std::string("Endpoint test success (no models returned)"));
+                        (*pendingSystemMessagesPtr)[vaultPtr].push_back(std::string("Endpoint test success (no models returned)"));
                     }
                 }
             }).detach();
@@ -162,22 +162,24 @@ void RenderVaultChat(Vault* vault){
     // streaming UI state
     static std::map<Vault*, std::string> streamPartials;
     static std::mutex streamMutex;
+    // track whether a partial assistant message is present in the history (so we can update in-place)
+    static std::map<Vault*, bool> hasPartialInHistory;
 
     if(models.empty() && ImGui::GetTime() - lastModelFetch > 0.0){
         models = assistant->listModels();
         lastModelFetch = ImGui::GetTime();
-        if(models.empty()) models.push_back("gpt-4o-mini");
+        if(models.empty()) models.push_back("wayfarer@q8_0");
     }
     if(models.empty() && ImGui::GetTime() - lastModelFetch > 0.0){
         models = assistant->listModels();
         lastModelFetch = ImGui::GetTime();
-        if(models.empty()) models.push_back("gpt-4o-mini");
+        if(models.empty()) models.push_back("wayfarer@q8_0");
     }
 
     auto &history = historyMap[vault];
     auto &input = inputMap[vault];
     auto &selectedModel = selectedModelMap[vault];
-    if(selectedModel.empty()) selectedModel = models.empty() ? std::string("gpt-4o-mini") : models[0];
+    if(selectedModel.empty()) selectedModel = models.empty() ? std::string("wayfarer@q8_0") : models[0];
 
     ImGui::TextDisabled("Model:"); ImGui::SameLine();
     if(ImGui::BeginCombo("##vault_model", selectedModel.c_str())){
@@ -188,13 +190,15 @@ void RenderVaultChat(Vault* vault){
         ImGui::EndCombo();
     }
 
-    // Show history
+    // Show history (use wrapped text and color for assistant messages)
     ImGui::BeginChild("##vault_chat_history", ImVec2(0, -70), true);
     for(auto &m : history){
         if(m.first == "user"){
             ImGui::TextWrapped("%s", (std::string("You: ") + m.second).c_str());
         } else {
-            ImGui::TextColored(ImVec4(0.2f,0.6f,0.9f,1.0f), "%s", (std::string("Vault: ") + m.second).c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.2f,0.6f,0.9f,1.0f));
+            ImGui::TextWrapped("%s", (std::string("Vault: ") + m.second).c_str());
+            ImGui::PopStyleColor();
         }
         ImGui::Separator();
     }
@@ -204,18 +208,45 @@ void RenderVaultChat(Vault* vault){
     // Poll pending request completion and update partials
     if(pending && pending->type != PendingRequest::None){
         auto status = pending->fut.wait_for(std::chrono::milliseconds(0));
-        // show partial streaming content live
+        // integrate partial streaming content into history (show where it will end up)
         if(streamingEnabled){
             std::lock_guard<std::mutex> lk(streamMutex);
             auto it = streamPartials.find(vault);
             if(it != streamPartials.end() && !it->second.empty()){
-                // render partial directly under history (do not consume)
-                ImGui::TextColored(ImVec4(0.5f,0.5f,0.6f,1.0f), "%s", (std::string("Vault (partial): ") + it->second).c_str());
+                // if no partial message in history yet, append one; otherwise update the last assistant message
+                bool &hasPartial = hasPartialInHistory[vault];
+                if(!hasPartial){
+                    history.emplace_back("assistant", it->second);
+                    hasPartial = true;
+                } else {
+                    if(!history.empty() && history.back().first == "assistant"){
+                        history.back().second = it->second;
+                    } else {
+                        // fallback: append if last is not assistant for some reason
+                        history.emplace_back("assistant", it->second);
+                        hasPartial = true;
+                    }
+                }
             }
         }
         if(status == std::future_status::ready){
             std::string result = pending->fut.get();
-            history.emplace_back("assistant", result.empty() ? std::string("(no response)") : result);
+            bool hadPartial = false;
+            auto itHas = hasPartialInHistory.find(vault);
+            if(itHas != hasPartialInHistory.end()) { hadPartial = itHas->second; }
+
+            if(hadPartial){
+                if(!history.empty() && history.back().first == "assistant"){
+                    history.back().second = result.empty() ? std::string("(no response)") : result;
+                } else {
+                    history.emplace_back("assistant", result.empty() ? std::string("(no response)") : result);
+                }
+                // clear flag
+                hasPartialInHistory[vault] = false;
+            } else {
+                history.emplace_back("assistant", result.empty() ? std::string("(no response)") : result);
+            }
+
             // clear any partials
             {
                 std::lock_guard<std::mutex> lk(streamMutex);
@@ -242,7 +273,7 @@ void RenderVaultChat(Vault* vault){
                     std::lock_guard<std::mutex> lk(streamMutex);
                     streamPartials[vault].clear();
                 }
-                pending->fut = std::async(std::launch::async, [assistant, &client, inCopy, modelCopy, vault, &streamPartials, &streamMutex](){
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, clientPtr = &client, inCopy, modelCopy, vault, streamPartialsPtr = &streamPartials, streamMutexPtr = &streamMutex](){
                     // build context and body similar to askTextWithRAG
                     auto nodes = assistant->retrieveRelevantNodes(inCopy, 5);
                     std::string context = assistant->getRAGContext(nodes);
@@ -251,21 +282,51 @@ void RenderVaultChat(Vault* vault){
                     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + inCopy}});
                     nlohmann::json body = {{"model", modelCopy}, {"messages", msg}};
 
+                    // Log RAG streaming request (truncate context for logs)
+                    try{
+                        std::ostringstream ns;
+                        ns << "[";
+                        for(size_t i=0;i<nodes.size() && i<10;i++){
+                            ns << nodes[i].id << ":" << nodes[i].name;
+                            if(i+1 < nodes.size() && i<9) ns << ", ";
+                        }
+                        ns << "]";
+                        std::string ctxLog = context;
+                        if(ctxLog.size() > 2000) ctxLog = ctxLog.substr(0,2000) + "...(truncated)";
+                        PLOGI << "[RAG][stream] model=" << modelCopy << " question=" << inCopy << " nodes=" << nodes.size() << " nodeSummary=" << ns.str() << " context_len=" << context.size();
+                        PLOGI << "[RAG][stream] context: \n" << ctxLog;
+                        PLOGI << "[RAG][stream] body: " << body.dump();
+                    } catch(...){}
+
                     std::string accumulated;
-                    auto cb = [&accumulated, vault, &streamPartials, &streamMutex](const std::string& chunk){
-                        // append to accumulated and also to per-vault partial buffer
+                    auto cb = [&accumulated, vault, streamPartialsPtr, streamMutexPtr](const std::string& chunk){
+                        // log fragment (truncated) and append to accumulated and per-vault partial buffer
+                        try{
+                            std::string disp = chunk;
+                            if(disp.size() > 200) disp = disp.substr(0,200) + "...";
+                            PLOGI << "[RAG][stream][frag] len=" << chunk.size() << " data=\"" << disp << "\"";
+                        } catch(...){}
                         accumulated += chunk;
-                        std::lock_guard<std::mutex> lk(streamMutex);
-                        streamPartials[vault] += chunk;
+                        std::lock_guard<std::mutex> lk(*streamMutexPtr);
+                        (*streamPartialsPtr)[vault] += chunk;
                     };
-                    auto r = client.streamChatCompletions(body, cb);
-                    if(!r.ok()) return std::string("[error] ") + r.curlError + " " + std::to_string(r.httpCode);
-                    // optionally parse accumulated to extract final assistant content from SSE lines
+                    auto r = clientPtr->streamChatCompletions(body, cb);
+                    if(!r.ok()){
+                        PLOGW << "[RAG][stream] request failed: " << r.curlError << " (" << r.httpCode << ")";
+                        return std::string("[error] ") + r.curlError + " " + std::to_string(r.httpCode);
+                    }
+                    // log completion and accumulated content (truncated)
+                    try{
+                        PLOGI << "[RAG][stream] completed accumulated_len=" << accumulated.size();
+                        std::string accLog = accumulated;
+                        if(accLog.size() > 2000) accLog = accLog.substr(0,2000) + "...(truncated)";
+                        PLOGI << "[RAG][stream] accumulated: \n" << accLog;
+                    } catch(...){}
                     return accumulated;
                 });
             } else {
-                pending->fut = std::async(std::launch::async, [assistant, inCopy, modelCopy](){
-                    std::string r = assistant->askTextWithRAG(inCopy, modelCopy, 5);
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy](){
+                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, 5);
                     if(r.empty()) r = "(no response)";
                     return r;
                 });
@@ -292,11 +353,11 @@ void RenderVaultChat(Vault* vault){
             auto modelCopy = selectedModel;
             auto vaultPtr = vault;
             pending->type = PendingRequest::Create;
-            pending->fut = std::async(std::launch::async, [assistant, inCopy, modelCopy, schema, vaultPtr](){
-                auto j = assistant->askJSONWithRAG(inCopy, schema, modelCopy, 5);
+            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vaultPtr](){
+                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, 5);
                 if(!j) return std::string("Failed to parse JSON from model response");
                 int64_t parent = vaultPtr->getSelectedItemID() >= 0 ? vaultPtr->getSelectedItemID() : -1;
-                int64_t id = assistant->createNodeFromJSON(*j, parent);
+                int64_t id = assistantPtr->createNodeFromJSON(*j, parent);
                 if(id > 0) return std::string("Created node ID: ") + std::to_string(id);
                 return std::string("Failed to create node from response");
             });
