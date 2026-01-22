@@ -133,6 +133,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE lz4::lz4)
 # resolver library at the right place in the link order.
 target_link_libraries(${PROJECT_NAME} PRIVATE resolv)
 
+find_package(libgit2 CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE libgit2::libgit2package)
+
 #END YOUR LIBRARIES
 
 #create a ${BIN_PATH} in source and move the executable there after build

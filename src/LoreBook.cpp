@@ -15,6 +15,7 @@
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
+#include "MergeConflictUI.hpp"
 #include "MySQLTest.hpp"
 #include <plog/Log.h>
 #include <plog/Init.h>
@@ -802,6 +803,10 @@ int main(int argc, char** argv)
 
                 // User Management tab (admin only)
                 if(vault->isUserAdmin(vault->getCurrentUserID()) && ImGui::BeginTabItem("User Management")){
+                    // Admin Merge Conflicts menu
+                    static bool showMergeConflicts = false;
+                    if(ImGui::Button("Merge Conflicts")) showMergeConflicts = true;
+                    if(showMergeConflicts){ LoreBook::RenderMergeConflictModal(vault.get(), &showMergeConflicts); }
                     ImGui::Text("Create new user");
                     ImGui::InputText("Username", userMgmt_newUsernameBuf, sizeof(userMgmt_newUsernameBuf));
                     ImGui::InputText("Display Name", userMgmt_newDisplayBuf, sizeof(userMgmt_newDisplayBuf));
