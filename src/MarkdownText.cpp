@@ -71,6 +71,8 @@ namespace ImGui
         std::stack<bool> li_wrap_active;
         // Running source offset (number of text bytes processed so far)
         size_t src_pos = 0;
+        // Pointer to original source buffer base used to compute absolute byte offsets for md4c callbacks
+        const MD_CHAR *source_base = nullptr; 
 
         // Table state
         bool in_table = false;
@@ -83,22 +85,28 @@ namespace ImGui
         bool in_table_cell = false;
 
         // Helpers for list item paragraphs
-        void beginListItemParagraph(bool ordered, int index)
+        // If suppressBullet is true, do not print the bullet/number nor start the wrapping; caller
+        // will render a custom widget (e.g., a checkbox) and then start the wrap inline.
+        void beginListItemParagraph(bool ordered, int index, bool suppressBullet = false)
         {
-            if (ordered)
-            {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%d.", index);
-                TextUnformatted(buf);
+            if (!suppressBullet) {
+                if (ordered)
+                {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%d.", index);
+                    TextUnformatted(buf);
+                }
+                else
+                {
+                    TextUnformatted(IconTag("point").c_str());
+                    // add a small gap between icon and text
+                    SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+                }
+                float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
+                PushTextWrapPos(wrapX);
+            } else {
+                // suppressed bullet -> do nothing here (caller will render inline widget and start wrap)
             }
-            else
-            {
-                TextUnformatted(IconTag("point").c_str());
-                // add a small gap between icon and text
-                SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
-            }
-            float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
-            PushTextWrapPos(wrapX);
         }
         void endListItemParagraph()
         {
@@ -164,7 +172,14 @@ namespace ImGui
             // If we're inside a list item and the first paragraph hasn't started yet,
             // attempt to detect a task-list marker '[ ]' or '[x]' and render an interactive checkbox.
             // Otherwise, start a normal list item paragraph (bullet/number) on the first text encountered.
-            size_t localPos = src_pos;
+            size_t localPos = 0;
+            // md4c may deliver text callbacks that omit list markers (e.g. "- "), so compute absolute byte offset
+            // from the original source pointer when available.
+            if (source_base && text) {
+                localPos = (size_t)((const char*)text - (const char*)source_base);
+            } else {
+                localPos = src_pos;
+            }
             if (!in_code_block && !lists.empty() && !li_first_paragraph.empty() && li_first_paragraph.top()) {
                 // Look for a checkbox marker near the beginning of this text chunk
                 size_t bracketPos = std::string::npos;
@@ -172,7 +187,22 @@ namespace ImGui
                 if (bracketPos != std::string::npos && bracketPos + 2 < s.size() && s[bracketPos+2] == ']') {
                     char c = s[bracketPos+1];
                     bool checked = (c == 'x' || c == 'X');
-                    // Render checkbox in place of a bullet
+
+                    // Prepare list item paragraph but suppress the bullet/number since we render a checkbox.
+                    bool ordered = (lists.top().type == MD_BLOCK_OL);
+                    // Defer the actual wrap until after the checkbox is rendered so the text stays inline
+                    beginListItemParagraph(ordered, lists.top().index, true);
+                    li_first_paragraph.top() = false;
+                    li_wrap_active.push(true);
+
+                    // If this is a root-level list (depth == 1), temporarily outdent so checkbox is left-aligned
+                    bool didUnindent = false;
+                    if (lists.size() == 1) {
+                        ImGui::Unindent(ImGui::GetFontSize() * 1.5f);
+                        didUnindent = true;
+                    }
+
+                    // Render checkbox in place of bullet
                     ImGui::PushID((void*)(intptr_t)(localPos + bracketPos));
                     bool v = checked;
                     if(ImGui::Checkbox("", &v)){
@@ -187,15 +217,24 @@ namespace ImGui
                         }
                     }
                     ImGui::PopID();
-                    // After checkbox, ensure text after the marker is wrapped and displayed
+
+                    // Restore indent if we temporarily unindented
+                    if (didUnindent) {
+                        ImGui::Indent(ImGui::GetFontSize() * 1.5f);
+                    }
+
+                    // Put remaining text on the same line, with same spacing as normal list items
+                    SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
                     size_t after = bracketPos + ((bracketPos + 3 < s.size() && s[bracketPos+3]==' ') ? 4 : 3);
                     std::string rem;
                     if (after < s.size()) rem = s.substr(after);
-                    // start a wrapped paragraph aligned with content region
+
+                    // Now start a wrapped paragraph aligned with the post-checkbox cursor position
                     float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
                     PushTextWrapPos(wrapX);
                     TextWrapped(rem.c_str());
                     PopTextWrapPos();
+
                     // Mark paragraph started
                     li_first_paragraph.top() = false;
                     // We already rendered this chunk; advance src_pos and return
@@ -949,8 +988,9 @@ namespace ImGui
 
         MD4CRenderer renderer;
         renderer.ctx = context;
+        renderer.source_base = (const MD_CHAR*)text;
         MD_PARSER parser = {0};
-        parser.enter_block = MD4CRenderer::enter_block;
+        parser.enter_block = MD4CRenderer::enter_block; 
         parser.leave_block = MD4CRenderer::leave_block;
         parser.enter_span = MD4CRenderer::enter_span;
         parser.leave_span = MD4CRenderer::leave_span;
