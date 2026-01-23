@@ -48,14 +48,30 @@ void RenderVaultChat(Vault* vault){
     static std::string extraHeadersText;
     static std::map<Vault*, std::vector<std::string>> pendingSystemMessages;
     static std::mutex pendingSystemMutex;
+    // Per-vault last-request state for Retry button
+    static std::map<Vault*, std::string> lastInputMap;
+    static std::map<Vault*, PendingRequest::Type> lastRequestTypeMap;
+    static std::map<Vault*, std::string> lastRequestModelMap;
+    static std::map<Vault*, nlohmann::json> lastRequestSchemaMap;
+    static std::map<Vault*, int64_t> lastRequestParentMap;
+    static std::map<Vault*, bool> lastRequestStreamingMap;
+    static std::map<Vault*, int> lastRequestContextCharLimitMap;
+    static std::map<Vault*, int> lastRequestRagNodeCountMap;
+    static std::map<Vault*, int> lastRequestMaxTokensMap;
+    static std::map<Vault*, int> lastRequestTopCharLimitMap;
+    static std::map<Vault*, bool> lastRequestTopFullMap;
+
     // timeout & streaming default controls (declare early so UI can use them)
-    static int timeoutSeconds = 30;
-    static bool streamingEnabled = false;
+    static int timeoutSeconds = 60*5;
+    static bool streamingEnabled = true;
     // Context length per node (characters) used when building RAG context
     static int contextCharLimit = 800;
+    // Top node options
+    static int topNodeCharLimit = 1024;
+    static bool topNodeFullContent = true;
     // RAG parameters: number of nodes to fetch and max LLM tokens
     static int ragNodeCount = 5;
-    static int llmMaxTokens = 1024;
+    static int llmMaxTokens = 2048;
 
     if(!clientInitialized){
         const char* env = std::getenv("OPENAI_API_KEY");
@@ -101,6 +117,10 @@ void RenderVaultChat(Vault* vault){
         ImGui::InputInt("Context length per node (chars)", &contextCharLimit);
         if(contextCharLimit < 0) contextCharLimit = 0;
         if(contextCharLimit > 10000) contextCharLimit = 10000;
+        ImGui::InputInt("Top node context length (chars)", &topNodeCharLimit);
+        if(topNodeCharLimit < -1) topNodeCharLimit = -1;
+        if(topNodeCharLimit > 100000) topNodeCharLimit = 100000; // allow larger for top node full excerpts
+        ImGui::Checkbox("Full content for top-scored node", &topNodeFullContent);
         ImGui::InputInt("RAG node count", &ragNodeCount);
         if(ragNodeCount < 1) ragNodeCount = 1;
         if(ragNodeCount > 100) ragNodeCount = 100;
@@ -281,6 +301,16 @@ void RenderVaultChat(Vault* vault){
             auto inCopy = input;
             auto modelCopy = selectedModel;
             pending->type = PendingRequest::Text;
+            // Save this request so user can retry it
+            lastInputMap[vault] = inCopy;
+            lastRequestTypeMap[vault] = PendingRequest::Text;
+            lastRequestModelMap[vault] = modelCopy;
+            lastRequestStreamingMap[vault] = streamingEnabled;
+            lastRequestContextCharLimitMap[vault] = contextCharLimit;
+            lastRequestTopCharLimitMap[vault] = topNodeCharLimit;
+            lastRequestTopFullMap[vault] = topNodeFullContent;
+            lastRequestRagNodeCountMap[vault] = ragNodeCount;
+            lastRequestMaxTokensMap[vault] = llmMaxTokens;
             if(streamingEnabled){
                 // streaming path: collect partials via callback
                 {
@@ -290,7 +320,7 @@ void RenderVaultChat(Vault* vault){
                 pending->fut = std::async(std::launch::async, [assistantPtr = assistant, clientPtr = &client, inCopy, modelCopy, vault, streamPartialsPtr = &streamPartials, streamMutexPtr = &streamMutex](){
                     // build context and body similar to askTextWithRAG
                     auto nodes = assistantPtr->retrieveRelevantNodes(inCopy, ragNodeCount, modelCopy, llmMaxTokens);
-                    std::string context = assistantPtr->getRAGContext(nodes, contextCharLimit);
+                    std::string context = assistantPtr->getRAGContext(nodes, contextCharLimit, topNodeCharLimit, topNodeFullContent);
                     nlohmann::json msg = nlohmann::json::array();
                     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
                     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + inCopy}});
@@ -339,8 +369,8 @@ void RenderVaultChat(Vault* vault){
                     return accumulated;
                 });
             } else {
-                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, contextCharLimit, ragNodeCount, llmMaxTokens](){
-                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, ragNodeCount, contextCharLimit, llmMaxTokens);
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, contextCharLimit, topNodeCharLimit, topNodeFullContent, ragNodeCount, llmMaxTokens](){
+                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, ragNodeCount, contextCharLimit, topNodeCharLimit, topNodeFullContent, llmMaxTokens);
                     if(r.empty()) r = "(no response)";
                     return r;
                 });
@@ -366,9 +396,20 @@ void RenderVaultChat(Vault* vault){
             auto inCopy = input;
             auto modelCopy = selectedModel;
             auto vaultPtr = vault;
+            // Save this create request for retry
+            lastInputMap[vault] = inCopy;
+            lastRequestTypeMap[vault] = PendingRequest::Create;
+            lastRequestModelMap[vault] = modelCopy;
+            lastRequestSchemaMap[vault] = schema;
+            lastRequestStreamingMap[vault] = streamingEnabled;
+            lastRequestContextCharLimitMap[vault] = contextCharLimit;
+            lastRequestTopCharLimitMap[vault] = topNodeCharLimit;
+            lastRequestTopFullMap[vault] = topNodeFullContent;
+            lastRequestRagNodeCountMap[vault] = ragNodeCount;
+            lastRequestMaxTokensMap[vault] = llmMaxTokens;
             pending->type = PendingRequest::Create;
-            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vaultPtr, contextCharLimit, ragNodeCount, llmMaxTokens](){
-                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, ragNodeCount, contextCharLimit, llmMaxTokens);
+            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vaultPtr, contextCharLimit, topNodeCharLimit, topNodeFullContent, ragNodeCount, llmMaxTokens](){
+                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, ragNodeCount, contextCharLimit, topNodeCharLimit, topNodeFullContent, llmMaxTokens);
                 if(!j) return std::string("Failed to parse JSON from model response");
                 int64_t parent = vaultPtr->getSelectedItemID() >= 0 ? vaultPtr->getSelectedItemID() : -1;
                 int64_t id = assistantPtr->createNodeFromJSON(*j, parent);
@@ -376,6 +417,131 @@ void RenderVaultChat(Vault* vault){
                 return std::string("Failed to create node from response");
             });
             input.clear();
+        }
+    }
+
+    // Retry button: re-send the last request (if any), removing any previous failed/timeout assistant message
+    ImGui::SameLine();
+    bool canRetry = !busy && !lastInputMap[vault].empty() && lastRequestTypeMap.find(vault) != lastRequestTypeMap.end();
+    if(ImGui::Button("Retry") && canRetry){
+        // helper to detect failure-like assistant messages
+        auto isFailureMessage = [](const std::string &s)->bool{
+            if(s.empty()) return false;
+            std::string l = s;
+            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+            if(l.find("[error]") != std::string::npos) return true;
+            if(l.find("timeout") != std::string::npos) return true;
+            if(l.find("failed") != std::string::npos) return true;
+            if(l == "(no response)") return true;
+            return false;
+        };
+
+        // Clear any partial streaming buffer and flag
+        {
+            std::lock_guard<std::mutex> lk(streamMutex);
+            streamPartials[vault].clear();
+        }
+        hasPartialInHistory[vault] = false;
+
+        // Remove trailing assistant/system failure messages (e.g., [error], timeout, failed, (no response))
+        while(!history.empty()){
+            auto &last = history.back();
+            bool removed = false;
+            if(last.first == "assistant" && isFailureMessage(last.second)){
+                history.pop_back();
+                removed = true;
+            } else if(last.first == "system"){
+                std::string l = last.second;
+                std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+                if(l.find("timeout") != std::string::npos || l.find("failed") != std::string::npos){
+                    history.pop_back();
+                    removed = true;
+                }
+            }
+            if(!removed) break;
+        }
+
+        // Avoid duplicating the user message in history: only append if it's not already the last user message
+        if(history.empty() || history.back().first != "user" || history.back().second != lastInputMap[vault]){
+            history.emplace_back("user", lastInputMap[vault]);
+        }
+
+        // Now replay saved request
+        auto reqType = lastRequestTypeMap[vault];
+        if(reqType == PendingRequest::Text){
+            pending->type = PendingRequest::Text;
+            if(lastRequestStreamingMap[vault]){
+                // streaming retry
+                std::string inCopy = lastInputMap[vault];
+                std::string modelCopy = lastRequestModelMap[vault];
+                int savedRagCount = lastRequestRagNodeCountMap[vault];
+                int savedCharLimit = lastRequestContextCharLimitMap[vault];
+                int savedTopChar = lastRequestTopCharLimitMap[vault];
+                bool savedTopFull = lastRequestTopFullMap[vault];
+                int savedMaxTokens = lastRequestMaxTokensMap[vault];
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, clientPtr = &client, inCopy, modelCopy, vault, savedRagCount, savedCharLimit, savedTopChar, savedTopFull, savedMaxTokens, streamPartialsPtr = &streamPartials, streamMutexPtr = &streamMutex](){
+                    auto nodes = assistantPtr->retrieveRelevantNodes(inCopy, savedRagCount, modelCopy, savedMaxTokens);
+                    std::string context = assistantPtr->getRAGContext(nodes, savedCharLimit, savedTopChar, savedTopFull);
+                    nlohmann::json msg = nlohmann::json::array();
+                    msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
+                    msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + inCopy}});
+                    nlohmann::json body = {{"model", modelCopy}, {"messages", msg}};
+
+                    std::string accumulated;
+                    auto cb = [&accumulated, vault, streamPartialsPtr, streamMutexPtr](const std::string& chunk){
+                        try{
+                            std::string disp = chunk;
+                            if(disp.size() > 200) disp = disp.substr(0,200) + "...";
+                            PLOGI << "[RAG][stream][frag] len=" << chunk.size() << " data=\"" << disp << "\"";
+                        } catch(...){ }
+                        accumulated += chunk;
+                        std::lock_guard<std::mutex> lk(*streamMutexPtr);
+                        (*streamPartialsPtr)[vault] += chunk;
+                    };
+                    auto r = clientPtr->streamChatCompletions(body, cb);
+                    if(!r.ok()){
+                        PLOGW << "[RAG][stream] request failed: " << r.curlError << " (" << r.httpCode << ")";
+                        return std::string("[error] ") + r.curlError + " " + std::to_string(r.httpCode);
+                    }
+                    try{
+                        PLOGI << "[RAG][stream] completed accumulated_len=" << accumulated.size();
+                        std::string accLog = accumulated;
+                        if(accLog.size() > 2000) accLog = accLog.substr(0,2000) + "...(truncated)";
+                        PLOGI << "[RAG][stream] accumulated: \n" << accLog;
+                    } catch(...){ }
+                    return accumulated;
+                });
+            } else {
+                // non-streaming retry
+                std::string inCopy = lastInputMap[vault];
+                std::string modelCopy = lastRequestModelMap[vault];
+                int savedRagCount = lastRequestRagNodeCountMap[vault];
+                int savedCharLimit = lastRequestContextCharLimitMap[vault];
+                int savedTopChar = lastRequestTopCharLimitMap[vault];
+                bool savedTopFull = lastRequestTopFullMap[vault];
+                int savedMaxTokens = lastRequestMaxTokensMap[vault];
+                pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, savedRagCount, savedCharLimit, savedTopChar, savedTopFull, savedMaxTokens](){
+                    std::string r = assistantPtr->askTextWithRAG(inCopy, modelCopy, savedRagCount, savedCharLimit, savedTopChar, savedTopFull, savedMaxTokens);
+                    if(r.empty()) r = "(no response)";
+                    return r;
+                });
+            }
+        } else if(reqType == PendingRequest::Create){
+            pending->type = PendingRequest::Create;
+            std::string inCopy = lastInputMap[vault];
+            std::string modelCopy = lastRequestModelMap[vault];
+            nlohmann::json schema = lastRequestSchemaMap[vault];
+            int savedRagCount = lastRequestRagNodeCountMap[vault];
+            int savedCharLimit = lastRequestContextCharLimitMap[vault];
+            int savedMaxTokens = lastRequestMaxTokensMap[vault];
+            pending->fut = std::async(std::launch::async, [assistantPtr = assistant, inCopy, modelCopy, schema, vault, savedCharLimit, savedRagCount, savedMaxTokens](){
+                auto j = assistantPtr->askJSONWithRAG(inCopy, schema, modelCopy, savedRagCount, savedCharLimit, savedMaxTokens);
+                if(!j) return std::string("Failed to parse JSON from model response");
+                int64_t parent = vault->getSelectedItemID() >= 0 ? vault->getSelectedItemID() : -1;
+                int64_t id = assistantPtr->createNodeFromJSON(*j, parent);
+                if(id > 0) return std::string("Created node ID: ") + std::to_string(id);
+                return std::string("Failed to create node from response");
+            });
         }
     }
     if(busy) ImGui::EndDisabled();
