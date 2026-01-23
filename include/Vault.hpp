@@ -74,6 +74,9 @@ class Vault{
     // Path (ancestors) captured at modal open so imports inherit tags from the exact UI path
     std::vector<int64_t> importParentPath;
 
+    // When set, force preview-only UI even if the current user could edit
+    bool viewOnlyMode = false;
+
     // Import Asset UI state (file browser and upload)
     bool showImportAssetModal = false;
     std::filesystem::path importAssetPath = std::filesystem::current_path();
@@ -312,6 +315,39 @@ public:
             if(s) sqlite3_finalize(s);
         }
         return out; }
+
+    // Replace a range in the currently loaded content and persist change
+    void replaceCurrentContentRange(size_t pos, size_t len, const std::string& replacement){
+        try {
+            if(pos > currentContent.size()) return;
+            currentContent.replace(pos, len, replacement);
+            if(loadedItemID >= 0){
+                if(dbBackend && dbBackend->isOpen()){
+                    std::string err;
+                    auto stmt = dbBackend->prepare("UPDATE VaultItems SET Content = ? WHERE ID = ?;", &err);
+                    if(!stmt){ PLOGW << "replace content prepare failed: " << err; }
+                    else { stmt->bindString(1, currentContent); stmt->bindInt(2, loadedItemID); if(!stmt->execute()) PLOGW << "replace content execute failed"; }
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
+                } else if(dbConnection){
+                    const char* updateSQL = "UPDATE VaultItems SET Content = ? WHERE ID = ?;";
+                    sqlite3_stmt* stmt = nullptr;
+                    if(sqlite3_prepare_v2(dbConnection, updateSQL, -1, &stmt, nullptr) == SQLITE_OK){
+                        sqlite3_bind_text(stmt, 1, currentContent.c_str(), -1, SQLITE_TRANSIENT);
+                        sqlite3_bind_int64(stmt, 2, loadedItemID);
+                        sqlite3_step(stmt);
+                    }
+                    if(stmt) sqlite3_finalize(stmt);
+                    contentDirty = false; lastSaveTime = ImGui::GetTime();
+                } else {
+                    contentDirty = true;
+                }
+            } else {
+                contentDirty = true;
+            }
+        } catch (...) {
+            PLOGW << "replaceCurrentContentRange exception";
+        }
+    }
 
     Vault(std::filesystem::path dbPath,std::string vaultName){
         name = vaultName;
@@ -1380,6 +1416,13 @@ public:
             canEdit = isItemEditableByUser(loadedItemID, currentUserID);
         }
 
+        // View Only override (UI toggle). When enabled, force preview-only behaviour.
+        ImGui::SameLine();
+        if(ImGui::Checkbox("View Only", &viewOnlyMode)){
+            // no-op; checkbox state stored in viewOnlyMode
+        }
+        if(viewOnlyMode) canEdit = false;
+
         // Live Markdown editor + preview (split view)
         ImVec2 avail = ImGui::GetContentRegionAvail();
         // Persistent/resizable height at the bottom for meta (tags/parents)
@@ -1409,8 +1452,9 @@ public:
         float leftWidth = avail.x * 0.5f;
 
         // Left: editor (scrollable)
-        ImGui::BeginChild("VaultEditorLeft", ImVec2(leftWidth, mainHeight), true);
-        ImGui::TextDisabled("Editor (Markdown)");
+        if(canEdit){
+            ImGui::BeginChild("VaultEditorLeft", ImVec2(leftWidth, mainHeight), true);
+            ImGui::TextDisabled("Editor (Markdown)");
         ImGui::Separator();
 
         // Title editable
@@ -1485,14 +1529,21 @@ public:
             ImGui::TextColored(ImVec4(1.0f,0.6f,0.0f,1.0f), "Modified");
         }
 
-        ImGui::EndChild();
-
-        ImGui::SameLine();
+            ImGui::EndChild();
+            ImGui::SameLine();
+        }
 
         // Right: live preview (scrollable)
         ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true);
         ImGui::TextDisabled("Preview");
         ImGui::Separator();
+        // If editing is disabled, show non-editable title at the top of the preview
+        if(!canEdit){
+            if(!currentTitle.empty()){
+                ImGui::TextUnformatted(currentTitle.c_str());
+                ImGui::Separator();
+            }
+        }
         // Render markdown using our MarkdownText helper (pass Vault context for attachment previews)
         ImGui::MarkdownText(currentContent.c_str(), this);
 
