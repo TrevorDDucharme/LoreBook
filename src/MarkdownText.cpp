@@ -111,7 +111,9 @@ namespace ImGui
         void endListItemParagraph()
         {
             PopTextWrapPos();
-            NewLine();
+            // Do NOT add a NewLine() here — avoid inserting extra blank lines that were not
+            // present in the original markdown source. The caller/leave_block will manage
+            // block spacing according to the document structure.
         }
 
         // Helpers
@@ -134,7 +136,8 @@ namespace ImGui
         void endParagraph()
         {
             PopTextWrapPos();
-            NewLine();
+            // Intentionally avoid calling NewLine() here to prevent inserting extra newline
+            // characters at paragraph boundaries that the original source did not include.
         }
 
         void beginCodeBlock(const MD_ATTRIBUTE *langAttr)
@@ -204,6 +207,10 @@ namespace ImGui
 
                     // Render checkbox in place of bullet
                     ImGui::PushID((void*)(intptr_t)(localPos + bracketPos));
+                    // Reduce vertical spacing for the checkbox so it lines up compactly with text
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.0f, 1.0f));
+                    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.0f));
+                    ImGui::AlignTextToFramePadding();
                     bool v = checked;
                     if(ImGui::Checkbox("", &v)){
                         // Toggle persisted state in the vault content: replace '[ ]' with '[x]' or vice versa
@@ -216,6 +223,7 @@ namespace ImGui
                             vptr->replaceCurrentContentRange(localPos + bracketPos, markerLen, repl);
                         }
                     }
+                    ImGui::PopStyleVar(2);
                     ImGui::PopID();
 
                     // Restore indent if we temporarily unindented
@@ -230,10 +238,10 @@ namespace ImGui
                     if (after < s.size()) rem = s.substr(after);
 
                     // Now start a wrapped paragraph aligned with the post-checkbox cursor position
+                    // Keep the wrap active (do NOT PopTextWrapPos here) so leave_block will close it correctly.
                     float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
                     PushTextWrapPos(wrapX);
                     TextWrapped(rem.c_str());
-                    PopTextWrapPos();
 
                     // Mark paragraph started
                     li_first_paragraph.top() = false;
