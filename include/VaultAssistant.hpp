@@ -22,25 +22,29 @@ public:
 
     // Ask a free-text question using RAG (returns assistant text or empty on error)
     // `charLimitPerNode` controls how much of each retrieved node is included in context (characters).
+    // `topNodeCharLimit` controls how much of the top-scored node is included (overrides `charLimitPerNode` when >= 0).
+    // `topNodeFullContent` when true includes the full content of the top-scored node.
     // `maxTokens` is the LLM request's `max_tokens` param.
-    std::string askTextWithRAG(const std::string& question, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int maxTokens=1024);
+    std::string askTextWithRAG(const std::string& question, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int topNodeCharLimit=-1, bool topNodeFullContent=false, int maxTokens=1024);
 
     // Ask a question and request JSON output that should match a schema. Returns parsed JSON if success.
     // `charLimitPerNode` controls how much of each retrieved node is included in context (characters).
+    // `topNodeCharLimit` controls how much of the top-scored node is included (overrides `charLimitPerNode` when >= 0).
+    // `topNodeFullContent` when true includes the full content of the top-scored node.
     // `maxTokens` is the LLM request's `max_tokens` param.
-    std::optional<nlohmann::json> askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int maxTokens=1024);
+    std::optional<nlohmann::json> askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model="gpt-4o-mini", int k=5, int charLimitPerNode=800, int topNodeCharLimit=-1, bool topNodeFullContent=false, int maxTokens=1024);
 
     // Create a node in the vault from JSON that contains at least {title, content}; returns created ID or -1
     int64_t createNodeFromJSON(const nlohmann::json& doc, int64_t parentIfAny = -1);
 
     // Build a RAG context text from nodes (public wrapper)
-    std::string getRAGContext(const std::vector<Node>& nodes, int charLimitPerNode = 800);
+    std::string getRAGContext(const std::vector<Node>& nodes, int charLimitPerNode = 800, int topNodeCharLimit = -1, bool topNodeFullContent=false);
 
 private:
     Vault* vault_ = nullptr;
     LLMClient* client_ = nullptr;
 
-    std::string buildRAGContext(const std::vector<Node>& nodes, int charLimitPerNode = 800);
+    std::string buildRAGContext(const std::vector<Node>& nodes, int charLimitPerNode = 800, int topNodeCharLimit = -1, bool topNodeFullContent=false);
 
     // Attempt to create and populate an FTS index for quick retrieval; returns true if FTS is usable
     bool ensureFTSIndex();

@@ -26,7 +26,7 @@
 static void glfw_error_callback(int error, const char* description)
 {
     fprintf(stderr, "Glfw Error %d: %s\n", error, description);
-}
+} 
 
 static void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
@@ -172,7 +172,7 @@ int main(int argc, char** argv)
 
     // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
-    plog::init(plog::info, &consoleAppender);
+    plog::init(plog::verbose, &consoleAppender);
     PLOGI << "plog initialized (verbose -> stderr)";
 
     // Main loop
@@ -845,7 +845,11 @@ int main(int argc, char** argv)
             userMgmt_newUsernameBuf[0] = userMgmt_newDisplayBuf[0] = userMgmt_newPassBuf[0] = userMgmt_newPassConfirmBuf[0] = '\0';
             userMgmt_newIsAdmin = false; userMgmt_resetUserID = -1; userMgmt_deleteUserID = -1;
         }
-        if(ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
+        if(settingsModalInit){
+            ImGui::SetNextWindowSize(ImVec2(700,520), ImGuiCond_FirstUseEver);
+            settingsModalInit = false;
+        }
+        if(ImGui::BeginPopupModal("Settings", nullptr, 0)){
             if(ImGui::BeginTabBar("SettingsTabs")){
                 if(ImGui::BeginTabItem("User Settings")){
                     int64_t cu = vault->getCurrentUserID();
@@ -902,28 +906,63 @@ int main(int argc, char** argv)
                     ImGui::Text("Existing users:");
                     ImGui::BeginChild("UserList", ImVec2(0,200), true);
                     auto users = vault->listUsers();
-                    for(auto &u : users){
-                        ImGui::PushID((int)u.id);
-                        ImGui::Text("%s", u.username.c_str()); ImGui::SameLine();
-                        char dBuf[128]; strncpy(dBuf, u.displayName.c_str(), sizeof(dBuf)); dBuf[sizeof(dBuf)-1]='\0';
-                        if(ImGui::InputText("Display", dBuf, sizeof(dBuf))){ vault->updateUserDisplayName(u.id, std::string(dBuf)); strncpy(userMgmt_statusMsg, "Display updated", sizeof(userMgmt_statusMsg)); }
-                        ImGui::SameLine();
-                        bool isAdmin = u.isAdmin;
-                        if(ImGui::Checkbox("Admin", &isAdmin)){
-                            if(!vault->setUserAdminFlag(u.id, isAdmin)) strncpy(userMgmt_errorBuf, "Failed to set admin flag (cannot remove last admin or change your own admin)", sizeof(userMgmt_errorBuf));
-                            else strncpy(userMgmt_statusMsg, "Admin flag updated", sizeof(userMgmt_statusMsg));
+                    if(ImGui::BeginTable("UserTable", 4, ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable)){
+                        ImGui::TableSetupColumn("Username", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                        ImGui::TableSetupColumn("Display", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("Admin", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+                        ImGui::TableHeadersRow();
+
+                        // Apply sorting if requested
+                        ImGuiTableSortSpecs* sorts_specs = ImGui::TableGetSortSpecs();
+                        if(sorts_specs && sorts_specs->SpecsDirty){
+                            if(!users.empty()){
+                                auto spec = sorts_specs->Specs[0];
+                                int column = spec.ColumnIndex;
+                                bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
+                                std::stable_sort(users.begin(), users.end(), [column, asc](const auto &a, const auto &b){
+                                    switch(column){
+                                        case 0: return asc ? (a.username < b.username) : (a.username > b.username);
+                                        case 1: return asc ? (a.displayName < b.displayName) : (a.displayName > b.displayName);
+                                        case 2: return asc ? (a.isAdmin < b.isAdmin) : (a.isAdmin > b.isAdmin);
+                                        default: return asc ? (a.username < b.username) : (a.username > b.username);
+                                    }
+                                });
+                            }
+                            sorts_specs->SpecsDirty = false;
                         }
-                        ImGui::SameLine();
-                        if(ImGui::Button("Reset Password")){
-                            userMgmt_resetUserID = u.id; userMgmt_resetPassBuf[0]=userMgmt_resetPassConfirmBuf[0]='\0'; ImGui::OpenPopup("Reset Password");
+
+                        for(auto &u : users){
+                            ImGui::TableNextRow();
+                            ImGui::TableSetColumnIndex(0);
+                            ImGui::TextUnformatted(u.username.c_str());
+
+                            ImGui::TableSetColumnIndex(1);
+                            ImGui::PushID((int)u.id);
+                            char dBuf[128]; strncpy(dBuf, u.displayName.c_str(), sizeof(dBuf)); dBuf[sizeof(dBuf)-1]='\0';
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            if(ImGui::InputText("display", dBuf, sizeof(dBuf))){ vault->updateUserDisplayName(u.id, std::string(dBuf)); strncpy(userMgmt_statusMsg, "Display updated", sizeof(userMgmt_statusMsg)); }
+
+                            ImGui::TableSetColumnIndex(2);
+                            bool isAdmin = u.isAdmin;
+                            if(ImGui::Checkbox("admin", &isAdmin)){
+                                if(!vault->setUserAdminFlag(u.id, isAdmin)) strncpy(userMgmt_errorBuf, "Failed to set admin flag (cannot remove last admin or change your own admin)", sizeof(userMgmt_errorBuf));
+                                else strncpy(userMgmt_statusMsg, "Admin flag updated", sizeof(userMgmt_statusMsg));
+                            }
+
+                            ImGui::TableSetColumnIndex(3);
+                            if(ImGui::Button("Reset Password")){
+                                userMgmt_resetUserID = u.id; userMgmt_resetPassBuf[0]=userMgmt_resetPassConfirmBuf[0]='\0'; ImGui::OpenPopup("Reset Password");
+                            }
+                            ImGui::SameLine();
+                            bool canDelete = (vault->getCurrentUserID() != u.id);
+                            if(ImGui::Button("Delete")){
+                                if(!canDelete) strncpy(userMgmt_errorBuf, "Cannot delete the currently logged-in user", sizeof(userMgmt_errorBuf));
+                                else { userMgmt_deleteUserID = u.id; ImGui::OpenPopup("Delete User"); }
+                            }
+                            ImGui::PopID();
                         }
-                        ImGui::SameLine();
-                        bool canDelete = (vault->getCurrentUserID() != u.id);
-                        if(ImGui::Button("Delete")){
-                            if(!canDelete) strncpy(userMgmt_errorBuf, "Cannot delete the currently logged-in user", sizeof(userMgmt_errorBuf));
-                            else { userMgmt_deleteUserID = u.id; ImGui::OpenPopup("Delete User"); }
-                        }
-                        ImGui::PopID();
+                        ImGui::EndTable();
                     }
                     ImGui::EndChild();
                     ImGui::EndTabItem();

@@ -55,6 +55,25 @@ static bool jsonTypeMatches(const nlohmann::json& v, const std::string& typ){
     return true; // unknown type - accept
 }
 
+// Simple Levenshtein distance (iterative DP) for fuzzy matching
+static int levenshteinDistance(const std::string& a, const std::string& b){
+    size_t na = a.size();
+    size_t nb = b.size();
+    if(na == 0) return (int)nb;
+    if(nb == 0) return (int)na;
+    std::vector<int> prev(nb+1), cur(nb+1);
+    for(size_t j=0;j<=nb;++j) prev[j] = (int)j;
+    for(size_t i=1;i<=na;++i){
+        cur[0] = (int)i;
+        for(size_t j=1;j<=nb;++j){
+            int cost = (a[i-1] == b[j-1]) ? 0 : 1;
+            cur[j] = std::min({ prev[j] + 1, cur[j-1] + 1, prev[j-1] + cost });
+        }
+        prev.swap(cur);
+    }
+    return prev[nb];
+}
+
 bool VaultAssistant::validateJsonAgainstSchema(const nlohmann::json& doc, const nlohmann::json& schema){
     if(!schema.is_object()) return true; // nothing to validate against
     if(schema.contains("required") && schema["required"].is_array()){
@@ -178,17 +197,20 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
     if(!db) return out;
 
     // Build a score expression: for each keyword give a large boost if it appears in Name (priority),
+    // also give a smaller boost if it appears when spaces are removed (handles keywords like "cinderhollow" vs "Cinder Hollow"),
     // plus add the occurrence counts across Name/Content/Tags.
     std::string scoreExpr;
     for(size_t i=0;i<keywords.size();++i){
         if(i) scoreExpr += " + ";
-        scoreExpr += "(CASE WHEN INSTR(lower(Name), ?) > 0 THEN 100000 ELSE 0 END) + ((LENGTH(lower(Name)) - LENGTH(REPLACE(lower(Name), ?, ''))) + (LENGTH(lower(Content)) - LENGTH(REPLACE(lower(Content), ?, ''))) + (LENGTH(lower(Tags)) - LENGTH(REPLACE(lower(Tags), ?, ''))))";
+        // priority boost for exact substring in Name, secondary boost for whitespace-stripped match
+        scoreExpr += "(CASE WHEN INSTR(lower(Name), ?) > 0 THEN 100000 ELSE 0 END) + (CASE WHEN INSTR(REPLACE(lower(Name), ' ', ''), ?) > 0 THEN 50000 ELSE 0 END) + ((LENGTH(lower(Name)) - LENGTH(REPLACE(lower(Name), ?, ''))) + (LENGTH(lower(Content)) - LENGTH(REPLACE(lower(Content), ?, ''))) + (LENGTH(lower(Tags)) - LENGTH(REPLACE(lower(Tags), ?, ''))))";
     }
 
     std::string whereExpr;
     for(size_t i=0;i<keywords.size();++i){
         if(i) whereExpr += " OR ";
-        whereExpr += "(INSTR(lower(Name), ?) > 0 OR INSTR(lower(Content), ?) > 0 OR INSTR(lower(Tags), ?) > 0)";
+        // match either raw or whitespace-stripped forms in Name/Content/Tags
+        whereExpr += "(INSTR(lower(Name), ?) > 0 OR INSTR(lower(Content), ?) > 0 OR INSTR(lower(Tags), ?) > 0 OR INSTR(REPLACE(lower(Name),' ','') , ?) > 0 OR INSTR(REPLACE(lower(Content),' ','') , ?) > 0 OR INSTR(REPLACE(lower(Tags),' ','') , ?) > 0)";
     }
 
     std::string sql = "SELECT ID, Name, Content, Tags, (" + scoreExpr + ") AS score FROM VaultItems WHERE " + whereExpr + " ORDER BY score DESC LIMIT ?;";
@@ -198,19 +220,25 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
     sqlite3_stmt* stmt = nullptr;
     if(sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK){
         int bindIdx = 1;
-        // For each keyword we bound: INSTR(Name) ?, REPLACE(Name) ?, REPLACE(Content) ?, REPLACE(Tags) ?  => 4 binds per keyword
-        // then in WHERE: INSTR(Name) ?, INSTR(Content) ?, INSTR(Tags) ? => 3 binds per keyword
+        // Binding layout now (per keyword):
+        // score expr: INSTR(lower(Name), ?) , INSTR(REPLACE(lower(Name),' ','') , ?), REPLACE(lower(Name), ?, ''), REPLACE(lower(Content), ?, ''), REPLACE(lower(Tags), ?, '')  => 5 binds
+        // where expr: INSTR(lower(Name), ?), INSTR(lower(Content), ?), INSTR(lower(Tags), ?), INSTR(REPLACE(lower(Name),' ','') , ?), INSTR(REPLACE(lower(Content),' ','') , ?), INSTR(REPLACE(lower(Tags),' ','') , ?) => 6 binds
         for(const auto &kw : keywords){
-            // expression binds
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(Name)
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Name)
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Content)
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(Tags)
+            // expression binds (5 per keyword)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(lower(Name), ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(REPLACE(lower(Name),' ','') , ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(lower(Name), ?, '')
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(lower(Content), ?, '')
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // REPLACE(lower(Tags), ?, '')
         }
         for(const auto &kw : keywords){
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Name)
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Content)
-            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // WHERE INSTR(Tags)
+            // where binds (6 per keyword)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(lower(Name), ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(lower(Content), ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(lower(Tags), ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(REPLACE(lower(Name),' ','') , ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(REPLACE(lower(Content),' ','') , ?)
+            sqlite3_bind_text(stmt, bindIdx++, kw.c_str(), -1, SQLITE_TRANSIENT); // INSTR(REPLACE(lower(Tags),' ','') , ?)
         }
         sqlite3_bind_int(stmt, bindIdx++, k);
         int rowCount = 0;
@@ -229,15 +257,129 @@ std::vector<VaultAssistant::Node> VaultAssistant::retrieveRelevantNodes(const st
         PLOGD << "[RAG][sql] rows_returned=" << rowCount;
     }
     if(stmt) sqlite3_finalize(stmt);
+
+    // If no rows returned by the heuristic SQL, try an FTS5 MATCH fallback if available
+    if(out.empty()){
+        PLOGD << "[RAG][fts] no SQL hits, attempting FTS fallback";
+        if(ensureFTSIndex()){
+            sqlite3_stmt* fstmt = nullptr;
+            // Build an FTS match string using keyword prefixes (more permissive)
+            std::string matchQuery;
+            for(size_t i=0;i<keywords.size();++i){ if(i) matchQuery += " OR "; matchQuery += keywords[i] + std::string("*"); }
+            try{ PLOGD << "[RAG][fts] matchQuery='" << matchQuery << "'"; } catch(...){}
+            std::string fsql = "SELECT v.ID, v.Name, v.Content, v.Tags FROM VaultItems v JOIN VaultItemsFTS f ON f.rowid = v.ID WHERE f MATCH ? LIMIT ?;";
+            if(sqlite3_prepare_v2(db, fsql.c_str(), -1, &fstmt, nullptr) == SQLITE_OK){
+                sqlite3_bind_text(fstmt, 1, matchQuery.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(fstmt, 2, k);
+                int rowCount = 0;
+                std::vector<Node> nameMatches, otherMatches;
+                while(sqlite3_step(fstmt) == SQLITE_ROW){
+                    Node n;
+                    n.id = sqlite3_column_int64(fstmt,0);
+                    const unsigned char* nm = sqlite3_column_text(fstmt,1);
+                    const unsigned char* cont = sqlite3_column_text(fstmt,2);
+                    const unsigned char* tags = sqlite3_column_text(fstmt,3);
+                    n.name = nm ? reinterpret_cast<const char*>(nm) : std::string();
+                    n.content = cont ? reinterpret_cast<const char*>(cont) : std::string();
+                    n.tags = tags ? reinterpret_cast<const char*>(tags) : std::string();
+                    // check if the Name field directly matches any keyword (or its whitespace-stripped form)
+                    std::string nameLower = n.name; std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                    auto nameStripped = nameLower; nameStripped.erase(std::remove_if(nameStripped.begin(), nameStripped.end(), ::isspace), nameStripped.end());
+                    bool isNameMatch = false;
+                    for(const auto &kw : keywords){ if(nameLower.find(kw) != std::string::npos || nameStripped.find(kw) != std::string::npos){ isNameMatch = true; break; } }
+                    if(isNameMatch) nameMatches.push_back(n); else otherMatches.push_back(n);
+                    ++rowCount;
+                }
+                // append name matches first, then other matches, up to k
+                for(auto &n : nameMatches){ if((int)out.size() >= k) break; out.push_back(n); }
+                for(auto &n : otherMatches){ if((int)out.size() >= k) break; out.push_back(n); }
+                PLOGD << "[RAG][fts] rows_returned(name/other)=" << nameMatches.size() << "/" << otherMatches.size();
+            } else {
+                PLOGW << "[RAG][fts] prepare failed for FTS fallback";
+            }
+            if(fstmt) sqlite3_finalize(fstmt);
+        } else {
+            PLOGD << "[RAG][fts] ensureFTSIndex() returned false, skipping FTS fallback";
+        }
+    }
+
+    // If still no rows, run a lightweight fuzzy scan (Levenshtein) over Names / Content to catch spelling variations
+    if(out.empty()){
+        PLOGD << "[RAG][fuzzy] no FTS hits, attempting fuzzy scan";
+        sqlite3_stmt* s = nullptr;
+        const char* q = "SELECT ID, Name, Content, Tags FROM VaultItems;";
+        if(sqlite3_prepare_v2(db, q, -1, &s, nullptr) == SQLITE_OK){
+            int rowCount = 0;
+            std::vector<Node> nameMatches, contentMatches;
+            while(sqlite3_step(s) == SQLITE_ROW){
+                Node n;
+                n.id = sqlite3_column_int64(s,0);
+                const unsigned char* nm = sqlite3_column_text(s,1);
+                const unsigned char* cont = sqlite3_column_text(s,2);
+                const unsigned char* tags = sqlite3_column_text(s,3);
+                n.name = nm ? reinterpret_cast<const char*>(nm) : std::string();
+                n.content = cont ? reinterpret_cast<const char*>(cont) : std::string();
+                n.tags = tags ? reinterpret_cast<const char*>(tags) : std::string();
+
+                auto normalize = [](const std::string &x){ std::string r; r.reserve(x.size()); for(char c : x){ if(std::isalnum((unsigned char)c)) r.push_back(std::tolower((unsigned char)c)); } return r; };
+                std::string nameNorm = normalize(n.name);
+                std::string contentNorm = normalize(n.content);
+
+                int bestNameDist = INT_MAX;
+                int bestContentDist = INT_MAX;
+                for(const auto &kw : keywords){
+                    std::string kwNorm = normalize(kw);
+                    int dName = levenshteinDistance(kwNorm, nameNorm);
+                    if(dName < bestNameDist) bestNameDist = dName;
+                    std::string csub = contentNorm.substr(0, std::min<size_t>(contentNorm.size(), kwNorm.size() + 10));
+                    int dContent = levenshteinDistance(kwNorm, csub);
+                    if(dContent < bestContentDist) bestContentDist = dContent;
+                    if(bestNameDist <= 1 || bestContentDist <= 1) break; // early accept
+                }
+                // thresholds based on keyword length
+                bool isNameAccept = false;
+                bool isContentAccept = false;
+                if(!keywords.empty()){
+                    size_t kwlen = keywords[0].size();
+                    int nameThresh = (kwlen <= 6) ? 1 : 2;
+                    int contentThresh = (kwlen <= 6) ? 1 : 2;
+                    if(bestNameDist <= nameThresh) isNameAccept = true;
+                    if(bestContentDist <= contentThresh) isContentAccept = true;
+                }
+                if(isNameAccept) { nameMatches.push_back(n); }
+                else if(isContentAccept) { contentMatches.push_back(n); }
+                if((int)nameMatches.size() + (int)contentMatches.size() >= k) break;
+            }
+            // prefer name matches
+            for(auto &n : nameMatches){ if((int)out.size() >= k) break; out.push_back(n); }
+            for(auto &n : contentMatches){ if((int)out.size() >= k) break; out.push_back(n); }
+            PLOGD << "[RAG][fuzzy] rows_returned(name/content)=" << nameMatches.size() << "/" << contentMatches.size();
+        } else {
+            PLOGW << "[RAG][fuzzy] prepare failed for fuzzy scan";
+        }
+        if(s) sqlite3_finalize(s);
+    }
+
     return out;
 }
 
-std::string VaultAssistant::buildRAGContext(const std::vector<Node>& nodes, int charLimitPerNode){
+std::string VaultAssistant::buildRAGContext(const std::vector<Node>& nodes, int charLimitPerNode, int topNodeCharLimit, bool topNodeFullContent){
     std::ostringstream ss;
-    for(const auto &n : nodes){
+    for(size_t idx=0; idx<nodes.size(); ++idx){
+        const auto &n = nodes[idx];
         ss << "[Node " << n.id << "] " << n.name << "\n";
         std::string content = n.content;
-        if((int)content.size() > charLimitPerNode) content = content.substr(0, charLimitPerNode) + "...";
+        if(idx == 0){
+            // top-scored node
+            if(topNodeFullContent){
+                // keep full content
+            } else {
+                int useLimit = (topNodeCharLimit >= 0) ? topNodeCharLimit : charLimitPerNode;
+                if(useLimit >= 0 && (int)content.size() > useLimit) content = content.substr(0, useLimit) + "...";
+            }
+        } else {
+            if((int)content.size() > charLimitPerNode) content = content.substr(0, charLimitPerNode) + "...";
+        }
         ss << content << "\n";
         if(!n.tags.empty()) ss << "Tags: " << n.tags << "\n";
         ss << "---\n";
@@ -245,10 +387,10 @@ std::string VaultAssistant::buildRAGContext(const std::vector<Node>& nodes, int 
     return ss.str();
 }
 
-std::string VaultAssistant::askTextWithRAG(const std::string& question, const std::string& model, int k, int charLimitPerNode, int maxTokens){
+std::string VaultAssistant::askTextWithRAG(const std::string& question, const std::string& model, int k, int charLimitPerNode, int topNodeCharLimit, bool topNodeFullContent, int maxTokens){
     if(!client_) return std::string();
     auto nodes = retrieveRelevantNodes(question, k, model, maxTokens);
-    std::string context = buildRAGContext(nodes, charLimitPerNode);
+    std::string context = buildRAGContext(nodes, charLimitPerNode, topNodeCharLimit, topNodeFullContent);
     nlohmann::json msg = nlohmann::json::array();
     msg.push_back({{"role","system"},{"content","You are a helpful assistant that answers questions using the provided Vault context. Use only the context for facts and cite Node IDs when referencing specific notes."}});
     msg.push_back({{"role","user"},{"content", std::string("Context:\n") + context + std::string("\nQuestion: ") + question}});
@@ -280,10 +422,10 @@ std::string VaultAssistant::askTextWithRAG(const std::string& question, const st
     return std::string();
 }
 
-std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model, int k, int charLimitPerNode, int maxTokens){
+std::optional<nlohmann::json> VaultAssistant::askJSONWithRAG(const std::string& question, const nlohmann::json& schema, const std::string& model, int k, int charLimitPerNode, int topNodeCharLimit, bool topNodeFullContent, int maxTokens){
     if(!client_) return std::nullopt;
     auto nodes = retrieveRelevantNodes(question, k, model, maxTokens);
-    std::string context = buildRAGContext(nodes, charLimitPerNode);
+    std::string context = buildRAGContext(nodes, charLimitPerNode, topNodeCharLimit, topNodeFullContent);
     std::string sys = "You are an assistant that must respond only with a JSON document that conforms to the following JSON schema. Do not include any other text. Only output valid JSON.\nSchema: ";
     sys += schema.dump();
     nlohmann::json msg = nlohmann::json::array();
@@ -357,6 +499,6 @@ int64_t VaultAssistant::createNodeFromJSON(const nlohmann::json& doc, int64_t pa
     return id;
 }
 
-std::string VaultAssistant::getRAGContext(const std::vector<Node>& nodes, int charLimitPerNode){
-    return buildRAGContext(nodes, charLimitPerNode);
+std::string VaultAssistant::getRAGContext(const std::vector<Node>& nodes, int charLimitPerNode, int topNodeCharLimit, bool topNodeFullContent){
+    return buildRAGContext(nodes, charLimitPerNode, topNodeCharLimit, topNodeFullContent);
 }
