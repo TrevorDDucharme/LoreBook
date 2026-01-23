@@ -63,6 +63,49 @@ namespace ImGui
         bool in_code_block = false;
         std::string code_lang;
 
+        // List handling state
+        struct ListState { MD_BLOCKTYPE type; int index; };
+        std::stack<ListState> lists;
+        std::stack<bool> li_first_paragraph;
+        // Track whether we've activated a wrap for the current LI (so we can close it when needed)
+        std::stack<bool> li_wrap_active;
+        // Running source offset (number of text bytes processed so far)
+        size_t src_pos = 0;
+
+        // Table state
+        bool in_table = false;
+        unsigned table_col_count = 0;
+        bool table_in_header = false;
+        std::vector<std::string> table_current_row;
+        std::vector<std::vector<std::string>> table_header_rows;
+        std::vector<std::vector<std::string>> table_body_rows;
+        std::string table_cell_text;
+        bool in_table_cell = false;
+
+        // Helpers for list item paragraphs
+        void beginListItemParagraph(bool ordered, int index)
+        {
+            if (ordered)
+            {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d.", index);
+                TextUnformatted(buf);
+            }
+            else
+            {
+                TextUnformatted(IconTag("point").c_str());
+                // add a small gap between icon and text
+                SameLine(0, ImGui::GetStyle().ItemInnerSpacing.x);
+            }
+            float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
+            PushTextWrapPos(wrapX);
+        }
+        void endListItemParagraph()
+        {
+            PopTextWrapPos();
+            NewLine();
+        }
+
         // Helpers
         void pushHeader(int level)
         {
@@ -117,6 +160,58 @@ namespace ImGui
             if (size == 0)
                 return;
             std::string s((const char *)text, (size_t)size);
+
+            // If we're inside a list item and the first paragraph hasn't started yet,
+            // attempt to detect a task-list marker '[ ]' or '[x]' and render an interactive checkbox.
+            // Otherwise, start a normal list item paragraph (bullet/number) on the first text encountered.
+            size_t localPos = src_pos;
+            if (!in_code_block && !lists.empty() && !li_first_paragraph.empty() && li_first_paragraph.top()) {
+                // Look for a checkbox marker near the beginning of this text chunk
+                size_t bracketPos = std::string::npos;
+                for(size_t i=0;i<std::min<size_t>(s.size(),8);++i){ if(s[i]=='['){ bracketPos = i; break; } }
+                if (bracketPos != std::string::npos && bracketPos + 2 < s.size() && s[bracketPos+2] == ']') {
+                    char c = s[bracketPos+1];
+                    bool checked = (c == 'x' || c == 'X');
+                    // Render checkbox in place of a bullet
+                    ImGui::PushID((void*)(intptr_t)(localPos + bracketPos));
+                    bool v = checked;
+                    if(ImGui::Checkbox("", &v)){
+                        // Toggle persisted state in the vault content: replace '[ ]' with '[x]' or vice versa
+                        size_t markerLen = 3;
+                        if (bracketPos + 3 < s.size() && s[bracketPos+3] == ' ') markerLen = 4; // include trailing space
+                        std::string repl = v ? std::string("[x]") : std::string("[ ]");
+                        if(markerLen == 4) repl.push_back(' ');
+                        if (ctx){
+                            Vault *vptr = reinterpret_cast<Vault*>(ctx);
+                            vptr->replaceCurrentContentRange(localPos + bracketPos, markerLen, repl);
+                        }
+                    }
+                    ImGui::PopID();
+                    // After checkbox, ensure text after the marker is wrapped and displayed
+                    size_t after = bracketPos + ((bracketPos + 3 < s.size() && s[bracketPos+3]==' ') ? 4 : 3);
+                    std::string rem;
+                    if (after < s.size()) rem = s.substr(after);
+                    // start a wrapped paragraph aligned with content region
+                    float wrapX = GetCursorPosX() + GetContentRegionAvail().x;
+                    PushTextWrapPos(wrapX);
+                    TextWrapped(rem.c_str());
+                    PopTextWrapPos();
+                    // Mark paragraph started
+                    li_first_paragraph.top() = false;
+                    // We already rendered this chunk; advance src_pos and return
+                    src_pos += size;
+                    return;
+                }
+                else
+                {
+                    // No checkbox detected; start normal list item paragraph now
+                    bool ordered = (lists.top().type == MD_BLOCK_OL);
+                    beginListItemParagraph(ordered, lists.top().index);
+                    li_first_paragraph.top() = false;
+                    li_wrap_active.push(true);
+                }
+            }
+
             if (in_code_block)
             {
                 // render raw code line
@@ -160,6 +255,45 @@ namespace ImGui
                 }
             }
 
+            // Definition list heuristics (inline 'Term: definition' or leading ': definition')
+            if (!in_code_block && lists.empty() && !in_table && !s.empty()){
+                // single-line 'Term: definition'
+                size_t colon = s.find(':');
+                size_t newline = s.find('\n');
+                if (colon != std::string::npos && (newline == std::string::npos || newline > colon) && colon < 80){
+                    // Render term bold then definition text
+                    std::string term = s.substr(0, colon);
+                    std::string def = (colon + 1 < s.size()) ? s.substr(colon + 1) : std::string();
+                    // trim spaces
+                    auto trim = [](std::string &t){ while(!t.empty() && isspace((unsigned char)t.front())) t.erase(t.begin()); while(!t.empty() && isspace((unsigned char)t.back())) t.pop_back(); };
+                    trim(term); trim(def);
+                    if(!term.empty() && !def.empty()){
+                        ImFont *bf = GetFont(FontStyle::Bold); if(bf) PushFont(bf);
+                        TextUnformatted(term.c_str());
+                        if(bf) PopFont();
+                        ImGui::SameLine();
+                        TextWrapped(def.c_str());
+                        src_pos += size; // consumed
+                        if (!linkUrl.empty()) PopStyleColor(); if (usedFont) PopFont();
+                        return;
+                    }
+                }
+                // leading ': definition' -> render indented muted
+                if(s.size() >= 2 && s[0] == ':' ){
+                    std::string def = s.substr(1);
+                    auto trimLeft = [](std::string &t){ while(!t.empty() && isspace((unsigned char)t.front())) t.erase(t.begin()); };
+                    trimLeft(def);
+                    PushStyleColor(ImGuiCol_Text, ImVec4(0.6f,0.6f,0.6f,1.0f));
+                    ImGui::Indent(ImGui::GetFontSize() * 1.0f);
+                    TextWrapped(def.c_str());
+                    ImGui::Unindent(ImGui::GetFontSize() * 1.0f);
+                    PopStyleColor();
+                    src_pos += size;
+                    if (!linkUrl.empty()) PopStyleColor(); if (usedFont) PopFont();
+                    return;
+                }
+            }
+
             // Color for link
             if (!linkUrl.empty())
             {
@@ -173,6 +307,9 @@ namespace ImGui
                 PopStyleColor();
             if (usedFont)
                 PopFont();
+
+            // Track source offset for mapping UI interactions back to original text
+            src_pos += size;
         }
 
         // md4c callbacks
@@ -188,14 +325,64 @@ namespace ImGui
                 r->pushHeader(level);
                 break;
             }
+            case MD_BLOCK_UL:
+                r->lists.push({MD_BLOCK_UL, 0});
+                ImGui::Indent(ImGui::GetFontSize() * 1.5f);
+                break;
+            case MD_BLOCK_OL:
+                r->lists.push({MD_BLOCK_OL, 0});
+                ImGui::Indent(ImGui::GetFontSize() * 1.5f);
+                break;
+            case MD_BLOCK_LI:
+                if (!r->lists.empty()) {
+                    if (r->lists.top().type == MD_BLOCK_OL)
+                        r->lists.top().index++;
+                    r->li_first_paragraph.push(true);
+                }
+                break;
             case MD_BLOCK_P:
-                r->beginParagraph();
+                // For paragraphs inside lists, defer starting the paragraph wrap until we get the text callback
+                // so we can detect task-list markers and render checkboxes inline. For non-list paragraphs use default.
+                if (r->lists.empty()) {
+                    r->beginParagraph();
+                }
                 break;
             case MD_BLOCK_CODE:
                 r->beginCodeBlock(&((MD_BLOCK_CODE_DETAIL *)detail)->lang);
                 break;
             case MD_BLOCK_HR:
                 Separator();
+                break;
+            case MD_BLOCK_TABLE:
+            {
+                MD_BLOCK_TABLE_DETAIL *d = (MD_BLOCK_TABLE_DETAIL *)detail;
+                r->in_table = true;
+                r->table_col_count = d ? d->col_count : 0;
+                r->table_header_rows.clear();
+                r->table_body_rows.clear();
+                r->table_current_row.clear();
+                r->table_cell_text.clear();
+                r->in_table_cell = false;
+                break;
+            }
+            case MD_BLOCK_THEAD:
+                r->table_in_header = true;
+                break;
+            case MD_BLOCK_TBODY:
+                r->table_in_header = false;
+                break;
+            case MD_BLOCK_TR:
+                r->table_current_row.clear();
+                break;
+            case MD_BLOCK_TH:
+            case MD_BLOCK_TD:
+                r->in_table_cell = true;
+                r->table_cell_text.clear();
+                break;
+            case MD_BLOCK_QUOTE:
+                // blockquote styling
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f,0.6f,0.6f,1.0f));
+                ImGui::Indent(ImGui::GetFontSize() * 1.0f);
                 break;
             default:
                 break;
@@ -215,10 +402,81 @@ namespace ImGui
                 Dummy(ImVec2(0, 6));
                 break;
             case MD_BLOCK_P:
-                r->endParagraph();
+                // If this paragraph belonged to a list and we opened a wrap for it, close it
+                if (!r->li_wrap_active.empty() && r->li_wrap_active.top()) {
+                    r->endListItemParagraph();
+                    r->li_wrap_active.pop();
+                } else {
+                    r->endParagraph();
+                }
+                break;
+            case MD_BLOCK_LI:
+                if (!r->li_first_paragraph.empty()) {
+                    bool pending = r->li_first_paragraph.top();
+                    r->li_first_paragraph.pop();
+                    if (!pending) {
+                        // If a paragraph was started by raw text (no MD_BLOCK_P), close its wrap
+                        if (!r->li_wrap_active.empty() && r->li_wrap_active.top()) {
+                            r->endListItemParagraph();
+                            r->li_wrap_active.pop();
+                        }
+                    }
+                }
+                break;
+            case MD_BLOCK_TH:
+            case MD_BLOCK_TD:
+                // finalize current table cell
+                if (r->in_table_cell) {
+                    r->in_table_cell = false;
+                    r->table_current_row.push_back(r->table_cell_text);
+                    r->table_cell_text.clear();
+                }
+                break;
+            case MD_BLOCK_TR:
+                // finish table row
+                if (r->in_table) {
+                    if (r->table_in_header) r->table_header_rows.push_back(r->table_current_row);
+                    else r->table_body_rows.push_back(r->table_current_row);
+                    r->table_current_row.clear();
+                }
+                break;
+            case MD_BLOCK_TABLE:
+                // render table now
+                if (r->in_table) {
+                    ImGui::PushID((void*)r);
+                    if (ImGui::BeginTable("md_table", r->table_col_count, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg)){
+                        // header rows
+                        for (auto &hr : r->table_header_rows){
+                            ImGui::TableNextRow();
+                            for (size_t i = 0; i < hr.size(); ++i){
+                                ImGui::TableSetColumnIndex((int)i);
+                                ImFont *bf = GetFont(FontStyle::Bold); if(bf) PushFont(bf);
+                                TextUnformatted(hr[i].c_str());
+                                if(bf) PopFont();
+                            }
+                        }
+                        // body rows
+                        for (auto &row : r->table_body_rows){
+                            ImGui::TableNextRow();
+                            for (size_t i = 0; i < row.size(); ++i){
+                                ImGui::TableSetColumnIndex((int)i);
+                                TextWrapped(row[i].c_str());
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::PopID();
+                }
+                // clear table state
+                r->in_table = false; r->table_col_count = 0; r->table_in_header = false; r->table_current_row.clear(); r->table_header_rows.clear(); r->table_body_rows.clear();
                 break;
             case MD_BLOCK_CODE:
                 r->endCodeBlock();
+                break;
+            case MD_BLOCK_UL:
+            case MD_BLOCK_OL:
+                ImGui::Unindent(ImGui::GetFontSize() * 1.5f);
+                if (!r->lists.empty()) r->lists.pop();
                 break;
             default:
                 break;

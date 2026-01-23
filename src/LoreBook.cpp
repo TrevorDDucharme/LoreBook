@@ -15,6 +15,8 @@
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
+#include "Fonts.hpp"
+#include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include "MergeConflictUI.hpp"
 #include "MySQLTest.hpp"
 #include "VaultSync.hpp"
@@ -35,6 +37,11 @@ static void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 
 int main(int argc, char** argv)
 {
+    // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
+    static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
+    plog::init(plog::verbose, &consoleAppender);
+    PLOGI << "plog initialized (verbose -> stderr)";
+
     // Setup window
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
@@ -79,6 +86,86 @@ int main(int argc, char** argv)
     // Setup Platform/Renderer backends
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glsl_version);
+
+    if(initLoreBook_ResourcesEmbeddedVFS(argv[0])){
+        PLOGI << "LoreBook embedded resources VFS initialized successfully.";
+    } else {
+        PLOGE << "Failed to initialize LoreBook embedded resources VFS!";
+        return 1;
+    }
+
+    if(!mountLoreBook_ResourcesEmbeddedVFS()){
+        PLOGE << "Failed to mount LoreBook embedded resources VFS!";
+        return 1;
+    }
+
+
+    std::vector<std::string> embeddedFiles = listLoreBook_ResourcesEmbeddedFiles("/", true);
+    PLOGI << "Embedded resource files:";
+    for(const auto& f : embeddedFiles){
+        PLOGI << "  " << f;
+    }
+
+    // Initialize font system (load embedded fonts and set default)
+    // Initialize the icon system
+    if (!InitializeIcons("Icons"))
+    {
+        PLOGE << "Failed to initialize icons system";
+        // Continue anyway, non-fatal error
+    }
+    else
+    {
+        PLOGI << "Icons system initialized successfully";
+    }
+
+    // Initialize the font system
+    if (!InitializeFonts())
+    {
+        PLOGE << "Failed to initialize font system";
+        // Continue anyway, non-fatal error
+    }
+    else
+    {
+        PLOGI << "Font system initialized successfully";
+
+        // List available font families
+        auto fontFamilies = GetAvailableFontFamilies();
+        PLOGI << "Available font families:";
+        for (const auto &family : fontFamilies)
+        {
+            PLOGI << "  - " << family;
+        }
+
+        // Set a default font family if available
+        if (!fontFamilies.empty())
+        {
+            SetCurrentFontFamily(fontFamilies[0]);
+            PLOGI << "Set default font family to: " << fontFamilies[0];
+        }
+    }
+    if (!SetCurrentFontFamily("Roboto")) {
+        PLOGW << "Default font 'Roboto' not found; using current family: " << GetCurrentFontFamily();
+    } else {
+        PLOGI << "Default font set to 'Roboto'";
+    }
+
+    // Build ALL fonts with our new system ONCE at startup
+    if (!BuildFonts())
+    {
+        PLOGE << "Failed to build fonts!";
+        // Continue anyway, ImGui has fallbacks
+    }
+
+    // set font to roboto
+    if (!SetCurrentFontFamily("Roboto"))
+    {
+        PLOGE << "Failed to set current font family to Roboto";
+        // Continue anyway, ImGui has fallbacks
+    }
+    else
+    {
+        PLOGI << "Current font family set to Roboto";
+    }
 
     // Vault state
     static bool firstDock = true;
@@ -140,6 +227,9 @@ int main(int argc, char** argv)
     static char settings_displayNameBuf[128] = "";
     static char settings_newPassBuf[128] = "";
     static char settings_newPassConfirmBuf[128] = "";
+    // Appearance settings
+    static char settings_fontFamilyBuf[128] = "";
+    static float settings_fontSize = 16.0f;
     // User Management form fields (admin-only)
     static char userMgmt_newUsernameBuf[128] = "";
     static char userMgmt_newDisplayBuf[128] = "";
@@ -169,11 +259,6 @@ int main(int argc, char** argv)
     createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
     strncpy(openVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(openVaultDirBuf));
     openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
-
-    // Initialize plog to console (verbose). This ensures PLOG* calls produce terminal output.
-    static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
-    plog::init(plog::verbose, &consoleAppender);
-    PLOGI << "plog initialized (verbose -> stderr)";
 
     // Main loop
     while (!glfwWindowShouldClose(window))
@@ -844,6 +929,12 @@ int main(int argc, char** argv)
             userMgmt_errorBuf[0] = userMgmt_statusMsg[0] = '\0';
             userMgmt_newUsernameBuf[0] = userMgmt_newDisplayBuf[0] = userMgmt_newPassBuf[0] = userMgmt_newPassConfirmBuf[0] = '\0';
             userMgmt_newIsAdmin = false; userMgmt_resetUserID = -1; userMgmt_deleteUserID = -1;
+            // initialize appearance settings
+            if (settings_fontFamilyBuf[0] == '\0') {
+                std::string curFamily = GetCurrentFontFamily();
+                if (!curFamily.empty()) strncpy(settings_fontFamilyBuf, curFamily.c_str(), sizeof(settings_fontFamilyBuf));
+                settings_fontSize = GetDefaultFontSize();
+            }
         }
         if(settingsModalInit){
             ImGui::SetNextWindowSize(ImVec2(700,520), ImGuiCond_FirstUseEver);
@@ -875,6 +966,31 @@ int main(int argc, char** argv)
                             }
                         }
                         if(userMgmt_errorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", userMgmt_errorBuf);
+                    }
+                    ImGui::EndTabItem();
+                }
+
+                // Appearance tab
+                if(ImGui::BeginTabItem("Appearance")){
+                    ImGui::Text("Font Family");
+                    auto families = GetAvailableFontFamilies();
+                    if (ImGui::BeginCombo("Font Family", settings_fontFamilyBuf[0] ? settings_fontFamilyBuf : "Select...")){
+                        for (const auto &f : families){
+                            bool sel = (strcmp(settings_fontFamilyBuf, f.c_str()) == 0);
+                            if (ImGui::Selectable(f.c_str(), sel)){
+                                strncpy(settings_fontFamilyBuf, f.c_str(), sizeof(settings_fontFamilyBuf));
+                            }
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SliderFloat("Font Size", &settings_fontSize, 10.0f, 36.0f, "%.0f");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Apply")){
+                        if (!SetCurrentFontFamily(std::string(settings_fontFamilyBuf))){
+                            PLOGW << "Failed to set font family: " << settings_fontFamilyBuf;
+                        }
+                        SetFontSizeImmediate(settings_fontSize);
                     }
                     ImGui::EndTabItem();
                 }
@@ -1041,6 +1157,8 @@ int main(int argc, char** argv)
 
         // Rendering
         ImGui::Render();
+        // Process pending font changes/rebuilds (apply delayed font-size changes or rebuilds)
+        ProcessPendingFontRebuild();
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
