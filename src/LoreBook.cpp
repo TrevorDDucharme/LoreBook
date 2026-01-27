@@ -1178,10 +1178,12 @@ int main(int argc, char** argv)
 
         // Controls
         ImGui::Text("Controls: Drag to pan, mouse wheel to zoom");
-        ImGui::InputFloat("Lon", &mapCenterLon, 0.0f, 0.0f, "%.3f"); ImGui::SameLine();
-        ImGui::InputFloat("Lat", &mapCenterLat, 0.0f, 0.0f, "%.3f");
-        ImGui::SliderFloat("Zoom", &mapZoom, 0.1f, 32.0f, "x%.2f");
+        ImGui::PushItemWidth(100);
+        ImGui::DragFloat("Lon", &mapCenterLon, 0.1f, 0.0f, 360.0f,"%.3f"); ImGui::SameLine();
+        ImGui::DragFloat("Lat", &mapCenterLat, 0.1f, -90.0f, 90.0f,"%.3f");
+        ImGui::SliderFloat("Zoom", &mapZoom, 1.0f, 32.0f, "x%.2f");
         if(ImGui::Button("Reset")) { mapCenterLon = 0.0f; mapCenterLat = 0.0f; mapZoom = 1.0f; }
+        ImGui::PopItemWidth();
 
         // Image and interactions
         ImGui::Text(" "); // spacer
@@ -1189,34 +1191,58 @@ int main(int argc, char** argv)
         ImGui::Text(" ");
         ImGui::BeginGroup();
         ImGui::Text("Map Preview:");
+
+        //save current cursor position
+        ImVec2 cursorPos = ImGui::GetCursorPos();
+
         ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture ? worldMapTexture : 0), imgSize, ImVec2(0,0), ImVec2(1,1));
 
+        //restore cursor position to overlay invisible button
+        ImGui::SetCursorPos(cursorPos);
+
+        // Use an invisible button over the image so we can reliably capture mouse interaction (hover, wheel, drag)
+        ImGui::InvisibleButton("WorldMap_Invisible_Button", imgSize);
         ImGuiIO& io = ImGui::GetIO();
-        if(ImGui::IsItemHovered()){
-            // Mouse wheel zoom
+
+        // Mouse wheel zoom when hovered
+        if (ImGui::IsItemHovered()){
             if(io.MouseWheel != 0.0f){
                 float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f/1.1f);
-                mapZoom = std::clamp(mapZoom * factor, 0.1f, 128.0f);
-            }
-            // Panning with left mouse drag
-            if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
-                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                float dx = drag.x;
-                float dy = drag.y;
-                // Approximate mapping: horizontal -> longitude, vertical -> latitude
-                float deltaLon = -dx / (float)texWidth * 360.0f / mapZoom;
-                float deltaLat = dy / (float)texHeight * 180.0f / mapZoom;
-                mapCenterLon += deltaLon;
-                mapCenterLat += deltaLat;
-                // normalize longitude
-                if(mapCenterLon > 180.0f) mapCenterLon -= 360.0f;
-                if(mapCenterLon < -180.0f) mapCenterLon += 360.0f;
-                mapCenterLat = std::clamp(mapCenterLat, -85.0f, 85.0f);
-                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+                mapZoom = std::clamp(mapZoom * factor, 1.0f, 128.0f);
             }
         }
 
-        // Rebuild texture only when parameters or layer change
+        // Panning with left mouse drag (operate in Mercator projected space)
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
+            ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            float dx = drag.x;
+            float dy = drag.y;
+            // Convert current center lon/lat to projected u/v
+            float u_center = (mapCenterLon + 180.0f) / 360.0f;
+            float lat_rad = mapCenterLat * static_cast<float>(M_PI) / 180.0f;
+            float mercN_center = std::log(std::tan(static_cast<float>(M_PI)/4.0f + lat_rad/2.0f));
+            float v_center = 0.5f * (1.0f - mercN_center / static_cast<float>(M_PI));
+
+            // Compute delta in projected normalized space
+            float du = -dx / static_cast<float>(texWidth) / mapZoom; // negative so drag right moves map left
+            float dv = dy / static_cast<float>(texHeight) / mapZoom;
+            u_center += du;
+            v_center += dv;
+
+            // Wrap/clamp
+            if (u_center < 0.0f) u_center = u_center - std::floor(u_center);
+            if (u_center >= 1.0f) u_center = u_center - std::floor(u_center);
+            constexpr float tiny = 1e-6f;
+            v_center = std::clamp(v_center, tiny, 1.0f - tiny);
+
+            // Convert back to lon/lat
+            mapCenterLon = u_center * 360.0f - 180.0f;
+            float mercN = static_cast<float>(M_PI) * (1.0f - 2.0f * v_center);
+            mapCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
+
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+
         const float eps = 1e-5f;
         bool needRebuild = (std::abs(mapCenterLon - lastCenterLon) > eps) || (std::abs(mapCenterLat - lastCenterLat) > eps) || (std::abs(mapZoom - lastZoom) > eps) || (worldMapLayer != lastLayer);
         if(needRebuild){

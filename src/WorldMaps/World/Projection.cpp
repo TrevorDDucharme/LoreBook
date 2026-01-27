@@ -22,24 +22,34 @@ GLuint MercatorProjection::project(const World& world, float longitude, float la
     const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     std::vector<uint8_t> pixels(pixelCount * 4, 0);
 
-    // Fill the buffer by sampling the world
+    // Precompute center in projected (u,v) space using forward Mercator mapping
+    // u in [0,1] maps to longitude [-180,180].
+    float u_center = (longitude + 180.0f) / 360.0f;
+    float lat_rad = latitude * static_cast<float>(M_PI) / 180.0f;
+    float mercN_center = std::log(std::tan(static_cast<float>(M_PI)/4.0f + lat_rad/2.0f));
+    float v_center = 0.5f * (1.0f - mercN_center / static_cast<float>(M_PI));
+
+    // Fill the buffer by sampling the world after projecting to Mercator then zooming in 2D projected plane
     for (int i = 0; i < height; ++i) {
-        float v = (static_cast<float>(i) + 0.5f) / static_cast<float>(height); // [0,1]
         for (int j = 0; j < width; ++j) {
-            float u = (static_cast<float>(j) + 0.5f) / static_cast<float>(width); // [0,1]
+            // Compute normalized offsets centered at 0 in projected plane and scale by zoom
+            float nx = (static_cast<float>(j) + 0.5f) / static_cast<float>(width) - 0.5f; // [-0.5,0.5]
+            float ny = (static_cast<float>(i) + 0.5f) / static_cast<float>(height) - 0.5f; // [-0.5,0.5]
+            float u = u_center + nx / zoomLevel;
+            float v = v_center + ny / zoomLevel;
+
+            // Handle wrap-around horizontally (longitude)
+            if (u < 0.0f) u = u - std::floor(u);
+            if (u >= 1.0f) u = u - std::floor(u);
+            // Clamp v to [tiny, 1-tiny] to avoid extreme singularities at the poles
+            constexpr float tiny = 1e-6f;
+            v = std::clamp(v, tiny, 1.0f - tiny);
 
             // Map u to longitude in [-180,180]
             float lon = u * 360.0f - 180.0f;
             // Mercator inverse to latitude
-            float mercN = M_PI * (1.0f - 2.0f * v);
+            float mercN = static_cast<float>(M_PI) * (1.0f - 2.0f * v);
             float lat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
-
-            // Apply zoom by sampling a reduced range around center longitude/latitude if zoomLevel != 1
-            // A simple approach: zoom scales the longitude/latitude offsets from the provided center
-            float dlon = lon - longitude;
-            float dlat = lat - latitude;
-            lon = longitude + dlon / zoomLevel;
-            lat = latitude + dlat / zoomLevel;
 
             // Sample world (returns channels in [-1,1] typically)
             std::array<uint8_t, 4> color = world.getColor(lon, lat, layerName);
