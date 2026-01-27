@@ -4,6 +4,12 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <mutex>
+#include <shared_mutex>
+
+// Global shared mutex used to protect layer mutations (reseed and parameter changes).
+// Sampling remains unlocked for performance.
+inline std::shared_mutex g_layerMutationMutex;
 
 struct SampleData{
     std::vector<float> channels;
@@ -58,6 +64,9 @@ public:
 
         return maxAmp;
     }
+protected:
+    mutable std::mutex parameterMutex_;
+    std::unique_lock<std::mutex> lockParameters() const { return std::unique_lock<std::mutex>(parameterMutex_); }
 private:
     // Layer data members go here
 };

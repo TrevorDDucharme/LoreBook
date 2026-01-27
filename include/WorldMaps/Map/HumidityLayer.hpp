@@ -22,9 +22,10 @@ public:
         return {0, 0, blueValue, 255};
     }
 
-    void reseed(int seed) override { perlinModule_.SetSeed(seed * 2); }
+    void reseed(int seed) override { std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex); perlinModule_.SetSeed(seed * 2); }
 
     bool setParameter(const std::string& name, float value) override {
+        std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex);
         if(name == "seed"){ perlinModule_.SetSeed(static_cast<int>(value)); return true; }
         if(name == "frequency"){ perlinModule_.SetFrequency(value); return true; }
         if(name == "lacunarity"){ perlinModule_.SetLacunarity(value); return true; }

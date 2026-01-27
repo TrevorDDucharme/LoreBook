@@ -14,10 +14,11 @@ public:
         return {0, 0, v, 255};
     }
 
-    void setWaterLevel(float n) { waterLevelNormalized_ = n; }
+    void setWaterLevel(float n) { std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex); waterLevelNormalized_ = n; }
     float getWaterLevel() const { return waterLevelNormalized_; }
 
     bool setParameter(const std::string& name, float value) override {
+        std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex);
         if(name == "waterLevel") { setWaterLevel(value); return true; }
         return false;
     }

@@ -13,6 +13,7 @@
 #include <queue>
 #include <condition_variable>
 #include <functional>
+#include <glm/glm.hpp>
 
 // Simple thread pool for reusing worker threads across renders
 class ThreadPool {
@@ -86,6 +87,12 @@ Projection::~Projection()
 
 MercatorProjection::MercatorProjection() = default;
 MercatorProjection::~MercatorProjection() = default;
+
+SphericalProjection::SphericalProjection() = default;
+SphericalProjection::~SphericalProjection() = default;
+
+// Default AA samples
+std::atomic<int> SphericalProjection::s_sphericalAASamples{1};
 
 // Ensure pixel buffers are present and sized
 void Projection::ensureBuffers(int width, int height) const {
@@ -226,5 +233,134 @@ GLuint MercatorProjection::project(const World& world, float longitude, float la
     this->cv_.notify_all();
 
     // Return the texture which now contains the fully-filled front buffer
+    return this->frontTex_;
+}
+
+// Screen-space spherical projection implementation
+GLuint SphericalProjection::project(const World& world, float centerLon, float centerLat, float zoomLevel, int width, int height, std::string layerName, GLuint existingTexture) const {
+    // Ensure valid dimensions
+    if (width <= 0 || height <= 0) return 0;
+
+    // Wait for any previous render to finish
+    {
+        std::unique_lock<std::mutex> lg(this->mutex_);
+        this->cv_.wait(lg, [this]{ return !this->rendering_.load(); });
+        this->rendering_.store(true);
+    }
+
+    ensureBuffers(width, height);
+    ensureTextures(width, height, existingTexture);
+
+    // Camera setup: map center lon/lat to a direction on the unit sphere
+    float lonRad = centerLon * static_cast<float>(M_PI) / 180.0f;
+    float latRad = centerLat * static_cast<float>(M_PI) / 180.0f;
+    glm::vec3 centerDir(std::cos(latRad) * std::cos(lonRad), std::sin(latRad), std::cos(latRad) * std::sin(lonRad));
+
+    // Camera distance controlled by zoomLevel (ensure outside unit sphere)
+    float distance = 2.2f / (zoomLevel > 0.0f ? zoomLevel : 1.0f);
+    if(distance < 1.05f) distance = 1.05f;
+    glm::vec3 camPos = centerDir * distance;
+
+    glm::vec3 forward = glm::normalize(-camPos);
+    glm::vec3 upRef = std::fabs(forward.y) > 0.99f ? glm::vec3(0.0f,0.0f,1.0f) : glm::vec3(0.0f,1.0f,0.0f);
+    glm::vec3 right = glm::normalize(glm::cross(upRef, forward));
+    glm::vec3 up = glm::cross(forward, right);
+
+    const float fovY = glm::radians(45.0f);
+    const float tanFov2 = std::tan(fovY * 0.5f);
+    const float aspect = static_cast<float>(width) / static_cast<float>(height);
+
+    const int aaSamples = std::max(1, SphericalProjection::s_sphericalAASamples.load());
+    int aaDim = 1;
+    while(aaDim * aaDim < aaSamples) ++aaDim;
+    float invAA = 1.0f / static_cast<float>(aaDim);
+
+    const int rowsPerTask = ROWS_PER_TASK;
+    const int numTasks = (height + rowsPerTask - 1) / rowsPerTask;
+    std::vector<std::future<void>> futures; futures.reserve(numTasks);
+
+    const float camPosDot = glm::dot(camPos, camPos);
+
+    for(int t=0; t<numTasks; ++t){
+        int row0 = t * rowsPerTask; int row1 = std::min(height, row0 + rowsPerTask);
+        futures.emplace_back(s_projectionPool.enqueue([this, &world, layerName, width, height, row0, row1, camPos, forward, right, up, tanFov2, aspect, aaDim, invAA, camPosDot](){
+            const size_t widthU = static_cast<size_t>(width);
+            for(int i = row0; i < row1; ++i){
+                for(int j = 0; j < width; ++j){
+                    // NDC coordinates
+                    float ndcX = ((static_cast<float>(j) + 0.5f) / static_cast<float>(width)) * 2.0f - 1.0f;
+                    float ndcY = 1.0f - ((static_cast<float>(i) + 0.5f) / static_cast<float>(height)) * 2.0f;
+
+                    glm::vec3 accum = glm::vec3(0.0f);
+
+                    for(int ay=0; ay<aaDim; ++ay){
+                        for(int ax=0; ax<aaDim; ++ax){
+                            // subpixel offsets in range [-0.5,0.5]
+                            float ox = ( (ax + 0.5f) * invAA - 0.5f ) / static_cast<float>(width);
+                            float oy = ( (ay + 0.5f) * invAA - 0.5f ) / static_cast<float>(height);
+
+                            float sx = ndcX + ox * 2.0f;
+                            float sy = ndcY + oy * 2.0f;
+
+                            float px = sx * tanFov2 * aspect;
+                            float py = sy * tanFov2;
+
+                            glm::vec3 dir = glm::normalize(px * right + py * up + forward);
+
+                            // Ray-sphere intersection (sphere radius = 1 at origin)
+                            float d = glm::dot(camPos, dir);
+                            float c = camPosDot - 1.0f;
+                            float disc = d*d - c;
+                            if(disc < 0.0f) continue; // miss, leave background
+                            float root = std::sqrt(disc);
+                            float tHit = -d - root;
+                            if(tHit < 0.0f){ tHit = -d + root; if(tHit < 0.0f) continue; }
+                            glm::vec3 hit = camPos + dir * tHit;
+                            glm::vec3 n = glm::normalize(hit);
+
+                            // Convert to lon/lat
+                            float lat = std::asin(std::clamp(n.y, -1.0f, 1.0f)) * 180.0f / static_cast<float>(M_PI);
+                            float lon = std::atan2(n.z, n.x) * 180.0f / static_cast<float>(M_PI);
+
+                            std::array<uint8_t,4> color = world.getColor(lon, lat, layerName);
+                            // simple diffuse lighting to add day/night shading
+                            static const glm::vec3 lightDir = glm::normalize(glm::vec3(0.4f, 0.4f, 1.0f));
+                            float ndl = std::max(0.0f, glm::dot(n, lightDir));
+                            float shade = 0.2f + 0.8f * ndl;
+                            accum += glm::vec3(color[0], color[1], color[2]) * shade;
+                        }
+                    }
+
+                    // Average samples
+                    int samples = aaDim * aaDim;
+                    glm::vec3 finalc = accum / static_cast<float>(std::max(1, samples));
+                    size_t idx = (static_cast<size_t>(i) * widthU + static_cast<size_t>(j)) * 4u;
+                    this->backPixels_[idx + 0] = static_cast<uint8_t>(std::clamp(finalc.r, 0.0f, 255.0f));
+                    this->backPixels_[idx + 1] = static_cast<uint8_t>(std::clamp(finalc.g, 0.0f, 255.0f));
+                    this->backPixels_[idx + 2] = static_cast<uint8_t>(std::clamp(finalc.b, 0.0f, 255.0f));
+                    this->backPixels_[idx + 3] = 255;
+                }
+            }
+        }));
+    }
+
+    for(auto &f : futures) f.get();
+
+    // Upload back buffer to backTex (GL thread)
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glBindTexture(GL_TEXTURE_2D, this->backTex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, this->backPixels_.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // Swap front/back
+    {
+        std::lock_guard<std::mutex> lg(this->mutex_);
+        std::swap(this->frontPixels_, this->backPixels_);
+        std::swap(this->frontTex_, this->backTex_);
+        std::swap(this->frontTexOwned_, this->backTexOwned_);
+        this->rendering_.store(false);
+    }
+    this->cv_.notify_all();
+
     return this->frontTex_;
 }

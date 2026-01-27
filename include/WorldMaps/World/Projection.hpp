@@ -56,3 +56,17 @@ public:
     ~MercatorProjection() override;
     GLuint project(const World& world, float longitude, float latitude, float zoomLevel, int width, int height, std::string layerName, GLuint existingTexture) const override;
 };
+
+// Screen-space spherical projection: traces rays from a virtual orbit camera through
+// the requested viewport and samples the visible sphere pixels directly on the workers.
+class SphericalProjection : public Projection {
+public:
+    SphericalProjection();
+    ~SphericalProjection() override;
+    // longitude/latitude specify the center of view (the sphere surface point to center on),
+    // zoomLevel controls camera distance (larger zoomLevel = closer).
+    GLuint project(const World& world, float longitude, float latitude, float zoomLevel, int width, int height, std::string layerName, GLuint existingTexture) const override;
+
+    // Global anti-aliasing samples for spherical projection (1 = no AA, 2 = 2x SSAA, etc.)
+    static std::atomic<int> s_sphericalAASamples;
+};

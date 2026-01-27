@@ -54,6 +54,7 @@ public:
 
     // Reseed all layers with a new seed
     void reseed(int seed){
+        std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex);
         for(auto &p : layers) p.second->reseed(seed);
     }
 

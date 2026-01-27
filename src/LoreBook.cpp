@@ -270,6 +270,7 @@ int main(int argc, char** argv)
 
     World world;
     MercatorProjection mercatorProj;
+    SphericalProjection sphereProj;
 
     // Main loop
     while (!glfwWindowShouldClose(window))
@@ -1204,6 +1205,24 @@ int main(int argc, char** argv)
         }
         ImGui::PopItemWidth();
 
+        // --- Globe window controls (screen-space spherical sampling) ---
+        ImGui::Separator();
+        ImGui::Text("Globe Preview Controls");
+        static float globeCenterLon = 0.0f;
+        static float globeCenterLat = 0.0f;
+        static float globeZoom = 1.0f;
+        static GLuint globeTexture = 0;
+        static int globeAASamples = static_cast<int>(SphericalProjection::s_sphericalAASamples.load());
+        ImGui::PushItemWidth(120);
+        ImGui::DragFloat("Globe Lon", &globeCenterLon, 0.1f, -180.0f, 180.0f, "%.3f"); ImGui::SameLine();
+        ImGui::DragFloat("Globe Lat", &globeCenterLat, 0.1f, -89.9f, 89.9f, "%.3f");
+        ImGui::SliderFloat("Globe Zoom", &globeZoom, 0.2f, 8.0f, "x%.2f");
+        ImGui::Combo("Globe AA", &globeAASamples, "1\02\04\08\0");
+        if(globeAASamples < 1) globeAASamples = 1;
+        SphericalProjection::s_sphericalAASamples.store(globeAASamples);
+        ImGui::PopItemWidth();
+
+
         // Water control
         auto layerPtr = world.getLayer("water");
         if(layerPtr){
@@ -1301,17 +1320,57 @@ int main(int argc, char** argv)
             u_center += du;
             v_center -= dv;
 
-            // Wrap/clamp
+            // Wrap
             if (u_center < 0.0f) u_center = u_center - std::floor(u_center);
             if (u_center >= 1.0f) u_center = u_center - std::floor(u_center);
-            constexpr float tiny = 1e-6f;
-            v_center = std::clamp(v_center, tiny, 1.0f - tiny);
+            if (v_center < 0.0f) v_center = v_center-std::floor(v_center);
+            if (v_center > 1.0f) v_center = v_center - std::floor(v_center);
 
             // Convert back to lon/lat
             mapCenterLon = u_center * 360.0f - 180.0f;
             float mercN = static_cast<float>(M_PI) * (1.0f - 2.0f * v_center);
             mapCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
 
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+
+        // --- Globe Preview (screen-space spherical sampling) ---
+        ImGui::Separator();
+        ImGui::Text("Globe Preview:");
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        int glW = std::max(128, std::min(2048, static_cast<int>(avail.x)));
+        int glH = std::max(128, std::min(2048, static_cast<int>(avail.y)));
+        ImVec2 globeSize((float)glW, (float)glH);
+
+        // Save cursor for overlay
+        ImVec2 globeCursor = ImGui::GetCursorPos();
+
+        std::string selectedLayerNameGlobe = selectedLayerName; // reuse selection
+        globeTexture = sphereProj.project(world, globeCenterLon, globeCenterLat, globeZoom, glW, glH, selectedLayerNameGlobe, globeTexture);
+
+        if(globeTexture != 0){
+            ImGui::Image((ImTextureID)(intptr_t)(globeTexture), globeSize, ImVec2(0,0), ImVec2(1,1));
+        } else {
+            ImGui::Dummy(globeSize);
+        }
+
+        ImGui::SetCursorPos(globeCursor);
+        ImGui::InvisibleButton("Globe_Invisible_Button", globeSize);
+
+        // Mouse wheel zoom when hovered
+        if(ImGui::IsItemHovered()){
+            if(io.MouseWheel != 0.0f){
+                float factor = (io.MouseWheel > 0.0f) ? 1.12f : (1.0f/1.12f);
+                globeZoom = std::clamp(globeZoom * factor, 0.2f, 8.0f);
+            }
+        }
+
+        // Drag to rotate globe
+        if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
+            ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            float dx = drag.x; float dy = drag.y;
+            globeCenterLon = std::fmod(globeCenterLon - dx / static_cast<float>(glW) * 360.0f + 540.0f, 360.0f) - 180.0f; // wrap
+            globeCenterLat = std::clamp(globeCenterLat + dy / static_cast<float>(glH) * 180.0f, -89.9f, 89.9f);
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
         }
 
