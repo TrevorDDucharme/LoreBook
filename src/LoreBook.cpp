@@ -14,7 +14,10 @@
 #include <filesystem>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <mutex>
 #include "GraphView.hpp"
+#include <WorldMaps/Map/WaterLayer.hpp>
 #include <Vault.hpp>
 #include "VaultChat.hpp"
 #include "Fonts.hpp"
@@ -27,6 +30,7 @@
 #include <plog/Appenders/ConsoleAppender.h>
 #include <plog/Formatters/TxtFormatter.h>
 #include <WorldMaps/World/World.hpp>
+#include <future>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -1164,15 +1168,16 @@ int main(int argc, char** argv)
         //Worldmap window
         ImGui::Begin("World Map");
         static int worldMapLayer = 0;
-        static std::string layerNames[] = { "elevation", "temperature", "humidity" };
-        ImGui::Combo("layer", &worldMapLayer, "elevation\0temperature\0humidity\0");
+        static std::string layerNames[] = { "color","elevation", "temperature", "humidity", "water", "biome", "river" };
+        ImGui::Combo("layer", &worldMapLayer, "color\0elevation\0temperature\0humidity\0water\0biome\0river\0");
 
         // Map control state
         static float mapCenterLon = 0.0f;
         static float mapCenterLat = 0.0f;
         static float mapZoom = 1.0f;
         static int lastLayer = -1;
-        static GLuint worldMapTexture = 0;
+        static GLuint worldMapTextureFront = 0;
+        static GLuint worldMapTextureBack = 0; // back buffer where we upload tiles
         static float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
         const int texWidth = 512, texHeight = 512;
 
@@ -1183,7 +1188,67 @@ int main(int argc, char** argv)
         ImGui::DragFloat("Lat", &mapCenterLat, 0.1f, -90.0f, 90.0f,"%.3f");
         ImGui::SliderFloat("Zoom", &mapZoom, 1.0f, 32.0f, "x%.2f");
         if(ImGui::Button("Reset")) { mapCenterLon = 0.0f; mapCenterLat = 0.0f; mapZoom = 1.0f; }
+        ImGui::SameLine();
+        static int reseedValue = 42;
+        ImGui::PushItemWidth(100);
+        ImGui::InputInt("Seed", &reseedValue); ImGui::SameLine();
+        if(ImGui::Button("Reseed")){
+            world.reseed(reseedValue);
+            lastLayer = -1; // force rebuild
+        }
+        ImGui::SameLine();
+        if(ImGui::Button("Randomize Seed")){
+            int s = (int)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+            world.reseed(s);
+            lastLayer = -1;
+        }
         ImGui::PopItemWidth();
+
+        // Water control
+        auto layerPtr = world.getLayer("water");
+        if(layerPtr){
+            WaterLayer* wlayer = dynamic_cast<WaterLayer*>(layerPtr);
+            if(wlayer){
+                float wl = wlayer->getWaterLevel();
+                if(ImGui::SliderFloat("Sea Level", &wl, 0.0f, 1.0f, "%.3f")){
+                    wlayer->setWaterLevel(wl);
+                    lastLayer = -1;
+                }
+            }
+        }
+
+        // Per-layer parameter panel
+        std::string selectedLayerName = layerNames[worldMapLayer];
+        MapLayer* selectedLayer = world.getLayer(selectedLayerName);
+        if(selectedLayer){
+            ImGui::Separator();
+            ImGui::Text("Layer Parameters (%s)", selectedLayerName.c_str());
+            auto params = selectedLayer->getParameters();
+            for(auto &kv : params){
+                std::string name = kv.first;
+                float value = kv.second;
+                if(name == "seed" || name == "octaves"){
+                    int iv = static_cast<int>(value);
+                    if(ImGui::InputInt(name.c_str(), &iv)){
+                        selectedLayer->setParameter(name, static_cast<float>(iv));
+                        lastLayer = -1;
+                    }
+                } else {
+                    float v = value;
+                    if(ImGui::InputFloat(name.c_str(), &v, 0.0f, 0.0f, "%.4f")){
+                        selectedLayer->setParameter(name, v);
+                        lastLayer = -1;
+                    }
+                }
+            }
+            ImGui::SameLine();
+            if(ImGui::Button("Reseed Layer")){
+                // reseed using a new random seed
+                int s = (int)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+                selectedLayer->reseed(s);
+                lastLayer = -1;
+            }
+        }
 
         // Image and interactions
         ImGui::Text(" "); // spacer
@@ -1195,7 +1260,10 @@ int main(int argc, char** argv)
         //save current cursor position
         ImVec2 cursorPos = ImGui::GetCursorPos();
 
-        ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture ? worldMapTexture : 0), imgSize, ImVec2(0,0), ImVec2(1,1));
+        // Show the current front buffer (previous completed frame) to avoid flicker while back buffer updates
+        // If front is not yet available (first render) fall back to showing the back buffer so the map isn't black
+        GLuint textureToShow = worldMapTextureFront ? worldMapTextureFront : (worldMapTextureBack ? worldMapTextureBack : 0);
+        ImGui::Image((ImTextureID)(intptr_t)(textureToShow), imgSize, ImVec2(0,0), ImVec2(1,1));
 
         //restore cursor position to overlay invisible button
         ImGui::SetCursorPos(cursorPos);
@@ -1227,7 +1295,7 @@ int main(int argc, char** argv)
             float du = -dx / static_cast<float>(texWidth) / mapZoom; // negative so drag right moves map left
             float dv = dy / static_cast<float>(texHeight) / mapZoom;
             u_center += du;
-            v_center += dv;
+            v_center -= dv;
 
             // Wrap/clamp
             if (u_center < 0.0f) u_center = u_center - std::floor(u_center);
@@ -1244,12 +1312,105 @@ int main(int argc, char** argv)
         }
 
         const float eps = 1e-5f;
+        // Render state and tile upload queue
+        struct Tile { int x,y,w,h; std::vector<uint8_t> pixels; };
+        static std::future<std::vector<uint8_t>> renderFuture;
+        static bool inFlight = false;
+        static std::shared_ptr<std::atomic_bool> renderCancelToken = nullptr;
+        static std::vector<Tile> completedTiles;
+        static std::mutex completedTilesMutex;
+
         bool needRebuild = (std::abs(mapCenterLon - lastCenterLon) > eps) || (std::abs(mapCenterLat - lastCenterLat) > eps) || (std::abs(mapZoom - lastZoom) > eps) || (worldMapLayer != lastLayer);
         if(needRebuild){
-            GLuint newTex = mercatorProj.project(world, mapCenterLon, mapCenterLat, mapZoom, texWidth, texHeight, layerNames[worldMapLayer]);
-            if(worldMapTexture != 0 && worldMapTexture != newTex){ glDeleteTextures(1, &worldMapTexture); }
-            worldMapTexture = newTex;
-            lastCenterLon = mapCenterLon; lastCenterLat = mapCenterLat; lastZoom = mapZoom; lastLayer = worldMapLayer;
+            // If a render is in flight, request cancellation
+            if(inFlight && renderCancelToken){ renderCancelToken->store(true); }
+
+            // Clear any queued tiles
+            {
+                std::lock_guard<std::mutex> lg(completedTilesMutex);
+                completedTiles.clear();
+            }
+
+            // Create a new cancel token and tile queue
+            renderCancelToken = std::make_shared<std::atomic_bool>(false);
+            int tileSize = 256; // tiles of 256x256 (user preference)
+
+            // Progress callback pushes completed tiles into a thread-safe queue for main-thread upload
+            auto progressCb = [ &completedTiles, &completedTilesMutex ](int x, int y, int w, int h, const std::vector<uint8_t>& tilePixels){
+                Tile t; t.x = x; t.y = y; t.w = w; t.h = h; t.pixels = tilePixels;
+                std::lock_guard<std::mutex> lg(completedTilesMutex);
+                completedTiles.emplace_back(std::move(t));
+            };
+
+            // Schedule background render (non-blocking) with tiling and progress
+            renderFuture = mercatorProj.renderToPixelsAsync(world, mapCenterLon, mapCenterLat, mapZoom, texWidth, texHeight, layerNames[worldMapLayer], tileSize, progressCb, renderCancelToken);
+            inFlight = true;
+        }
+
+        // Upload any completed tiles (if tile-based rendering is active)
+        if(inFlight){
+            std::vector<Tile> tilesToUpload;
+            {
+                std::lock_guard<std::mutex> lg(completedTilesMutex);
+                if(!completedTiles.empty()){
+                    tilesToUpload.swap(completedTiles);
+                }
+            }
+            if(!tilesToUpload.empty()){
+                // Ensure back buffer exists and is allocated
+                if(worldMapTextureBack == 0){
+                    glGenTextures(1, &worldMapTextureBack);
+                    glBindTexture(GL_TEXTURE_2D, worldMapTextureBack);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                    // allocate full size (no data yet)
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, texWidth, texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                } else {
+                    glBindTexture(GL_TEXTURE_2D, worldMapTextureBack);
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                }
+                for(auto &t : tilesToUpload){
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, t.x, t.y, t.w, t.h, GL_RGBA, GL_UNSIGNED_BYTE, t.pixels.data());
+                }
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+
+            // Check if the overall future finished
+            using namespace std::chrono_literals;
+            if(renderFuture.valid() && renderFuture.wait_for(0ms) == std::future_status::ready){
+                auto pixels = renderFuture.get();
+                // If tiled rendering was being used, the pixels vector will be full image; upload it as a final pass to back buffer
+                if(!pixels.empty()){
+                    if(worldMapTextureBack == 0){
+                        glGenTextures(1, &worldMapTextureBack);
+                        glBindTexture(GL_TEXTURE_2D, worldMapTextureBack);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, texWidth, texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                    } else {
+                        glBindTexture(GL_TEXTURE_2D, worldMapTextureBack);
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texWidth, texHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+                        glBindTexture(GL_TEXTURE_2D, 0);
+                    }
+                }
+                // commit state only if not cancelled; swap buffers atomically
+                if(!(renderCancelToken && renderCancelToken->load())){
+                    lastCenterLon = mapCenterLon; lastCenterLat = mapCenterLat; lastZoom = mapZoom; lastLayer = worldMapLayer;
+                    // Swap front/back textures
+                    std::swap(worldMapTextureFront, worldMapTextureBack);
+                }
+                inFlight = false;
+                // clear any leftover tiles
+                std::lock_guard<std::mutex> lg(completedTilesMutex);
+                completedTiles.clear();
+            }
         }
 
         ImGui::EndGroup();
