@@ -7,6 +7,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <array>
 
 class World;
 
@@ -16,13 +20,34 @@ public:
     virtual ~Projection();
     // Creates an OpenGL texture for the projected view and returns its GLuint.
     // NOTE: This must be called from a valid OpenGL context (GL thread).
+    // This method blocks until a fully-filled texture is available and swaps internal buffers only when
+    // the new buffer is complete. Project implementations should render into the internal back buffer
+    // using worker threads and only upload/swap on completion.
     virtual GLuint project(const World& world, float longitude, float latitude, float zoomLevel, int width, int height, std::string layerName="", GLuint existingTexture = 0) const = 0;
 
-    // Asynchronous pixel rendering: returns a future that will hold RGBA pixels (size width*height*4).
-    // The future runs heavy sampling on background threads; caller must upload pixels to GL on the main thread when ready.
-    // Optional tiling: if tileSize>0, the async task will render tiles of the given size and call progressCallback(tileX,tileY, tileW, tileH, pixels)
-    // for each tile as it completes. If cancelToken is provided and set to true, the task should abort early and return an empty vector.
-    virtual std::future<std::vector<uint8_t>> renderToPixelsAsync(const World& world, float longitude, float latitude, float zoomLevel, int width, int height, std::string layerName, int tileSize = 0, std::function<void(int,int,int,int,const std::vector<uint8_t>&)> progressCallback = nullptr, std::shared_ptr<std::atomic_bool> cancelToken = nullptr) const;
+protected:
+    // Double-buffered pixel storage (RGBA8)
+    mutable std::vector<uint8_t> frontPixels_;
+    mutable std::vector<uint8_t> backPixels_;
+    mutable int bufWidth_ = 0;
+    mutable int bufHeight_ = 0;
+
+    // GL textures corresponding to front/back buffers
+    mutable GLuint frontTex_ = 0;
+    mutable GLuint backTex_ = 0;
+    mutable bool frontTexOwned_ = false;
+    mutable bool backTexOwned_ = false;
+
+    // Synchronization for in-flight rendering
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+    mutable std::atomic<bool> rendering_{false};
+
+    // Helper to ensure buffers and textures are prepared (to be implemented in .cpp)
+    void ensureBuffers(int width, int height) const;
+    void ensureTextures(int width, int height, GLuint existingTexture) const;
+
+    static constexpr int ROWS_PER_TASK = 8; // tuning knob for tile size
 };
 
 class MercatorProjection : public Projection {
