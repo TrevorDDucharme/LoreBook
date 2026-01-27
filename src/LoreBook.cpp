@@ -16,6 +16,7 @@
 #include <cmath>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 #include "GraphView.hpp"
 #include <WorldMaps/Map/WaterLayer.hpp>
 #include <Vault.hpp>
@@ -1260,10 +1261,37 @@ int main(int argc, char** argv)
         //save current cursor position
         ImVec2 cursorPos = ImGui::GetCursorPos();
 
-        // Show the current front buffer (previous completed frame) to avoid flicker while back buffer updates
-        // If front is not yet available (first render) fall back to showing the back buffer so the map isn't black
-        GLuint textureToShow = worldMapTextureFront ? worldMapTextureFront : (worldMapTextureBack ? worldMapTextureBack : 0);
-        ImGui::Image((ImTextureID)(intptr_t)(textureToShow), imgSize, ImVec2(0,0), ImVec2(1,1));
+        // Progressive-swap policy static state
+        static std::atomic<int> tilesCompleted(0);
+        static int tilesExpected = 0;
+        static int renderGeneration = 0;
+        static int currentGeneration = 0;
+        static bool swappedThisGen = false;
+        const float swapThreshold = 0.30f; // show back after 30% of tiles complete
+
+        // Decide which texture to show. Prefer front (fully committed); otherwise, only show back when threshold reached.
+        GLuint textureToShow = worldMapTextureFront ? worldMapTextureFront : 0;
+        bool drewPlaceholder = false;
+        if(textureToShow == 0){
+            // fallback: only show back if we've completed enough tiles; otherwise draw a neutral placeholder to avoid mosaic flicker
+            if(tilesExpected > 0 && tilesCompleted.load() >= static_cast<int>(tilesExpected * swapThreshold) && worldMapTextureBack != 0){
+                textureToShow = worldMapTextureBack;
+            } else {
+                // Draw neutral placeholder rectangle behind the eventual image area
+                ImVec2 winPos = ImGui::GetWindowPos();
+                ImVec2 rectMin(winPos.x + cursorPos.x, winPos.y + cursorPos.y);
+                ImVec2 rectMax(winPos.x + cursorPos.x + imgSize.x, winPos.y + cursorPos.y + imgSize.y);
+                ImGui::GetWindowDrawList()->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(ImVec4(0.12f,0.12f,0.12f,1.0f)));
+                drewPlaceholder = true;
+            }
+        }
+
+        if(textureToShow != 0){
+            ImGui::Image((ImTextureID)(intptr_t)(textureToShow), imgSize, ImVec2(0,0), ImVec2(1,1));
+        } else {
+            // Reserve the image area so layout remains consistent
+            ImGui::Dummy(imgSize);
+        }
 
         //restore cursor position to overlay invisible button
         ImGui::SetCursorPos(cursorPos);
@@ -1335,11 +1363,24 @@ int main(int argc, char** argv)
             renderCancelToken = std::make_shared<std::atomic_bool>(false);
             int tileSize = 256; // tiles of 256x256 (user preference)
 
-            // Progress callback pushes completed tiles into a thread-safe queue for main-thread upload
-            auto progressCb = [ &completedTiles, &completedTilesMutex ](int x, int y, int w, int h, const std::vector<uint8_t>& tilePixels){
+            // Compute expected tiles this render and bump generation
+            int tilesX = (texWidth + tileSize - 1) / tileSize;
+            int tilesY = (texHeight + tileSize - 1) / tileSize;
+            int expected = tilesX * tilesY;
+            tilesExpected = expected;
+            tilesCompleted.store(0);
+            swappedThisGen = false;
+            renderGeneration++;
+            currentGeneration = renderGeneration;
+
+            // Progress callback pushes completed tiles into a thread-safe queue for main-thread upload and increments counter
+            int capturedGeneration = currentGeneration;
+            auto progressCb = [ capturedGeneration, &completedTiles, &completedTilesMutex, &tilesCompleted ](int x, int y, int w, int h, const std::vector<uint8_t>& tilePixels){
                 Tile t; t.x = x; t.y = y; t.w = w; t.h = h; t.pixels = tilePixels;
                 std::lock_guard<std::mutex> lg(completedTilesMutex);
                 completedTiles.emplace_back(std::move(t));
+                // Increment completed count for generation (background thread)
+                tilesCompleted.fetch_add(1);
             };
 
             // Schedule background render (non-blocking) with tiling and progress
@@ -1366,8 +1407,11 @@ int main(int argc, char** argv)
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                    // allocate full size (no data yet)
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, texWidth, texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                    // allocate full size and initialize with neutral color to avoid black holes
+                    std::vector<uint8_t> initBuf(static_cast<size_t>(texWidth) * static_cast<size_t>(texHeight) * 4, 0);
+                    uint8_t neutral = static_cast<uint8_t>(0.12f * 255.0f);
+                    for(size_t i=0;i<initBuf.size();i+=4){ initBuf[i+0]=neutral; initBuf[i+1]=neutral; initBuf[i+2]=neutral; initBuf[i+3]=255; }
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, texWidth, texHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, initBuf.data());
                 } else {
                     glBindTexture(GL_TEXTURE_2D, worldMapTextureBack);
                     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1376,6 +1420,16 @@ int main(int argc, char** argv)
                     glTexSubImage2D(GL_TEXTURE_2D, 0, t.x, t.y, t.w, t.h, GL_RGBA, GL_UNSIGNED_BYTE, t.pixels.data());
                 }
                 glBindTexture(GL_TEXTURE_2D, 0);
+
+                // If we haven't swapped this generation yet, consider progressive swap when threshold reached
+                if(!swappedThisGen && tilesExpected > 0){
+                    float frac = static_cast<float>(tilesCompleted.load()) / static_cast<float>(tilesExpected);
+                    if(frac >= swapThreshold){
+                        // swap back -> front to display progressive results
+                        std::swap(worldMapTextureFront, worldMapTextureBack);
+                        swappedThisGen = true;
+                    }
+                }
             }
 
             // Check if the overall future finished

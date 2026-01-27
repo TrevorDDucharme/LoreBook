@@ -237,7 +237,18 @@ std::future<std::vector<uint8_t>> Projection::renderToPixelsAsync(const World& w
         if(tileSize > 0){
             int tilesX = (width + tileSize - 1) / tileSize;
             int tilesY = (height + tileSize - 1) / tileSize;
-            for(int ty=0; ty<tilesY; ++ty){
+
+            // Build an interleaved row order that alternates top and bottom rows to avoid starving bottom tiles
+            std::vector<int> rowOrder;
+            rowOrder.reserve(tilesY);
+            for(int k=0; k < tilesY/2; ++k){
+                rowOrder.push_back(k);
+                rowOrder.push_back(tilesY - 1 - k);
+            }
+            if(tilesY % 2 == 1) rowOrder.push_back(tilesY/2);
+
+            for(int rIdx = 0; rIdx < (int)rowOrder.size(); ++rIdx){
+                int ty = rowOrder[rIdx];
                 for(int tx=0; tx<tilesX; ++tx){
                     if(isCancelled()) return std::vector<uint8_t>();
                     int x0 = tx * tileSize;
