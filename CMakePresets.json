@@ -7,6 +7,7 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_TOOLCHAIN_FILE": "/home/trevor/vcpkg/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_MANIFEST_MODE": "ON",
                 "VCPKG_TARGET_TRIPLET": "x64-linux",
@@ -21,6 +22,7 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build-debug",
             "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_TOOLCHAIN_FILE": "/home/trevor/vcpkg/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_MANIFEST_MODE": "ON",
                 "VCPKG_TARGET_TRIPLET": "x64-linux",
@@ -36,6 +38,7 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build-windows",
             "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_TOOLCHAIN_FILE": "/home/trevor/vcpkg/scripts/buildsystems/vcpkg.cmake",
                 "VCPKG_MANIFEST_MODE": "ON",
                 "VCPKG_TARGET_TRIPLET": "x64-mingw-static",

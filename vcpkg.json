@@ -41,6 +41,7 @@
 		"md4c",
 		"assimp",
 		"mysql-connector-cpp",
-		"libgit2"
+		"libgit2",
+		"libnoise"
 	]
 }

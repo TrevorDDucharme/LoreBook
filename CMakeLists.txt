@@ -8,11 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 file(GLOB_RECURSE CLIENT_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
-# exclude LineageEditor.cpp
-list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/LineageEditor\\.cpp$")
-list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/BuildingEditor\\.cpp$")
-list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/TimeEditor\\.cpp$")
-list(FILTER CLIENT_FILES EXCLUDE REGEX ".*/VariableEditor\\.cpp$")
 add_executable(${PROJECT_NAME} ${CLIENT_FILES})
 add_subdirectory(LoreBook_Resources)
 target_link_libraries(${PROJECT_NAME} PRIVATE LoreBook_Resources)
@@ -118,6 +113,11 @@ target_link_libraries(${PROJECT_NAME} PRIVATE assimp::assimp)
 
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::sqlite3::sqlite3)
+
+find_package(unofficial-noise CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::noise::noise-static)
+find_package(unofficial-noiseutils CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::noiseutils::noiseutils-static)
 
 # MySQL Connector/C++ (required via vcpkg "unofficial" port)
 find_package(unofficial-mysql-connector-cpp CONFIG REQUIRED)

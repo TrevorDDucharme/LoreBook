@@ -12,6 +12,8 @@
 #include "imgui_impl_opengl3.h"
 #include <memory>
 #include <filesystem>
+#include <algorithm>
+#include <cmath>
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
@@ -24,6 +26,7 @@
 #include <plog/Init.h>
 #include <plog/Appenders/ConsoleAppender.h>
 #include <plog/Formatters/TxtFormatter.h>
+#include <WorldMaps/World/World.hpp>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -259,6 +262,9 @@ int main(int argc, char** argv)
     createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
     strncpy(openVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(openVaultDirBuf));
     openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+
+    World world;
+    MercatorProjection mercatorProj;
 
     // Main loop
     while (!glfwWindowShouldClose(window))
@@ -1154,6 +1160,74 @@ int main(int argc, char** argv)
             RenderVaultChat(vault.get());
             ImGui::End();
         }
+
+        //Worldmap window
+        ImGui::Begin("World Map");
+        static int worldMapLayer = 0;
+        static std::string layerNames[] = { "elevation", "temperature", "humidity" };
+        ImGui::Combo("layer", &worldMapLayer, "elevation\0temperature\0humidity\0");
+
+        // Map control state
+        static float mapCenterLon = 0.0f;
+        static float mapCenterLat = 0.0f;
+        static float mapZoom = 1.0f;
+        static int lastLayer = -1;
+        static GLuint worldMapTexture = 0;
+        static float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
+        const int texWidth = 512, texHeight = 512;
+
+        // Controls
+        ImGui::Text("Controls: Drag to pan, mouse wheel to zoom");
+        ImGui::InputFloat("Lon", &mapCenterLon, 0.0f, 0.0f, "%.3f"); ImGui::SameLine();
+        ImGui::InputFloat("Lat", &mapCenterLat, 0.0f, 0.0f, "%.3f");
+        ImGui::SliderFloat("Zoom", &mapZoom, 0.1f, 32.0f, "x%.2f");
+        if(ImGui::Button("Reset")) { mapCenterLon = 0.0f; mapCenterLat = 0.0f; mapZoom = 1.0f; }
+
+        // Image and interactions
+        ImGui::Text(" "); // spacer
+        ImVec2 imgSize((float)texWidth, (float)texHeight);
+        ImGui::Text(" ");
+        ImGui::BeginGroup();
+        ImGui::Text("Map Preview:");
+        ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture ? worldMapTexture : 0), imgSize, ImVec2(0,0), ImVec2(1,1));
+
+        ImGuiIO& io = ImGui::GetIO();
+        if(ImGui::IsItemHovered()){
+            // Mouse wheel zoom
+            if(io.MouseWheel != 0.0f){
+                float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f/1.1f);
+                mapZoom = std::clamp(mapZoom * factor, 0.1f, 128.0f);
+            }
+            // Panning with left mouse drag
+            if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
+                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                float dx = drag.x;
+                float dy = drag.y;
+                // Approximate mapping: horizontal -> longitude, vertical -> latitude
+                float deltaLon = -dx / (float)texWidth * 360.0f / mapZoom;
+                float deltaLat = dy / (float)texHeight * 180.0f / mapZoom;
+                mapCenterLon += deltaLon;
+                mapCenterLat += deltaLat;
+                // normalize longitude
+                if(mapCenterLon > 180.0f) mapCenterLon -= 360.0f;
+                if(mapCenterLon < -180.0f) mapCenterLon += 360.0f;
+                mapCenterLat = std::clamp(mapCenterLat, -85.0f, 85.0f);
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            }
+        }
+
+        // Rebuild texture only when parameters or layer change
+        const float eps = 1e-5f;
+        bool needRebuild = (std::abs(mapCenterLon - lastCenterLon) > eps) || (std::abs(mapCenterLat - lastCenterLat) > eps) || (std::abs(mapZoom - lastZoom) > eps) || (worldMapLayer != lastLayer);
+        if(needRebuild){
+            GLuint newTex = mercatorProj.project(world, mapCenterLon, mapCenterLat, mapZoom, texWidth, texHeight, layerNames[worldMapLayer]);
+            if(worldMapTexture != 0 && worldMapTexture != newTex){ glDeleteTextures(1, &worldMapTexture); }
+            worldMapTexture = newTex;
+            lastCenterLon = mapCenterLon; lastCenterLat = mapCenterLat; lastZoom = mapZoom; lastLayer = worldMapLayer;
+        }
+
+        ImGui::EndGroup();
+        ImGui::End();
 
         // Rendering
         ImGui::Render();
