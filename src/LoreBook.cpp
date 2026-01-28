@@ -1298,6 +1298,7 @@ int main(int argc, char** argv)
         ImVec2 imgSize((float)texWidth, (float)texHeight);
         ImGui::Text(" ");
         ImGui::BeginGroup();
+        ImGui::BeginGroup();
         ImGui::Text("Map Preview:");
 
         //save current cursor position
@@ -1357,14 +1358,19 @@ int main(int argc, char** argv)
 
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
         }
-
+        ImGui::EndGroup();
+        ImGui::SameLine();
         // --- Globe Preview (screen-space spherical sampling) ---
+        ImGui::BeginGroup();
         ImGui::Separator();
         ImGui::Text("Globe Preview:");
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        int glW = std::max(128, std::min(2048, static_cast<int>(avail.x)));
-        int glH = std::max(128, std::min(2048, static_cast<int>(avail.y)));
-        ImVec2 globeSize((float)glW, (float)glH);
+        // Make the globe viewport square: use the smaller of available width/height
+        int maxDim = static_cast<int>(std::min(avail.x, avail.y));
+        int glSide = std::max(128, std::min(2048, maxDim));
+        int glW = glSide;
+        int glH = glSide;
+        ImVec2 globeSize((float)glSide, (float)glSide);
 
         // Save cursor for overlay
         ImVec2 globeCursor = ImGui::GetCursorPos();
@@ -1398,6 +1404,7 @@ int main(int argc, char** argv)
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
         }
 
+        ImGui::EndGroup();
         ImGui::EndGroup();
         ImGui::End();
 
