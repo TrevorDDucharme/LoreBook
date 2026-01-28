@@ -1,4 +1,5 @@
 #include "ModelViewer.hpp"
+#include "ModelLoader.hpp"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -190,6 +191,8 @@ struct ModelViewer::Impl {
     std::atomic<bool> uploading{false};
     std::shared_ptr<ParsedModel> pendingParsedModel;
     std::mutex parsedMutex;
+    // Snapshot of last parsed mesh (vertices in model-space after applying modelMat)
+    std::shared_ptr<ExportedMesh> exportedMesh;
     std::atomic<bool> parseFailed{false};
     std::string parseFailMessage;
 
@@ -397,6 +400,29 @@ struct ModelViewer::Impl {
 ModelViewer::ModelViewer(){ impl = new Impl(); }
 ModelViewer::~ModelViewer(){ delete impl; }
 
+std::shared_ptr<ModelViewer::ExportedMesh> ModelViewer::getExportedMesh() const {
+    if(!impl) return nullptr;
+    std::lock_guard<std::mutex> l(impl->parsedMutex);
+    return impl->exportedMesh;
+}
+
+bool ModelViewer::getParsedModel(ModelLoader::ParsedModel& out) const {
+    if(!impl) return false;
+    std::lock_guard<std::mutex> l(impl->parsedMutex);
+    if(impl->exportedMesh){
+        out.vbuf.clear(); out.ibuf.clear();
+        out.ibuf = impl->exportedMesh->indices;
+        out.vbuf.reserve(impl->exportedMesh->vertices.size()*3);
+        for(const auto &v : impl->exportedMesh->vertices){ out.vbuf.push_back(v.x); out.vbuf.push_back(v.y); out.vbuf.push_back(v.z); }
+        out.modelMat = impl->modelMat;
+        out.boundRadius = impl->exportedMesh->boundRadius;
+        out.stride = 3;
+        out.name = impl->name;
+        return true;
+    }
+    return false;
+}
+
 // Very basic Assimp loader: flatten all meshes into single VBO/IBO (positions,normals,uv)
 void ModelViewer::setTextureLoader(TextureLoader loader){ if(impl) impl->textureLoader = loader; }
 
@@ -538,7 +564,20 @@ bool ModelViewer::loadFromMemory(const std::vector<uint8_t>& data, const std::st
     impl->modelMat = parsed.modelMat;
     impl->distance = parsed.boundRadius * 2.5f;
     impl->yaw = 0.0f; impl->pitch = 0.0f; impl->panX = impl->panY = 0.0f;
-    impl->hasModel = true; impl->name = name; impl->color = parsed.color; impl->lastLoadFailed = false; PLOGI << "mv:loaded name='" << name << "' indexCount=" << impl->indexCount << " radius=" << impl->distance;
+    impl->hasModel = true; impl->name = name; impl->color = parsed.color; impl->lastLoadFailed = false;
+
+    // Build exported CPU mesh snapshot using shared ModelLoader helper
+    try{
+        auto em = std::make_shared<ModelViewer::ExportedMesh>();
+        auto tmp = ModelLoader::exportFromVBuf(parsed.vbuf, parsed.ibuf, parsed.modelMat, 12);
+        em->vertices = std::move(tmp.vertices);
+        em->indices = std::move(tmp.indices);
+        em->boundRadius = tmp.boundRadius;
+        std::lock_guard<std::mutex> l(impl->parsedMutex);
+        impl->exportedMesh = em;
+    }catch(...){ PLOGW << "mv:failed to create exported mesh snapshot"; }
+
+    PLOGI << "mv:loaded name='" << name << "' indexCount=" << impl->indexCount << " radius=" << impl->distance;
     return true;
 }
 
@@ -639,6 +678,18 @@ void ModelViewer::processPendingUploads(){
         impl->distance = ready->boundRadius * 2.5f;
         impl->yaw = 0.0f; impl->pitch = 0.0f; impl->panX = impl->panY = 0.0f;
         impl->hasModel = true; impl->name = ready->name; impl->color = ready->color; impl->uploading = false; impl->parsing = false; impl->lastLoadFailed = false;
+
+        // Build exported CPU mesh snapshot (thread-safe) using ModelLoader helper
+        try{
+            auto em = std::make_shared<ModelViewer::ExportedMesh>();
+            auto tmp = ModelLoader::exportFromVBuf(ready->vbuf, ready->ibuf, ready->modelMat, 12);
+            em->vertices = std::move(tmp.vertices);
+            em->indices = std::move(tmp.indices);
+            em->boundRadius = tmp.boundRadius;
+            std::lock_guard<std::mutex> l(impl->parsedMutex);
+            impl->exportedMesh = em;
+        }catch(...){ PLOGW << "mv:failed to create exported mesh snapshot (async)"; }
+
         PLOGI << "mv:async upload complete name='" << impl->name << "' indexCount=" << impl->indexCount << " radius=" << ready->boundRadius;
 
     } else {

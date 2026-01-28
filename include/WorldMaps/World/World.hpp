@@ -9,6 +9,7 @@
 #include <WorldMaps/Map/WaterLayer.hpp>
 #include <WorldMaps/Map/BiomeLayer.hpp>
 #include <WorldMaps/Map/RiverLayer.hpp>
+#include <WorldMaps/Map/ModelElevationLayer.hpp>
 #include <WorldMaps/World/Projection.hpp>
 //#include <WorldMaps/World/Chunk.hpp>
 
@@ -16,7 +17,9 @@ class World{
 public:
     World(){
         //initialize with default layers
-        addLayer("elevation", std::make_unique<ElevationLayer>());
+        //addLayer("elevation", std::make_unique<ElevationLayer>());
+        // additional model-backed elevation
+        addLayer("elevation_model", std::make_unique<ModelElevationLayer>());
         addLayer("humidity", std::make_unique<HumidityLayer>());
         addLayer("temperature", std::make_unique<TemperatureLayer>());
         addLayer("color", std::make_unique<ColorLayer>());

@@ -1170,8 +1170,8 @@ int main(int argc, char** argv)
         //Worldmap window
         ImGui::Begin("World Map");
         static int worldMapLayer = 0;
-        static std::string layerNames[] = { "color","elevation", "temperature", "humidity", "water", "biome", "river" };
-        ImGui::Combo("layer", &worldMapLayer, "color\0elevation\0temperature\0humidity\0water\0biome\0river\0");
+        static std::string layerNames[] = { "color","elevation","elevation_model", "temperature", "humidity", "water", "biome", "river" };
+        ImGui::Combo("layer", &worldMapLayer, "color\0elevation\0elevation_model\0temperature\0humidity\0water\0biome\0river\0");
 
         // Map control state
         static float mapCenterLon = 0.0f;
@@ -1266,6 +1266,30 @@ int main(int argc, char** argv)
                 int s = (int)std::chrono::high_resolution_clock::now().time_since_epoch().count();
                 selectedLayer->reseed(s);
                 lastLayer = -1;
+            }
+
+            // If this is the model-backed elevation layer, expose a simple path loader
+            if(selectedLayerName == "elevation_model"){
+                static char modelPathBuf[1024] = "";
+                ImGui::InputText("Model Path", modelPathBuf, sizeof(modelPathBuf)); ImGui::SameLine();
+                if(ImGui::Button("Load Model")){
+                    ModelElevationLayer* mel = dynamic_cast<ModelElevationLayer*>(selectedLayer);
+                    if(mel){
+                        bool ok = mel->loadFromFile(std::string(modelPathBuf));
+                        if(ok) lastLayer = -1;
+                    }
+                }
+                ImGui::SameLine();
+                if(ImGui::Button("Use ModelViewer")){
+                    ModelElevationLayer* mel = dynamic_cast<ModelElevationLayer*>(selectedLayer);
+                    if(mel){
+                        if(vault){
+                            auto em = vault->getModelViewerExportedMesh();
+                            if(em){ bool ok = mel->loadFromExportedMesh(em->vertices, em->indices, em->boundRadius); if(ok) lastLayer = -1; }
+                            else { PLOGW << "No exported mesh available from ModelViewer"; }
+                        }
+                    }
+                }
             }
         }
 

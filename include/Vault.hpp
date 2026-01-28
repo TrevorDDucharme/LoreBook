@@ -300,6 +300,9 @@ public:
     // Get or create an inline ModelViewer for a markdown src (vault://..., http(s) or file://). The returned viewer may not be loaded yet.
     ModelViewer* getOrCreateModelViewerForSrc(const std::string& src);
 
+    // Return exported mesh snapshot from the inline ModelViewer (if any). Thread-safe helper.
+    std::shared_ptr<ModelViewer::ExportedMesh> getModelViewerExportedMesh() const { return modelViewer ? modelViewer->getExportedMesh() : nullptr; }
+
     // Enqueue a callable to be executed on the main/UI thread. Used to schedule GL uploads and other main-thread-only operations
     void enqueueMainThreadTask(std::function<void()> fn){ std::lock_guard<std::mutex> l(pendingTasksMutex); pendingMainThreadTasks.push_back(std::move(fn)); }
 

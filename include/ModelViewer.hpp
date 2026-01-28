@@ -2,8 +2,10 @@
 
 #include <string>
 #include <vector>
+#include <memory>
 #include <glm/glm.hpp>
 #include <imgui.h>
+#include "ModelLoader.hpp"
 
 struct ModelViewer {
     using TextureLoader = std::function<std::vector<uint8_t>(const std::string& path)>;
@@ -42,6 +44,20 @@ struct ModelViewer {
 
     // Clear loaded model
     void clear();
+
+    // Exported mesh data (CPU-side) for reuse by other subsystems (lock-protected snapshot)
+    struct ExportedMesh {
+        std::vector<glm::vec3> vertices; // model-space positions (already centered/scaled by modelMat)
+        std::vector<unsigned int> indices; // triangles (triplets)
+        float boundRadius = 1.0f; // radius after modelMat transform
+    };
+
+    // Return a snapshot of the last parsed mesh (may be null if no mesh parsed yet). Thread-safe.
+    std::shared_ptr<ExportedMesh> getExportedMesh() const;
+
+    // Access the last parsed geometry buffers (if available). Thread-safe.
+    // Returns true and fills outputs if a parsed model exists (async parsing stage or immediately after parse).
+    bool getParsedModel(ModelLoader::ParsedModel& out) const;
 
 private:
     struct Impl;
