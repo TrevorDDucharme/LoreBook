@@ -85,6 +85,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Boost::beast)
 find_package(CLI11 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE CLI11::CLI11)
 
+# find_package(OpenCL CONFIG REQUIRED)
+# target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
+
+#compile tim arg -lOpenCL
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lOpenCL")
+# Make sure the app can find the POCL runtime
+target_link_options(${PROJECT_NAME} PRIVATE "-Wl,-rpath,/usr/local/lib64")
+
+
+find_package(unofficial-whereami CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::whereami::whereami)
+
 #ffmpeg
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
