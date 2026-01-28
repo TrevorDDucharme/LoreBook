@@ -5,7 +5,7 @@
 
 SampleData ColorLayer::sample(const World& world, float longitude, float latitude) const {
     SampleData data;
-    auto e = world.sample(longitude, latitude, "elevation_model");
+    auto e = world.sample(longitude, latitude, "elevation");
     auto h = world.sample(longitude, latitude, "humidity");
     auto t = world.sample(longitude, latitude, "temperature");
     data.channels.push_back(!e.channels.empty() ? e.channels[0] : 0.0f);
@@ -16,7 +16,7 @@ SampleData ColorLayer::sample(const World& world, float longitude, float latitud
 
 std::array<uint8_t,4> ColorLayer::getColor(const World& world, float longitude, float latitude) const {
     float elevation = 0.0f, humidity = 0.0f, temperature = 0.0f;
-    auto e = world.sample(longitude, latitude, "elevation_model"); if(!e.channels.empty()) elevation = e.channels[0];
+    auto e = world.sample(longitude, latitude, "elevation"); if(!e.channels.empty()) elevation = e.channels[0];
     auto h = world.sample(longitude, latitude, "humidity"); if(!h.channels.empty()) humidity = h.channels[0];
     auto t = world.sample(longitude, latitude, "temperature"); if(!t.channels.empty()) temperature = t.channels[0];
 

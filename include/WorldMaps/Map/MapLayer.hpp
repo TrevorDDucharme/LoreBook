@@ -35,6 +35,42 @@ public:
     // Optional: expose current parameter values for UI inspection
     virtual std::map<std::string, float> getParameters() const { return {}; }
 
+    static std::array<uint8_t, 4> rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        return {r, g, b, a};
+    }
+
+    static std::array<uint8_t, 4> hsva(float h, float s, float v, float a) {
+        float r, g, b;
+
+        int i = static_cast<int>(h * 6.0f);
+        float f = h * 6.0f - i;
+        float p = v * (1.0f - s);
+        float q = v * (1.0f - f * s);
+        float t = v * (1.0f - (1.0f - f) * s);
+
+        switch (i % 6) {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            case 5: r = v; g = p; b = q; break;
+            default: r = g = b = 0.0f; break; // should not happen
+        }
+
+        return {static_cast<uint8_t>(r * 255.0f), static_cast<uint8_t>(g * 255.0f),
+                static_cast<uint8_t>(b * 255.0f), static_cast<uint8_t>(a * 255.0f)};
+    }
+
+    static std::array<uint8_t, 4> rgb(float r, float g, float b) {
+        return {static_cast<uint8_t>(r * 255.0f), static_cast<uint8_t>(g * 255.0f),
+                static_cast<uint8_t>(b * 255.0f), 255};
+    }
+
+    static std::array<uint8_t, 4> hsv(float h, float s, float v) {
+        return hsva(h, s, v, 1.0f);
+    }
+
     static std::array<uint8_t, 4> colorRamp(float value, const std::vector<std::array<uint8_t,4>>& colors) {
         if(colors.empty()) return {0,0,0,255};
         if(value <= 0.0f) return colors.front();

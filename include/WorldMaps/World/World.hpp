@@ -17,7 +17,7 @@ class World{
 public:
     World(){
         //initialize with default layers
-        //addLayer("elevation", std::make_unique<ElevationLayer>());
+        addLayer("elevation", std::make_unique<ElevationLayer>());
         // additional model-backed elevation
         addLayer("elevation_model", std::make_unique<ModelElevationLayer>());
         addLayer("humidity", std::make_unique<HumidityLayer>());
