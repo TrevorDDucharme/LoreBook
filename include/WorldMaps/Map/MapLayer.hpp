@@ -16,7 +16,7 @@ inline std::shared_mutex g_layerMutationMutex;
 
 struct SampleData
 {
-    std::vector<float> channels;
+    std::vector<cl_mem> channels;
 };
 
 class World;
@@ -27,22 +27,8 @@ public:
     MapLayer() = default;
     virtual ~MapLayer() = default;
     // Layers can sample themselves given access to the full World so they can query other layers
-    virtual SampleData sample(const World &world, float longitude, float latitude) const = 0;
-    virtual std::array<uint8_t, 4> getColor(const World &world, float longitude, float latitude) const = 0;
-
-    // Allow layers to be reseeded. Default does nothing.
-    virtual void reseed(int seed) {}
-
-    // Optional: allow runtime tuning via name/value pairs (e.g., water level)
-    virtual bool setParameter(const std::string &name, float value)
-    {
-        (void)name;
-        (void)value;
-        return false;
-    }
-
-    // Optional: expose current parameter values for UI inspection
-    virtual std::map<std::string, float> getParameters() const { return {}; }
+    virtual SampleData sample(const World &world)= 0;
+    virtual cl_mem getColor(const World &world) = 0;
 
     static std::array<uint8_t, 4> rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {

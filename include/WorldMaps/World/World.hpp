@@ -9,8 +9,6 @@
 #include <WorldMaps/Map/WaterLayer.hpp>
 #include <WorldMaps/Map/BiomeLayer.hpp>
 #include <WorldMaps/Map/RiverLayer.hpp>
-#include <WorldMaps/Map/ModelElevationLayer.hpp>
-#include <WorldMaps/World/Projection.hpp>
 //#include <WorldMaps/World/Chunk.hpp>
 
 class World{
@@ -18,47 +16,40 @@ public:
     World(){
         //initialize with default layers
         addLayer("elevation", std::make_unique<ElevationLayer>());
-        // additional model-backed elevation
-        addLayer("elevation_model", std::make_unique<ModelElevationLayer>());
         addLayer("humidity", std::make_unique<HumidityLayer>());
         addLayer("temperature", std::make_unique<TemperatureLayer>());
         addLayer("color", std::make_unique<ColorLayer>());
+        addLayer("biome", std::make_unique<BiomeLayer>());
     }
     ~World() = default;
-    SampleData sample(float longitude, float latitude, const std::string& layerName="") const{
+    SampleData sample(const std::string& layerName="") const{
         auto it = layers.find(layerName);
         if(it != layers.end()){
-            return it->second->sample(*this, longitude, latitude);
+            return it->second->sample(*this);
         }
         //if map layer not found and we have at least one layer, use the first one
         if(!layers.empty()){
-            return layers.begin()->second->sample(*this, longitude, latitude);
+            return layers.begin()->second->sample(*this);
         }
         else{
             return SampleData{}; //empty sample data
         }
     }
-    std::array<uint8_t, 4> getColor(float longitude, float latitude, const std::string& layerName="") const{
+    cl_mem getColor(const std::string& layerName="") const{
         auto it = layers.find(layerName);
         if(it != layers.end()){
-            return it->second->getColor(*this, longitude, latitude);
+            return it->second->getColor(*this);
         }
         //if map layer not found and we have at least one layer, use the first one
         if(!layers.empty()){
-            return layers.begin()->second->getColor(*this, longitude, latitude);
+            return layers.begin()->second->getColor(*this);
         }
         else{
-            return {0,0,0,255}; //default to black
+            return nullptr; //empty color
         }
     }
     void addLayer(const std::string& name, std::unique_ptr<MapLayer> layer){
         layers[name] = std::move(layer);
-    }
-
-    // Reseed all layers with a new seed
-    void reseed(int seed){
-        std::unique_lock<std::shared_mutex> lg(g_layerMutationMutex);
-        for(auto &p : layers) p.second->reseed(seed);
     }
 
     // Access raw layer pointer for runtime tweaks (returns nullptr if not found)

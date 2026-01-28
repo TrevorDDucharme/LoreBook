@@ -31,6 +31,8 @@
 #include <plog/Appenders/ConsoleAppender.h>
 #include <plog/Formatters/TxtFormatter.h>
 #include <WorldMaps/World/World.hpp>
+#include <WorldMaps/World/Projections/MercatorProjection.hpp>
+#include <WorldMaps/World/Projections/SphereProjection.hpp>
 #include <future>
 
 static void glfw_error_callback(int error, const char* description)
@@ -1417,65 +1419,12 @@ int main(int argc, char** argv)
         // ImGui::EndGroup();
         // ImGui::EndGroup();
 
-        cl_mem noiseBuffer = nullptr;
-        try {
-            noiseBuffer = perlin(256, 256, 256, 4.0f, 8.0f, 0.5f, 2.0f, 12345u);
-        } catch(const std::exception &ex) {
-            PLOGE << "perlin() failed: " << ex.what();
-        }
-
-        cl_mem sphereBuffer = nullptr;
-        if (noiseBuffer) {
-            try {
-                sphereBuffer = spherePerspectiveSample(
-                    noiseBuffer,
-                    256, 256, 256,
-                    512, 512,
-                    0.0f, 0.0f, 3.0f,
-                    0.0f, 0.0f, -1.0f,
-                    1.0f, 0.0f, 0.0f,
-                    0.0f, 1.0f, 0.0f,
-                    static_cast<float>(M_PI)/4.0f,
-                    0.0f, 0.0f, 0.0f,
-                    1.0f
-                );
-            } catch(const std::exception &ex) {
-                PLOGE << "spherePerspectiveSample() failed: " << ex.what();
-            }
-        } else {
-            PLOGE << "noiseBuffer is null; skipping spherePerspectiveSample";
-        }
-        ImGui::Text("Perlin Noise Sphere:");
         static GLuint noiseTex = 0;
-        if(noiseTex == 0){
-            glGenTextures(1, &noiseTex);
-            glBindTexture(GL_TEXTURE_2D, noiseTex);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, 512, 512, 0, GL_RED, GL_FLOAT, nullptr);
-        }
-        // sphereBuffer is a 512x512 single channel float buffer
-        glBindTexture(GL_TEXTURE_2D, noiseTex);
-        // Download data from sphereBuffer to a host buffer and upload to the GL texture
-        if(sphereBuffer){
-            cl_int err = CL_SUCCESS;
-            size_t bufSize = 512 * 512 * sizeof(float);
-            std::vector<float> hostBuf(512 * 512);
-            err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), sphereBuffer, CL_TRUE, 0, bufSize, hostBuf.data(), 0, nullptr, nullptr);
-            if(err != CL_SUCCESS){
-                PLOGE << "clEnqueueReadBuffer failed: " << err;
-            } else {
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 512, 512, GL_RED, GL_FLOAT, hostBuf.data());
-            }
-        } else {
-            PLOGE << "sphereBuffer is null";
-        }
-
+        // Biome layer is RGBA; request 4 channels so projection yields an RGBA texture
+        noiseTex = sphereProj.project(world, 512, 512, 4, "biome", noiseTex);
+       
+        ImGui::Text("Perlin Noise Sphere:");
         ImGui::Image((ImTextureID)(intptr_t)(noiseTex), ImVec2(512,512), ImVec2(0,0), ImVec2(1,1));
-        if(noiseBuffer){ clReleaseMemObject(noiseBuffer); noiseBuffer = nullptr; }
-        if(sphereBuffer){ clReleaseMemObject(sphereBuffer); sphereBuffer = nullptr; }
         ImGui::End();
 
         // Rendering
