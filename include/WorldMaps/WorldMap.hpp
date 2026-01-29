@@ -415,6 +415,10 @@ static void worldMap()
     if (ImGui::Begin("World Map"))
     {
         static World world;
+        static ElevationLayer elevationLayer;
+        world.addLayer("elevation", std::make_unique<ElevationLayer>());
+        world.addLayer("biome", std::make_unique<BiomeLayer>());
+
         static ImVec2 texSize(512, 512);
         mercatorMap("Mercator World Map", texSize, world);
         ImGui::SameLine();

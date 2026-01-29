@@ -2,8 +2,7 @@ __kernel void scalar_to_rgba_float4(__global const float* scalar,
                                          int W, int H, int D,
                                          int colorCount,
                                          __global const float4* palette,
-                                         __global float4* outRGBA,
-                                         __global int* debugBuf){
+                                         __global float4* outRGBA){
     int x = get_global_id(0);
     int y = get_global_id(1);
     int z = get_global_id(2);
@@ -27,18 +26,5 @@ __kernel void scalar_to_rgba_float4(__global const float* scalar,
     float3 outRgb = col.xyz * srcA + dst.xyz * (1.0f - srcA);
     float outA = srcA + dst.w * (1.0f - srcA);
     outRGBA[idx] = (float4)(outRgb.x, outRgb.y, outRgb.z, outA);
-
-    int centerX = W / 2;
-    int centerY = H / 2;
-    int centerZ = D / 2;
-    if (debugBuf != 0 && x == centerX && y == centerY && z == centerZ) {
-        debugBuf[0] = x;
-        debugBuf[1] = y;
-        debugBuf[2] = z;
-        debugBuf[3] = as_int(val);
-        debugBuf[4] = 1;
-        debugBuf[5] = i0;
-        debugBuf[6] = (int)(srcA * 255.0f);
-    }
 }
 

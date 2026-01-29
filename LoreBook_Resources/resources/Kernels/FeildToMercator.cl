@@ -11,8 +11,7 @@ __kernel void field3d_to_mercator_rgba(
     float radius,
     float centerLon,
     float centerMercY,
-    float zoom,
-    __global int* debugBuf
+    float zoom
 )
 {
     int u = get_global_id(0);
@@ -59,11 +58,4 @@ __kernel void field3d_to_mercator_rgba(
 
     int centerU = outW / 2;
     int centerV = outH / 2;
-    if (debugBuf != 0 && u == centerU && v == centerV) {
-        debugBuf[0] = ix;
-        debugBuf[1] = iy;
-        debugBuf[2] = iz;
-        debugBuf[3] = as_int(field3d[idx3d].x);
-        debugBuf[4] = 1;
-    }
 }

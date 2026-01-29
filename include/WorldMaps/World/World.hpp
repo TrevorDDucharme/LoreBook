@@ -50,8 +50,6 @@ public:
     }
     cl_mem getColor(const std::string &layerName = "") const
     {
-        // NOTE: Caller is responsible for releasing returned buffer via OpenCLContext::get().releaseMem()
-
         auto it = layers.find(layerName);
         if (it != layers.end())
         {

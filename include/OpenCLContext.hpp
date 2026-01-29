@@ -95,8 +95,9 @@ private:
 
 // perlin noise opencl (C API)
 static cl_program gPerlinProgram = nullptr;
+static cl_kernel gPerlinKernel = nullptr;
 
-static cl_mem perlin(int width,
+static void perlin(cl_mem& output,int width,
                      int height,
                      int depth,
                      float frequency,
@@ -106,7 +107,7 @@ static cl_mem perlin(int width,
                      unsigned int seed)
 {
     if (!OpenCLContext::get().isReady())
-        return nullptr;
+        return;
 
     cl_context ctx = OpenCLContext::get().getContext();
     cl_device_id device = OpenCLContext::get().getDevice();
@@ -135,102 +136,59 @@ static cl_mem perlin(int width,
         }
     }
 
-    cl_kernel kernel = clCreateKernel(gPerlinProgram, "perlin_fbm_3d", &err);
-    if (err != CL_SUCCESS)
-        throw std::runtime_error("clCreateKernel failed for perlin_fbm_3d");
+    if(gPerlinKernel == nullptr){
+        gPerlinKernel = clCreateKernel(gPerlinProgram, "perlin_fbm_3d", &err);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clCreateKernel failed for perlin_fbm_3d");
+    }
 
     size_t total = (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
-    cl_mem output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
-    if (err != CL_SUCCESS || output == nullptr)
-    {
-        clReleaseKernel(kernel);
-        throw std::runtime_error("clCreateBuffer failed for perlin output");
+    size_t buffer_size;
+    if(output != nullptr){
+        cl_int err = clGetMemObjectInfo(output,
+                                        CL_MEM_SIZE,
+                                        sizeof(buffer_size),
+                                        &buffer_size,
+                                        NULL);
+        if (err != CL_SUCCESS) {
+            throw std::runtime_error("clGetMemObjectInfo failed for perlin output buffer size");
+        }
+        if(buffer_size < total){
+            OpenCLContext::get().releaseMem(output);
+            output = nullptr;
+        }
     }
+
+    if(output == nullptr){
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
+        if (err != CL_SUCCESS || output == nullptr)
+        {
+            throw std::runtime_error("clCreateBuffer failed for perlin output");
+        }
+    }   
     // diagnostics: log memory usage after allocating perlin output buffer
     OpenCLContext::get().logMemoryUsage();
 
-    clSetKernelArg(kernel, 0, sizeof(cl_mem), &output);
-    clSetKernelArg(kernel, 1, sizeof(int), &width);
-    clSetKernelArg(kernel, 2, sizeof(int), &height);
-    clSetKernelArg(kernel, 3, sizeof(int), &depth);
-    clSetKernelArg(kernel, 4, sizeof(float), &frequency);
-    clSetKernelArg(kernel, 5, sizeof(float), &lacunarity);
-    clSetKernelArg(kernel, 6, sizeof(int), &octaves);
-    clSetKernelArg(kernel, 7, sizeof(float), &persistence);
-    clSetKernelArg(kernel, 8, sizeof(unsigned int), &seed);
-
-    // Debug buffer: use persistent 8-int buffer (center voxel info)
-    cl_mem debugBuf = OpenCLContext::get().ensureDebugBuffer();
-    int zeros_dbg[8] = {0,0,0,0,0,0,0,0};
-    err = clEnqueueWriteBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(zeros_dbg), zeros_dbg, 0, nullptr, nullptr);
-    if (err != CL_SUCCESS)
-    {
-        clReleaseKernel(kernel);
-        OpenCLContext::get().releaseMem(output);
-        throw std::runtime_error("clEnqueueWriteBuffer failed for perlin debugBuf");
-    }
-    clSetKernelArg(kernel, 9, sizeof(cl_mem), &debugBuf);
+    clSetKernelArg(gPerlinKernel, 0, sizeof(cl_mem), &output);
+    clSetKernelArg(gPerlinKernel, 1, sizeof(int), &width);
+    clSetKernelArg(gPerlinKernel, 2, sizeof(int), &height);
+    clSetKernelArg(gPerlinKernel, 3, sizeof(int), &depth);
+    clSetKernelArg(gPerlinKernel, 4, sizeof(float), &frequency);
+    clSetKernelArg(gPerlinKernel, 5, sizeof(float), &lacunarity);
+    clSetKernelArg(gPerlinKernel, 6, sizeof(int), &octaves);
+    clSetKernelArg(gPerlinKernel, 7, sizeof(float), &persistence);
+    clSetKernelArg(gPerlinKernel, 8, sizeof(unsigned int), &seed);
 
     size_t global[3] = {(size_t)width, (size_t)height, (size_t)depth};
-    err = clEnqueueNDRangeKernel(queue, kernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+    err = clEnqueueNDRangeKernel(queue, gPerlinKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
     clFinish(queue);
-
-    // Read back debug info and log it
-    int dbg[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    err = clEnqueueReadBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(dbg), dbg, 0, nullptr, nullptr);
-    if (err == CL_SUCCESS)
-    {
-        // dbg[0,1,2] = x,y,z; dbg[3] = float bits of the value; dbg[4] = written flag
-        if (dbg[4] == 1)
-        {
-            float fval = 0.0f;
-            memcpy(&fval, &dbg[3], sizeof(fval));
-            fprintf(stderr, "[OpenCL Debug] perlin voxel (%d,%d,%d) value = %f\n", dbg[0], dbg[1], dbg[2], fval);
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] perlin debugBuf not written (flag=0)\n");
-        }
-
-        // Also sample first few output values to check whether the buffer contains data (helpful when debug flag not written)
-        float sample[8] = {0};
-        err = clEnqueueReadBuffer(queue, output, CL_TRUE, 0, sizeof(sample), sample, 0, nullptr, nullptr);
-        if (err == CL_SUCCESS)
-        {
-            fprintf(stderr, "[OpenCL Debug] perlin output sample[0..7] = %f, %f, %f, %f, %f, %f, %f, %f\n",
-                    sample[0], sample[1], sample[2], sample[3], sample[4], sample[5], sample[6], sample[7]);
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] failed to read perlin output sample: %d\n", err);
-        }
-
-        // Sample the center voxel value for extra confidence
-        size_t centerIdx = ((size_t)width / 2) + ((size_t)height / 2) * (size_t)width + ((size_t)depth / 2) * (size_t)width * (size_t)height;
-        float centerVal = 0.0f;
-        err = clEnqueueReadBuffer(queue, output, CL_TRUE, centerIdx * sizeof(float), sizeof(centerVal), &centerVal, 0, nullptr, nullptr);
-        if (err == CL_SUCCESS)
-        {
-            fprintf(stderr, "[OpenCL Debug] perlin center voxel value = %f\n", centerVal);
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] failed to read perlin center voxel: %d\n", err);
-        }
-    }
-    else
-    {
-        fprintf(stderr, "[OpenCL Debug] failed to read perlin debugBuf: %d\n", err);
-    }
-
-    clReleaseKernel(kernel);
-
-    return output;
 }
 
 static cl_program gScalarToColorProgram = nullptr;
+static cl_kernel gScalarToColorKernel = nullptr;
 
-static cl_mem scalarToColor(cl_mem scalarBuffer,
+static void scalarToColor(cl_mem& output, 
+                            cl_mem scalarBuffer,
                             int fieldW,
                             int fieldH,
                             int fieldD,
@@ -238,7 +196,7 @@ static cl_mem scalarToColor(cl_mem scalarBuffer,
                             const std::vector<std::array<unsigned char, 4>> &paletteColors)
 {
     if (!OpenCLContext::get().isReady())
-        return nullptr;
+        return;
 
     cl_context ctx = OpenCLContext::get().getContext();
     cl_device_id device = OpenCLContext::get().getDevice();
@@ -266,10 +224,11 @@ static cl_mem scalarToColor(cl_mem scalarBuffer,
         }
     }
 
-    cl_kernel kernel = clCreateKernel(gScalarToColorProgram, "scalar_to_rgba_float4", &err);
-    if (err != CL_SUCCESS)
-        throw std::runtime_error("clCreateKernel failed for scalar_to_rgba_float4");
-
+    if (gScalarToColorKernel == nullptr){
+        gScalarToColorKernel = clCreateKernel(gScalarToColorProgram, "scalar_to_rgba_float4", &err);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clCreateKernel failed for scalar_to_rgba_float4");
+    }
     // create palette buffer
     std::vector<cl_float4> paletteFloats;
     paletteFloats.reserve((size_t)colorCount);
@@ -286,83 +245,174 @@ static cl_mem scalarToColor(cl_mem scalarBuffer,
     cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err);
     if (err != CL_SUCCESS || paletteBuf == nullptr)
     {
-        clReleaseKernel(kernel);
         throw std::runtime_error("clCreateBuffer failed for scalarToColor paletteBuf");
     }
 
     size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
     size_t outSize = voxels * sizeof(cl_float4);
-    cl_mem output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
-    if (err != CL_SUCCESS || output == nullptr)
-    {
-        clReleaseKernel(kernel);
-        OpenCLContext::get().releaseMem(paletteBuf);
-        throw std::runtime_error("clCreateBuffer failed for scalarToColor output");
+
+    if(output != nullptr){
+        cl_int err = clGetMemObjectInfo(output,
+                                        CL_MEM_SIZE,
+                                        sizeof(size_t),
+                                        &outSize,
+                                        NULL);
+        if (err != CL_SUCCESS) {
+            throw std::runtime_error("clGetMemObjectInfo failed for scalarToColor output buffer size");
+        }
+        if(outSize < voxels * sizeof(cl_float4)){
+            OpenCLContext::get().releaseMem(output);
+            output = nullptr;
+        }
+    }
+
+    if(output == nullptr){
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+        if (err != CL_SUCCESS || output == nullptr)
+        {
+            OpenCLContext::get().releaseMem(paletteBuf);
+            throw std::runtime_error("clCreateBuffer failed for scalarToColor output");
+        }
     }
 
     // diagnostics: log memory usage after allocating scalarToColor output buffer
     OpenCLContext::get().logMemoryUsage();
 
-    clSetKernelArg(kernel, 0, sizeof(cl_mem), &scalarBuffer);
-    clSetKernelArg(kernel, 1, sizeof(int), &fieldW);
-    clSetKernelArg(kernel, 2, sizeof(int), &fieldH);
-    clSetKernelArg(kernel, 3, sizeof(int), &fieldD);
-    clSetKernelArg(kernel, 4, sizeof(int), &colorCount);
-    clSetKernelArg(kernel, 5, sizeof(cl_mem), &paletteBuf);
-    clSetKernelArg(kernel, 6, sizeof(cl_mem), &output);
-
-    // Use persistent debug buffer
-    cl_mem debugBuf = OpenCLContext::get().ensureDebugBuffer();
-    int zeros_dbg[8] = {0,0,0,0,0,0,0,0};
-    err = clEnqueueWriteBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(zeros_dbg), zeros_dbg, 0, nullptr, nullptr);
-    if (err != CL_SUCCESS)
-    {
-        clReleaseKernel(kernel);
-        OpenCLContext::get().releaseMem(paletteBuf);
-        OpenCLContext::get().releaseMem(output);
-        throw std::runtime_error("clEnqueueWriteBuffer failed for scalarToColor debugBuf");
-    }
-    clSetKernelArg(kernel, 7, sizeof(cl_mem), &debugBuf);
+    clSetKernelArg(gScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
+    clSetKernelArg(gScalarToColorKernel, 1, sizeof(int), &fieldW);
+    clSetKernelArg(gScalarToColorKernel, 2, sizeof(int), &fieldH);
+    clSetKernelArg(gScalarToColorKernel, 3, sizeof(int), &fieldD);
+    clSetKernelArg(gScalarToColorKernel, 4, sizeof(int), &colorCount);
+    clSetKernelArg(gScalarToColorKernel, 5, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(gScalarToColorKernel, 6, sizeof(cl_mem), &output);
 
     size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
-    err = clEnqueueNDRangeKernel(queue, kernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+    err = clEnqueueNDRangeKernel(queue, gScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
     clFinish(queue);
 
-    // Read back debug info
-    int dbg[8] = {0,0,0,0,0,0,0,0};
-    err = clEnqueueReadBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(dbg), dbg, 0, nullptr, nullptr);
-    if (err == CL_SUCCESS)
-    {
-        if (dbg[4] == 1)
-        {
-            float fval = 0.0f;
-            memcpy(&fval, &dbg[3], sizeof(fval));
-            fprintf(stderr, "[OpenCL Debug] scalarToColor center (%d,%d,%d) val = %f colorIdx=%d extra=%d\n", dbg[0], dbg[1], dbg[2], fval, dbg[5], dbg[6]);
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] scalarToColor debugBuf not written (flag=0)\n");
-        }
-
-        // Sample first output float4 (if possible)
-        cl_float4 sample[1];
-        err = clEnqueueReadBuffer(queue, output, CL_TRUE, 0, sizeof(sample), sample, 0, nullptr, nullptr);
-        if (err == CL_SUCCESS)
-        {
-            fprintf(stderr, "[OpenCL Debug] scalarToColor output sample[0] = %f, %f, %f, %f\n",
-                    sample[0].s[0], sample[0].s[1], sample[0].s[2], sample[0].s[3]);
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] failed to read scalarToColor output sample: %d\n", err);
-        }
-    }
-    else
-    {
-        fprintf(stderr, "[OpenCL Debug] failed to read scalarToColor debugBuf: %d\n", err);
-    }
-
     OpenCLContext::get().releaseMem(paletteBuf);
-    clReleaseKernel(kernel);
-    return output;
+}
+
+static cl_program gConcatVolumesProgram = nullptr;
+static cl_kernel gConcatVolumesKernel = nullptr;
+
+static void concatVolumes(cl_mem& output,
+                std::vector<cl_mem> &inputVolumes,
+                int fieldW,
+                int fieldH,
+                int fieldD)
+{
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+    if (gConcatVolumesProgram == nullptr)
+    {
+        std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/ConcatVolumes.cl");
+        const char *src = kernel_code.c_str();
+        size_t len = kernel_code.length();
+        gConcatVolumesProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
+        if (err != CL_SUCCESS || gConcatVolumesProgram == nullptr)
+            throw std::runtime_error("clCreateProgramWithSource failed");
+
+        err = clBuildProgram(gConcatVolumesProgram, 1, &device, nullptr, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            size_t log_size = 0;
+            clGetProgramBuildInfo(gConcatVolumesProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+            std::string log;
+            log.resize(log_size);
+            clGetProgramBuildInfo(gConcatVolumesProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
+            throw std::runtime_error(std::string("Failed to build OpenCL program: ") + log);
+        }
+    }
+
+    if (gConcatVolumesKernel == nullptr)
+    {
+        gConcatVolumesKernel = clCreateKernel(gConcatVolumesProgram, "concatVolumesSVM", &err);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clCreateKernel failed for concatVolumesSVM");
+    }
+
+    int num_channels = static_cast<int>(inputVolumes.size());
+    int num_voxels = fieldW * fieldH * fieldD;
+    if (num_channels == 0 || num_voxels <= 0)
+        return;
+
+    size_t outSize = (size_t)num_channels * (size_t)num_voxels * sizeof(float);
+    if (output != nullptr)
+    {
+        size_t current_size = 0;
+        cl_int info_err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(size_t),
+                                            &current_size,
+                                            NULL);
+        if (info_err != CL_SUCCESS) {
+            throw std::runtime_error("clGetMemObjectInfo failed for concatVolumes output buffer size");
+        }
+        if (current_size < outSize) {
+            OpenCLContext::get().releaseMem(output);
+            output = nullptr;
+        }
+    }
+
+    if (output == nullptr)
+    {
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+        if (err != CL_SUCCESS || output == nullptr)
+        {
+            throw std::runtime_error("clCreateBuffer failed for concatVolumes output");
+        }
+    }
+
+    // Allocate an SVM buffer holding the cl_mem handles for each input volume
+    cl_device_svm_capabilities svmCaps = 0;
+    err = clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(svmCaps), &svmCaps, nullptr);
+    if (err != CL_SUCCESS) {
+        throw std::runtime_error("clGetDeviceInfo failed for SVM capabilities");
+    }
+
+    // Require fine-grain SVM so we can memcpy the handles directly and let the device read them
+    if (!(svmCaps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER))
+    {
+        throw std::runtime_error("Device does not support required SVM fine-grain buffers for concatVolumes");
+    }
+
+    cl_mem *svmVolumes = (cl_mem *)clSVMAlloc(ctx, CL_MEM_SVM_FINE_GRAIN_BUFFER, sizeof(cl_mem) * inputVolumes.size(), 0);
+    if (svmVolumes == nullptr)
+    {
+        throw std::runtime_error("clSVMAlloc failed for concatVolumes volumes SVM buffer");
+    }
+
+    // Copy the cl_mem handles into the SVM array
+    std::memcpy(svmVolumes, inputVolumes.data(), sizeof(cl_mem) * inputVolumes.size());
+
+    // Inform the runtime about the SVM pointer (required on some implementations)
+    err = clSetKernelExecInfo(gConcatVolumesKernel, CL_KERNEL_EXEC_INFO_SVM_PTRS, sizeof(void *), &svmVolumes);
+    if (err != CL_SUCCESS)
+    {
+        clSVMFree(ctx, svmVolumes);
+        throw std::runtime_error("clSetKernelExecInfo failed for SVM_PTRS");
+    }
+
+    // diagnostics: log memory usage after allocating concatVolumes SVM buffer
+    OpenCLContext::get().logMemoryUsage();
+
+    clSetKernelArg(gConcatVolumesKernel, 0, sizeof(cl_mem), &output);
+    // pass the SVM pointer as the second argument
+    clSetKernelArg(gConcatVolumesKernel, 1, sizeof(void *), &svmVolumes);
+    clSetKernelArg(gConcatVolumesKernel, 2, sizeof(int), &num_channels);
+    clSetKernelArg(gConcatVolumesKernel, 3, sizeof(int), &num_voxels);
+
+    size_t global = (size_t)num_voxels;
+    err = clEnqueueNDRangeKernel(queue, gConcatVolumesKernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr);
+    clFinish(queue);
+
+    // free SVM memory once kernel completed
+    clSVMFree(ctx, svmVolumes);
 }

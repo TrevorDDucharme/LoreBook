@@ -8,100 +8,25 @@ public:
 
     SampleData sample(const World&) override{
         SampleData data;
+        biomeMasks.resize(biomeCount);
         for(int i=0; i<biomeCount; ++i){
             //generate biome mask per biome
-            data.channels.push_back(perlin(256, 256, 256, .01f, 2.0f, 8, 0.5f, static_cast<unsigned int>(i*1000 + 12345u)));
+            perlin(biomeMasks[i],256, 256, 256, .01f, 2.0f, 8, 0.5f, static_cast<unsigned int>(i*1000 + 12345u));
+            data.channels.push_back(biomeMasks[i]);
         }
         return data;
     }
 
     cl_mem getColor(const World& world) override{
         SampleData sampleData = sample(world);
-        //combine biome masks into a single 4d texture (concat each biome mask as a channel)
-        cl_context ctx = OpenCLContext::get().getContext();
-        cl_device_id device = OpenCLContext::get().getDevice();
-        cl_command_queue queue = OpenCLContext::get().getQueue();
-        cl_int err = CL_SUCCESS;
-        const int fieldW = 256;
-        const int fieldH = 256;
-        const int fieldD = 256;
-        size_t totalSize = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD * (size_t)biomeCount * sizeof(float);
-        cl_mem colorBuffer = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, totalSize, nullptr, &err);
-        if (err != CL_SUCCESS || colorBuffer == nullptr)
-        {
-            throw std::runtime_error("clCreateBuffer failed for BiomeLayer colorBuffer");
-        }
-        // Diagnostics: log memory usage after allocating the combined color buffer
-        OpenCLContext::get().logMemoryUsage();
-        // Validate channels and copy each biome mask into the colorBuffer at the appropriate offset
-        size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
-        size_t sliceBytes = voxels * sizeof(float);
-        if (sampleData.channels.size() != (size_t)biomeCount) {
-            for (auto &c : sampleData.channels) if (c) OpenCLContext::get().releaseMem(c);
-            OpenCLContext::get().releaseMem(colorBuffer);
-            throw std::runtime_error("BiomeLayer: unexpected number of perlin channels");
-        }
-
-        auto releaseChannels = [&](int upto) {
-            for (int j = 0; j < upto; ++j) {
-                if (sampleData.channels[j]) {
-                    OpenCLContext::get().releaseMem(sampleData.channels[j]);
-                    sampleData.channels[j] = nullptr;
-                }
-            }
-        };
-
-        for (int i = 0; i < biomeCount; ++i) {
-            cl_mem src = sampleData.channels[i];
-            if (src == nullptr) {
-                OpenCLContext::get().releaseMem(colorBuffer);
-                releaseChannels(i);
-                throw std::runtime_error(std::string("BiomeLayer: perlin channel ") + std::to_string(i) + " is null");
-            }
-
-            // verify same context
-            cl_context srcCtx = nullptr;
-            err = clGetMemObjectInfo(src, CL_MEM_CONTEXT, sizeof(cl_context), &srcCtx, nullptr);
-            if (err != CL_SUCCESS || srcCtx != ctx) {
-                OpenCLContext::get().releaseMem(colorBuffer);
-                releaseChannels(i+1);
-                throw std::runtime_error(std::string("BiomeLayer: channel context mismatch or clGetMemObjectInfo failed (err=") + std::to_string(err) + ")");
-            }
-
-            // verify size
-            size_t srcSize = 0;
-            err = clGetMemObjectInfo(src, CL_MEM_SIZE, sizeof(size_t), &srcSize, nullptr);
-            if (err != CL_SUCCESS || srcSize < sliceBytes) {
-                OpenCLContext::get().releaseMem(colorBuffer);
-                releaseChannels(i+1);
-                throw std::runtime_error(std::string("BiomeLayer: channel size too small or clGetMemObjectInfo failed (err=") + std::to_string(err) + ")");
-            }
-
-            size_t offset = sliceBytes * (size_t)i;
-            err = clEnqueueCopyBuffer(queue, src, colorBuffer, 0, offset, sliceBytes, 0, nullptr, nullptr);
-            if (err != CL_SUCCESS) {
-                OpenCLContext::get().releaseMem(colorBuffer);
-                releaseChannels(biomeCount);
-                throw std::runtime_error(std::string("clEnqueueCopyBuffer failed for BiomeLayer colorBuffer (err=") + std::to_string(err) + ")");
-            }
-        }
-        // Ensure copies finish before freeing source buffers to avoid races
-        clFinish(queue);
-
-        //release individual biome mask buffers
-        for(auto& ch : sampleData.channels){
-            OpenCLContext::get().releaseMem(ch);
-        }
+        concatVolumes(colorBuffer, sampleData.channels, 256, 256, 256);
         
         //perform Biome color mapping
-        cl_mem outColor = nullptr;
         try {
-            outColor = biomeColorMap(colorBuffer, biomeCount, biomeColors);
+            biomeColorMap(outColor, colorBuffer, biomeCount, biomeColors);
         } catch (const std::exception &ex) {
-            OpenCLContext::get().releaseMem(colorBuffer);
             throw;
         }
-        OpenCLContext::get().releaseMem(colorBuffer);
         return outColor;
     }
 
@@ -190,6 +115,11 @@ public:
     }
 
 private:
+    cl_mem outColor = nullptr;
+    cl_mem colorBuffer = nullptr;
+
+    std::vector<cl_mem> biomeMasks;
+
     int biomeCount = 5;
     std::vector<std::array<uint8_t,4>> biomeColors = {
         {34,139,34,255},    // Forest Green
@@ -199,9 +129,9 @@ private:
         {70,130,180,255}    // Steel Blue (Water)
     };
 
-    static cl_mem biomeColorMap(cl_mem biomeMasks, int biomeCount, const std::vector<std::array<uint8_t,4>>& biomeColors){
+    static void biomeColorMap(cl_mem& output,cl_mem biomeMasks, int biomeCount, const std::vector<std::array<uint8_t,4>>& biomeColors){
         if (!OpenCLContext::get().isReady())
-            return nullptr;
+            return;
 
         cl_context ctx = OpenCLContext::get().getContext();
         cl_device_id device = OpenCLContext::get().getDevice();
@@ -235,10 +165,12 @@ private:
             }
         }
 
-        cl_kernel kernel = clCreateKernel(program, "biome_masks_to_rgba_float4", &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for biome_masks_to_rgba_float4");
-
+        static cl_kernel kernel = nullptr;
+        if (kernel == nullptr){
+            kernel = clCreateKernel(program, "biome_masks_to_rgba_float4", &err);
+            if (err != CL_SUCCESS)
+                throw std::runtime_error("clCreateKernel failed for biome_masks_to_rgba_float4");
+        }
         // create palette buffer
         std::vector<float> paletteFloats;
         paletteFloats.reserve((size_t)biomeCount * 4);
@@ -254,17 +186,34 @@ private:
         cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * paletteFloats.size(), paletteFloats.data(), &err);
         if (err != CL_SUCCESS || paletteBuf == nullptr)
         {
-            clReleaseKernel(kernel);
             throw std::runtime_error("clCreateBuffer failed for BiomeColorMap paletteBuf");
         }
 
         size_t outSize = voxels * sizeof(cl_float4);
-        cl_mem output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
-        if (err != CL_SUCCESS || output == nullptr)
-        {
-            clReleaseKernel(kernel);
-            OpenCLContext::get().releaseMem(paletteBuf);
-            throw std::runtime_error("clCreateBuffer failed for BiomeColorMap output");
+        size_t bufferSize;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(size_t),
+                                            &bufferSize,
+                                            NULL);
+            if (err != CL_SUCCESS) {
+                OpenCLContext::get().releaseMem(paletteBuf);
+                throw std::runtime_error("clGetMemObjectInfo failed for BiomeColorMap output buffer size");
+            }
+            if(bufferSize < outSize){
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+
+        if(output == nullptr){
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+            if (err != CL_SUCCESS || output == nullptr)
+            {
+                OpenCLContext::get().releaseMem(paletteBuf);
+                throw std::runtime_error("clCreateBuffer failed for BiomeColorMap output");
+            }
         }
 
         int mode = 0; // 0 = argmax, 1 = blend
@@ -281,9 +230,6 @@ private:
         err = clEnqueueNDRangeKernel(queue, kernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
         clFinish(queue);
 
-        clReleaseKernel(kernel);
         OpenCLContext::get().releaseMem(paletteBuf);
-
-        return output;
     }
 };

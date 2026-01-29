@@ -17,7 +17,6 @@ public:
     GLuint project(World &world, int width, int height, std::string layerName) override
     {
         cl_mem fieldBuffer = world.getColor(layerName);
-        cl_mem sphereBuffer = nullptr;
 
         if (fieldBuffer)
         {
@@ -63,7 +62,8 @@ public:
                 if (upLen == 0.0f) upLen = 1.0f;
                 camUpX /= upLen; camUpY /= upLen; camUpZ /= upLen;
 
-                sphereBuffer = spherePerspectiveSample(
+                spherePerspectiveSample(
+                    sphereBuffer,
                     fieldBuffer,
                     256, 256, 256,
                     width, height,
@@ -74,7 +74,6 @@ public:
                     fovY,
                     0.0f, 0.0f, 0.0f,
                     1.0f);
-                OpenCLContext::get().releaseMem(fieldBuffer);
             }
             catch (const std::exception &ex)
             {
@@ -116,7 +115,6 @@ public:
             {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, hostBuf.data());
             }
-            OpenCLContext::get().releaseMem(sphereBuffer);
         }
         else
         {
@@ -129,10 +127,21 @@ public:
 
     ~SphericalProjection() override
     {
+        if (texture != 0)
+        {
+            glDeleteTextures(1, &texture);
+            texture = 0;
+        }
+        if (sphereBuffer != nullptr)
+        {
+            OpenCLContext::get().releaseMem(sphereBuffer);
+            sphereBuffer = nullptr;
+        }
     }
 
 private:
     GLuint texture = 0;
+    cl_mem sphereBuffer = nullptr;
 
     // Camera controls (radians for lon/lat)
     float centerLon = 0.0f;
@@ -141,9 +150,11 @@ private:
     float fovY = static_cast<float>(M_PI) / 4.0f;
 
     static cl_program spherePerspectiveProgram;
+    static cl_kernel spherePerspectiveKernel;
 
 public:
-    static cl_mem spherePerspectiveSample(
+    static void spherePerspectiveSample(
+        cl_mem& output,
         cl_mem field3d,
         int fieldW,
         int fieldH,
@@ -175,7 +186,7 @@ public:
         float sphereRadius)
     {
         if (!OpenCLContext::get().isReady())
-            return nullptr;
+            return;
 
         cl_context ctx = OpenCLContext::get().getContext();
         cl_device_id device = OpenCLContext::get().getDevice();
@@ -204,28 +215,42 @@ public:
             }
         }
 
-        cl_kernel kernel = nullptr;
-        cl_mem output = nullptr;
-
-        kernel = clCreateKernel(spherePerspectiveProgram, "sphere_perspective_sample_rgba", &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for sphere_perspective_sample_rgba");
-
+        if(spherePerspectiveKernel == nullptr){
+            spherePerspectiveKernel = clCreateKernel(spherePerspectiveProgram, "sphere_perspective_sample_rgba", &err);
+            if (err != CL_SUCCESS)
+                throw std::runtime_error("clCreateKernel failed for sphere_perspective_sample_rgba");
+        }
         size_t outSize = (size_t)screenW * (size_t)screenH * sizeof(cl_float4);
-        output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, outSize, nullptr, &err);
-        if (err != CL_SUCCESS)
-        {
-            clReleaseKernel(kernel);
-            throw std::runtime_error("clCreateBuffer failed for spherePerspective rgba output");
+        size_t bufSize;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(size_t),
+                                            &bufSize, NULL);
+            if (err != CL_SUCCESS) {    
+                throw std::runtime_error("clGetMemObjectInfo failed for spherePerspective output buffer size");
+            }
+            if(bufSize < outSize){
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
         }
 
-        clSetKernelArg(kernel, 0, sizeof(cl_mem), &field3d);
-        clSetKernelArg(kernel, 1, sizeof(int), &fieldW);
-        clSetKernelArg(kernel, 2, sizeof(int), &fieldH);
-        clSetKernelArg(kernel, 3, sizeof(int), &fieldD);
-        clSetKernelArg(kernel, 4, sizeof(cl_mem), &output);
-        clSetKernelArg(kernel, 5, sizeof(int), &screenW);
-        clSetKernelArg(kernel, 6, sizeof(int), &screenH);
+        if(output == nullptr){
+            output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, outSize, nullptr, &err);
+            if (err != CL_SUCCESS)
+            {
+                throw std::runtime_error("clCreateBuffer failed for spherePerspective rgba output");
+            }
+        }
+
+        clSetKernelArg(spherePerspectiveKernel, 0, sizeof(cl_mem), &field3d);
+        clSetKernelArg(spherePerspectiveKernel, 1, sizeof(int), &fieldW);
+        clSetKernelArg(spherePerspectiveKernel, 2, sizeof(int), &fieldH);
+        clSetKernelArg(spherePerspectiveKernel, 3, sizeof(int), &fieldD);
+        clSetKernelArg(spherePerspectiveKernel, 4, sizeof(cl_mem), &output);
+        clSetKernelArg(spherePerspectiveKernel, 5, sizeof(int), &screenW);
+        clSetKernelArg(spherePerspectiveKernel, 6, sizeof(int), &screenH);
 
         cl_float3 camPos = {camPosX, camPosY, camPosZ};
         cl_float3 camForward = {camForwardX, camForwardY, camForwardZ};
@@ -233,81 +258,17 @@ public:
         cl_float3 camUp = {camUpX, camUpY, camUpZ};
         cl_float3 sphereCenter = {sphereCenterX, sphereCenterY, sphereCenterZ};
         
-        clSetKernelArg(kernel, 7, sizeof(camPos), &camPos);
-        clSetKernelArg(kernel, 8, sizeof(camForward), &camForward);
-        clSetKernelArg(kernel, 9, sizeof(camRight), &camRight);
-        clSetKernelArg(kernel, 10, sizeof(camUp), &camUp);
-        clSetKernelArg(kernel, 11, sizeof(float), &fovY);
-        clSetKernelArg(kernel, 12, sizeof(sphereCenter), &sphereCenter);
-        clSetKernelArg(kernel, 13, sizeof(float), &sphereRadius);
+        clSetKernelArg(spherePerspectiveKernel, 7, sizeof(camPos), &camPos);
+        clSetKernelArg(spherePerspectiveKernel, 8, sizeof(camForward), &camForward);
+        clSetKernelArg(spherePerspectiveKernel, 9, sizeof(camRight), &camRight);
+        clSetKernelArg(spherePerspectiveKernel, 10, sizeof(camUp), &camUp);
+        clSetKernelArg(spherePerspectiveKernel, 11, sizeof(float), &fovY);
+        clSetKernelArg(spherePerspectiveKernel, 12, sizeof(sphereCenter), &sphereCenter);
+        clSetKernelArg(spherePerspectiveKernel, 13, sizeof(float), &sphereRadius);
 
-        // Debug buffer for sphere sampling (5 ints)
-        cl_mem debugBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int) * 5, nullptr, &err);
-        if (err != CL_SUCCESS)
-        {
-            clReleaseKernel(kernel);
-            clReleaseMemObject(output);
-            throw std::runtime_error("clCreateBuffer failed for spherePerspective debugBuf");
-        }
-        int zeros[5] = {0, 0, 0, 0, 0};
-        err = clEnqueueWriteBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(zeros), zeros, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS)
-        {
-            clReleaseKernel(kernel);
-            clReleaseMemObject(output);
-            clReleaseMemObject(debugBuf);
-            throw std::runtime_error("clEnqueueWriteBuffer failed for spherePerspective debugBuf");
-        }
-        clSetKernelArg(kernel, 14, sizeof(cl_mem), &debugBuf);
 
         size_t global[2] = {(size_t)screenW, (size_t)screenH};
-        err = clEnqueueNDRangeKernel(queue, kernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, spherePerspectiveKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         clFinish(queue);
-
-        // Read back debug buffer
-        int dbg[5] = {0, 0, 0, 0, 0};
-        err = clEnqueueReadBuffer(queue, debugBuf, CL_TRUE, 0, sizeof(dbg), dbg, 0, nullptr, nullptr);
-        if (err == CL_SUCCESS)
-        {
-            if (dbg[4] == 1)
-            {
-                if (dbg[2] == 0)
-                {
-                    fprintf(stderr, "[OpenCL Debug] sphere sample top-left (%d,%d) no-hit (t bits = %d)\n", dbg[0], dbg[1], dbg[3]);
-                }
-                else
-                {
-                    float t = 0.0f;
-                    memcpy(&t, &dbg[3], sizeof(t));
-                    fprintf(stderr, "[OpenCL Debug] sphere sample top-left (%d,%d) hit t = %f\n", dbg[0], dbg[1], t);
-                }
-            }
-            else
-            {
-                fprintf(stderr, "[OpenCL Debug] sphere debugBuf not written (flag=0)\n");
-            }
-
-            // Also sample center pixel value from output for extra context
-            size_t centerIdx = ((size_t)screenW / 2) + ((size_t)screenH / 2) * (size_t)screenW;
-            cl_float4 pixelCenter = {0,0,0,0};
-            err = clEnqueueReadBuffer(queue, output, CL_TRUE, centerIdx * sizeof(cl_float4), sizeof(pixelCenter), &pixelCenter, 0, nullptr, nullptr);
-            if (err == CL_SUCCESS)
-            {
-                fprintf(stderr, "[OpenCL Debug] sphere output center pixel = %f %f %f %f\n", pixelCenter.s[0], pixelCenter.s[1], pixelCenter.s[2], pixelCenter.s[3]);
-            }
-            else
-            {
-                fprintf(stderr, "[OpenCL Debug] failed to read sphere output center pixel sample: %d\n", err);
-            }
-        }
-        else
-        {
-            fprintf(stderr, "[OpenCL Debug] failed to read spherePerspective debugBuf: %d\n", err);
-        }
-
-        clReleaseMemObject(debugBuf);
-        clReleaseKernel(kernel);
-
-        return output;
     }
 };

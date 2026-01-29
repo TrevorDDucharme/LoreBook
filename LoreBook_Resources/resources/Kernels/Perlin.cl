@@ -72,8 +72,7 @@ __kernel void perlin_fbm_3d(
     float lacunarity,
     int octaves,
     float persistence,
-    uint seed,
-    __global int* debugBuf // optional small debug buffer (size >= 4 ints)
+    uint seed
 )
 {
     int x = get_global_id(0);
@@ -109,17 +108,4 @@ __kernel void perlin_fbm_3d(
     }
     float outVal = value * 0.5f + 0.5f;
     output[index] = outVal;
-
-    // Debug: write the final output value for the center voxel (more representative than (0,0,0))
-    int centerX = width / 2;
-    int centerY = height / 2;
-    int centerZ = depth / 2;
-    if (debugBuf != 0 && x == centerX && y == centerY && z == centerZ)
-    {
-        debugBuf[0] = x;
-        debugBuf[1] = y;
-        debugBuf[2] = z;
-        debugBuf[3] = as_int(outVal);
-        debugBuf[4] = 1;
-    }
 }

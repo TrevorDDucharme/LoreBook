@@ -15,9 +15,7 @@ __kernel void sphere_perspective_sample_rgba(
 
     float fovY,          // radians
     float3 sphereCenter,
-    float sphereRadius,
-
-    __global int* debugBuf // optional small debug buffer (size >= 8 ints)
+    float sphereRadius
 )
 {
     int x = get_global_id(0);
@@ -27,12 +25,6 @@ __kernel void sphere_perspective_sample_rgba(
         return;
 
     int idx = x + y * screenW;
-
-    // Mark kernel run so host always sees debug buffer written at least once
-    if (debugBuf != 0 && x == 0 && y == 0) {
-        // leave other debug fields to be set later; just set the written flag
-        debugBuf[4] = 1;
-    }
 
     // -----------------------------
     // Generate ray direction
@@ -64,14 +56,6 @@ __kernel void sphere_perspective_sample_rgba(
     // No hit
     if (h < 0.0f)
     {
-        // Debug: if top-left pixel, indicate no-hit
-        if (debugBuf != 0 && x == 0 && y == 0) {
-            debugBuf[0] = x;
-            debugBuf[1] = y;
-            debugBuf[2] = 0; // no-hit
-            debugBuf[3] = 0;
-            debugBuf[4] = 1;
-        }
         output[idx] = (float4)(0.0f,0.0f,0.0f,0.0f);
         return;
     }
@@ -79,14 +63,6 @@ __kernel void sphere_perspective_sample_rgba(
     float t = -b - sqrt(h);
     if (t < 0.0f)
     {
-        // Debug: if top-left pixel, indicate no-hit (t negative)
-        if (debugBuf != 0 && x == 0 && y == 0) {
-            debugBuf[0] = x;
-            debugBuf[1] = y;
-            debugBuf[2] = 0; // no-hit
-            debugBuf[3] = as_int(t);
-            debugBuf[4] = 1;
-        }
         output[idx] = (float4)(0.0f,0.0f,0.0f,0.0f);
         return;
     }
@@ -96,18 +72,6 @@ __kernel void sphere_perspective_sample_rgba(
     // -----------------------------
     // Map hit point to field volume
     // -----------------------------
-
-    // Debug: for the center pixel write some values to debugBuf if provided
-    // debugBuf[0] = x, [1] = y, [2] = hitFlag (1 if hit else 0), [3] = as_int(t), [4] = written flag
-    int centerX = screenW / 2;
-    int centerY = screenH / 2;
-    if (debugBuf != 0 && x == centerX && y == centerY) {
-        debugBuf[0] = x;
-        debugBuf[1] = y;
-        debugBuf[2] = 1; // hit
-        debugBuf[3] = as_int(t);
-        debugBuf[4] = 1;
-    }
 
     float3 localPos = (hitPos - sphereCenter) / (sphereRadius * 2.0f) + 0.5f;
     localPos = clamp(localPos, 0.0f, 0.9999f);
