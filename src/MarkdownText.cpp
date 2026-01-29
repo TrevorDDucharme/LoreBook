@@ -8,6 +8,8 @@
 #include <plog/Log.h>
 #include "Vault.hpp"
 #include "Icons.hpp"
+#include <stringUtils.hpp>
+#include <WorldMaps/WorldMap.hpp>
 
 // Parse optional size suffixes appended with ::<width>x<height>
 // Examples: "vault://Assets/model.glb::800x600" or "https://.../model.glb::640x480"
@@ -570,137 +572,46 @@ namespace ImGui
                     Vault *v = reinterpret_cast<Vault *>(r->ctx);
                     // Use baseSrc for lookups (without size suffix)
                     src = baseSrc;
-                    // vault attachment
-                    const std::string prefix = "vault://attachment/";
-                    if (src.rfind(prefix, 0) == 0)
+                    // vault://World/ namespace
+                    const std::string worldPrefix = "vault://World/";
+                    if (src.rfind(worldPrefix, 0) == 0)
                     {
-                        std::string idstr = src.substr(prefix.size());
-                        try
+                        //get the string after the prefix
+                        std::string worldPath = src.substr(worldPrefix.size());
+                        std::vector<std::string> parts = splitBracketAware(worldPath, "/");
+                        if (parts.size() == 2)
                         {
-                            int64_t aid = std::stoll(idstr);
-                            auto meta = v->getAttachmentMeta(aid);
-                            auto isModelExt = [&](const std::string &n) -> bool
-                            {
-                                std::string ext;
-                                try
-                                {
-                                    ext = std::filesystem::path(n).extension().string();
-                                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                                }
-                                catch (...)
-                                {
-                                }
-                                static const std::vector<std::string> models = {".obj", ".fbx", ".gltf", ".glb", ".ply", ".dae", ".stl"};
-                                for (auto &m : models)
-                                    if (ext == m)
-                                        return true;
-                                return (meta.mimeType.find("model") != std::string::npos);
-                            };
-
-                            if (isModelExt(meta.name))
-                            {
-                                // Render inline model viewer (if available) or show a loading placeholder
-                                ModelViewer *mv = v->getOrCreateModelViewerForSrc(src);
-                                float availW = GetContentRegionAvail().x;
-                                // size precedence: URL suffix -> meta display -> defaults (cap to avail)
-                                int desiredW = (urlW > 0) ? urlW : (meta.displayWidth > 0 ? meta.displayWidth : -1);
-                                int desiredH = (urlH > 0) ? urlH : (meta.displayHeight > 0 ? meta.displayHeight : -1);
-                                float width = (desiredW > 0) ? std::min(static_cast<float>(desiredW), availW) : std::min(400.0f, availW);
-                                float height = (desiredH > 0) ? static_cast<float>(desiredH) : std::min(300.0f, width * 0.6f);
-                                ImVec2 avail = ImVec2(width, height);
-                                if (mv && mv->isLoaded())
-                                {
-                                    mv->renderToRegion(avail);
-                                    // clicking inline opens full viewer
-                                    if (ImGui::IsItemClicked())
-                                        v->openModelFromSrc(src);
-                                }
-                                else
-                                {
-                                    if (mv && mv->loadFailed())
-                                    {
-                                        ImGui::Text("Failed to load model: %s", meta.name.c_str());
-                                        ImGui::SameLine();
-                                        ImGui::TextDisabled("(%lld bytes)", (long long)meta.size);
-                                        ImGui::SameLine();
-                                        if (ImGui::SmallButton("View Raw"))
-                                            v->openPreviewFromSrc(src);
-                                        ImGui::SameLine();
-                                        if (ImGui::SmallButton("Open"))
-                                            v->openModelFromSrc(src);
-                                    }
-                                    else if (mv && mv->isLoading())
-                                    {
-                                        ImGui::Text("Model: %s (loading...)", meta.name.c_str());
-                                        ImGui::SameLine();
-                                        if (ImGui::SmallButton("Open"))
-                                            v->openModelFromSrc(src);
-                                    }
-                                    else
-                                    {
-                                        ImGui::Text("Model: %s", meta.name.c_str());
-                                        ImGui::SameLine();
-                                        if (ImGui::Button("View Model"))
-                                            v->openModelFromSrc(src);
-                                    }
-                                }
+                            try{
+                            std::string worldName="";
+                            std::string config= "";
+                            splitNameConfig(parts[0], worldName, config);
+                            std::string projection= parts[1];
+                            //convert projection to lowercase
+                            std::transform(projection.begin(), projection.end(), projection.begin(), ::tolower);
+                            PLOGV << "md:world src='" << src << "' world='" << worldName << "' config='" << config << "' projection='" << projection << "'";
+                            ImVec2 size = GetContentRegionAvail();
+                            if(projection=="mercator"){
+                                size.y= size.x * 0.5f;
+                                World map(config);
+                                mercatorMap(worldPath.c_str(),size,map);
                                 return 0;
                             }
-
-                            if (meta.size > 0)
-                            {
-                                std::string key = std::string("vault:att:") + std::to_string(aid);
-                                IconTexture cached = GetDynamicTexture(key);
-                                if (cached.loaded)
-                                {
-                                    float availW = GetContentRegionAvail().x;
-                                    float width = availW;
-                                    if (urlW > 0)
-                                        width = std::min(static_cast<float>(urlW), availW);
-                                    else if (meta.displayWidth > 0)
-                                        width = std::min(static_cast<float>(meta.displayWidth), availW);
-                                    else if (cached.width > availW)
-                                        width = availW;
-                                    else
-                                        width = static_cast<float>(cached.width);
-                                    float scale = width / static_cast<float>(cached.width);
-                                    float height = (urlH > 0) ? static_cast<float>(urlH) : static_cast<float>(cached.height) * scale;
-                                    ImGui::Image((ImTextureID)(intptr_t)cached.textureID, ImVec2(width, height));
-                                    NewLine();
-                                    return 0;
-                                }
-                                else
-                                {
-                                    // Schedule background read + main-thread texture creation
-                                    std::thread([vaultPtr = v, aid, key]()
-                                                {
-                                    auto data = vaultPtr->getAttachmentData(aid);
-                                    if(!data.empty()){
-                                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
-                                        vaultPtr->enqueueMainThreadTask([key, dataPtr, aid](){
-                                            LoadTextureFromMemory(key, *dataPtr);
-                                            PLOGV << "vault:loaded image aid=" << aid;
-                                        });
-                                    } })
-                                        .detach();
-                                }
+                            else if(projection=="globe"){
+                                size.y= size.x;
+                                World map(config);
+                                globeMap(worldPath.c_str(),size,map);
+                                return 0;
                             }
-                            else
-                            {
-                                // no data — try async fetch if ExternalPath present
-                                if (!meta.externalPath.empty())
-                                    v->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                            }
+                            catch(std::exception &e){
+                                ImGui::TextColored(ImVec4(1.0f,0.5f,0.0f,1.0f),"Error rendering world map for src='%s'",src.c_str());
+                                ImGui::TextColored(ImVec4(1.0f,0.5f,0.0f,1.0f),"%s",e.what());
+                                PLOGW << "md:world failed to render world map for src='" << src << "'";
+                                PLOGW << "  exception: " << e.what();
                             }
                         }
-                        catch (...)
-                        {
-                        }
-                        // fallback: show filename button that opens preview
-                        if (ImGui::SmallButton(label.c_str()))
-                            v->openPreviewFromSrc(src);
-                        return 0;
                     }
-
+                    
                     // vault://Assets/ namespace – resolve by ExternalPath
                     const std::string assetsPrefix = "vault://Assets/";
                     if (src.rfind(assetsPrefix, 0) == 0)

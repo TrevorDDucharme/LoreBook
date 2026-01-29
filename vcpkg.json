@@ -42,6 +42,7 @@
 		"assimp",
 		"mysql-connector-cpp",
 		"libgit2",
+		"tracy",
 		"opencl"
 	]
 }

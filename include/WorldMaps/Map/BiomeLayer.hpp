@@ -96,7 +96,7 @@ public:
         //perform Biome color mapping
         cl_mem outColor = nullptr;
         try {
-            outColor = biomeColorMap(colorBuffer, biomeCount);
+            outColor = biomeColorMap(colorBuffer, biomeCount, biomeColors);
         } catch (const std::exception &ex) {
             OpenCLContext::get().releaseMem(colorBuffer);
             throw;
@@ -104,9 +104,94 @@ public:
         OpenCLContext::get().releaseMem(colorBuffer);
         return outColor;
     }
+
+    //count:2,colors:[{0,0,255,255},{0,255,0,255}]
+    void parseParameters(const std::string &params) override{
+        auto trim = [](std::string s){
+            auto not_ws = [](int ch){ return !std::isspace(ch); };
+            s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_ws));
+            s.erase(std::find_if(s.rbegin(), s.rend(), not_ws).base(), s.end());
+            return s;
+        };
+
+        auto tokens = splitBracketAware(params, ",");
+        std::vector<std::array<uint8_t,4>> colorsParsed;
+        for(const auto& token : tokens){
+            auto kv = splitBracketAware(token, ":");
+            if(kv.size() != 2)
+                throw std::runtime_error(std::string("BiomeLayer::parseParameters: invalid token: ") + token);
+
+            std::string key = trim(kv[0]);
+            std::string value = trim(kv[1]);
+
+            if(key == "count"){
+                try{
+                    biomeCount = std::stoi(value);
+                } catch(...) {
+                    throw std::runtime_error(std::string("BiomeLayer::parseParameters: invalid count value: ") + value);
+                }
+                if(biomeCount <= 0)
+                    throw std::runtime_error("BiomeLayer::parseParameters: count must be > 0");
+            } else if(key == "colors"){
+                //parse colors
+                //expected format: [{r,g,b,a},{r,g,b,a},...]
+                if(value.size() < 2 || value.front() != '[' || value.back() != ']'){
+                    throw std::runtime_error("BiomeLayer::parseParameters: colors must be in format '[{r,g,b,a},...]'");
+                }
+
+                std::string inner = value.substr(1, value.size() - 2);
+                // split on top-level commas (splitBracketAware will ignore commas inside matched brackets)
+                auto colorTokens = splitBracketAware(inner, ",");
+
+                for(auto colorToken : colorTokens){
+                    std::string t = trim(colorToken);
+                    // if the token is wrapped in matching brackets (any of {} () []), strip them
+                    if(t.size() >= 2){
+                        char f = t.front();
+                        char l = t.back();
+                        if((f == '{' && l == '}') || (f == '(' && l == ')') || (f == '[' && l == ']')){
+                            t = t.substr(1, t.size() - 2);
+                        }
+                    }
+
+                    auto rgbTokens = splitBracketAware(t, ",");
+                    if(rgbTokens.size() != 4)
+                        throw std::runtime_error(std::string("BiomeLayer::parseParameters: color entry must have 4 components: ") + colorToken);
+
+                    int rc, gc, bc, ac;
+                    try{
+                        rc = std::stoi(trim(rgbTokens[0]));
+                        gc = std::stoi(trim(rgbTokens[1]));
+                        bc = std::stoi(trim(rgbTokens[2]));
+                        ac = std::stoi(trim(rgbTokens[3]));
+                    }catch(...){
+                        throw std::runtime_error(std::string("BiomeLayer::parseParameters: invalid color component in: ") + colorToken);
+                    }
+
+                    auto checkRange = [](int v, const char* name){
+                        if(v < 0 || v > 255) throw std::runtime_error(std::string("BiomeLayer::parseParameters: color component out of range (0-255): ") + name);
+                    };
+                    checkRange(rc, "r"); checkRange(gc, "g"); checkRange(bc, "b"); checkRange(ac, "a");
+
+                    colorsParsed.push_back({static_cast<uint8_t>(rc), static_cast<uint8_t>(gc), static_cast<uint8_t>(bc), static_cast<uint8_t>(ac)});
+                }
+            } else {
+                throw std::runtime_error(std::string("BiomeLayer::parseParameters: unknown key: ") + key);
+            }
+        }
+
+        if(!colorsParsed.empty()){
+            if((int)colorsParsed.size() != biomeCount)
+                throw std::runtime_error(std::string("BiomeLayer::parseParameters: number of colors (") + std::to_string(colorsParsed.size()) + ") does not match count (" + std::to_string(biomeCount) + ")");
+
+            //replace biomeColors with parsed colors
+            biomeColors = colorsParsed;
+        }
+    }
+
 private:
     int biomeCount = 5;
-    static inline const std::vector<std::array<uint8_t,4>> biomeColors = {
+    std::vector<std::array<uint8_t,4>> biomeColors = {
         {34,139,34,255},    // Forest Green
         {210,180,140,255},  // Tan (Desert)
         {255,250,250,255},  // Snow
@@ -114,7 +199,7 @@ private:
         {70,130,180,255}    // Steel Blue (Water)
     };
 
-    static cl_mem biomeColorMap(cl_mem biomeMasks, int biomeCount){
+    static cl_mem biomeColorMap(cl_mem biomeMasks, int biomeCount, const std::vector<std::array<uint8_t,4>>& biomeColors){
         if (!OpenCLContext::get().isReady())
             return nullptr;
 

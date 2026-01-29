@@ -143,30 +143,6 @@ private:
     static cl_program spherePerspectiveProgram;
 
 public:
-
-/*
-__kernel void sphere_perspective_sample_rgba(
-    __global const float4* field3d,
-    int fieldW,
-    int fieldH,
-    int fieldD,
-
-    __global float4* output,
-    int screenW,
-    int screenH,
-
-    float3 camPos,
-    float3 camForward,
-    float3 camRight,
-    float3 camUp,
-
-    float fovY,          // radians
-    float3 sphereCenter,
-    float sphereRadius,
-
-    __global int* debugBuf // optional small debug buffer (size >= 8 ints)
-)
-*/
     static cl_mem spherePerspectiveSample(
         cl_mem field3d,
         int fieldW,

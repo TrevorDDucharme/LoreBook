@@ -4,199 +4,421 @@
 #include <WorldMaps/World/Projections/MercatorProjection.hpp>
 #include <WorldMaps/World/Projections/SphereProjection.hpp>
 
-void worldMap(){
-    //Worldmap window
-        if(ImGui::Begin("World Map")){
+static void mercatorMap(const char *label, ImVec2 texSize, World &world)
+{
+    // get imgui id
+    ImGuiID id = ImGui::GetID(label);
 
-            static World world;
-            static MercatorProjection mercatorProj;
-            static SphericalProjection sphereProj;
-            static int worldMapLayer = 0;
-            static std::string layerNames[] = { "elevation", "temperature", "humidity", "water", "biome", "river" };
-            ImGui::Combo("layer", &worldMapLayer, "elevation\0temperature\0humidity\0water\0biome\0river\0");
-            std::string selectedLayerName = layerNames[worldMapLayer];
-            // Map control state
-            static float mapCenterLon = 0.0f;
-            static float mapCenterLat = 0.0f;
-            static float mapZoom = 1.0f;
-            static int lastLayer = -1;
-            static GLuint worldMapTexture=0;
-            static GLuint globeTexture=0;
-            static float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
+    ImGui::PushItemWidth(texSize.x);
+    ImGui::PushID(id);
+    
+    static std::unordered_map<unsigned int, int> worldMapLayerMap;
+    static std::unordered_map<unsigned int, float> mapCenterLonMap; // degrees
+    static std::unordered_map<unsigned int, float> mapCenterLatMap; // degrees
+    static std::unordered_map<unsigned int, float> mapZoomMap;      // zoom level
+    static std::unordered_map<unsigned int, float> lastCenterLonMap; // degrees
+    static std::unordered_map<unsigned int, float> lastCenterLatMap; // degrees
+    static std::unordered_map<unsigned int, float> lastZoomMap;      // zoom
+    static std::unordered_map<unsigned int, GLuint> worldMapTextureMap;
 
-            // Globe camera state (per-session)
-            static float globeCenterLon = 0.0f; // degrees
-            static float globeCenterLat = 0.0f; // degrees
-            static float globeZoom = 3.0f;      // SphericalProjection::zoomLevel (smaller = closer)
-            static float globeFovDeg = 45.0f;   // degrees
-            static bool globeInvertY = false;   // invert vertical drag
-            static float globeRotDegPerPixel = 0.25f; // degrees per pixel
-            static float globeZoomFactor = 1.12f;     // per wheel tick
-            static float globeMinZoom = 0.01f;
-            static float globeMaxZoom = 64.0f;
 
-            const int texWidth = 512, texHeight = 512;
+    // Map control state
+    int worldMapLayer = 0;
+    static float mapCenterLon = 0.0f;
+    static float mapCenterLat = 0.0f;
+    static float mapZoom = 1.0f;
+    static GLuint worldMapTexture = 0;
+    static float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
+    
+    if(worldMapLayerMap.find(id) == worldMapLayerMap.end())
+    {
+        worldMapLayerMap[id] = 0;
+    }else{
+        worldMapLayer = worldMapLayerMap[id];
+    }
+    if(mapCenterLonMap.find(id) == mapCenterLonMap.end())
+    {
+        mapCenterLonMap[id] = 0.0f;
+    }else{
+        mapCenterLon = mapCenterLonMap[id];
+    }
+    if(mapCenterLatMap.find(id) == mapCenterLatMap.end())
+    {
+        mapCenterLatMap[id] = 0.0f;
+    }else{
+        mapCenterLat = mapCenterLatMap[id];
+    }
+    if(mapZoomMap.find(id) == mapZoomMap.end())
+    {
+        mapZoomMap[id] = 1.0f;
+    }else{
+        mapZoom = mapZoomMap[id];
+    }
+    if(lastCenterLonMap.find(id) == lastCenterLonMap.end())
+    {
+        lastCenterLonMap[id] = 0.0f;
+    }else{
+        lastCenterLon = lastCenterLonMap[id];
+    }
+    if(lastCenterLatMap.find(id) == lastCenterLatMap.end())
+    {
+        lastCenterLatMap[id] = 0.0f;
+    }else{
+        lastCenterLat = lastCenterLatMap[id];
+    }
+    if(lastZoomMap.find(id) == lastZoomMap.end())
+    {   
+        lastZoomMap[id] = 1.0f;
+    }else{
+        lastZoom = lastZoomMap[id];
+    }
+    if(worldMapTextureMap.find(id) == worldMapTextureMap.end())
+    {
+        worldMapTextureMap[id] = 0;
+    }else{
+        worldMapTexture = worldMapTextureMap[id];
+    }
+    
+    MercatorProjection mercatorProj;
+    std::vector<std::string> layerNames = world.getLayerNames();
+    std::string layerNamesNullSeparated;
+    for (const auto &name : layerNames)
+    {
+        layerNamesNullSeparated += name + '\0';
+    }
+    layerNamesNullSeparated += '\0';
 
-            // Controls
-            ImGui::Text("Controls: Drag to pan, mouse wheel to zoom");
-            ImGui::PushItemWidth(100);
-            ImGui::DragFloat("Lon", &mapCenterLon, 0.1f, 0.0f, 360.0f,"%.3f"); ImGui::SameLine();
-            ImGui::DragFloat("Lat", &mapCenterLat, 0.1f, -90.0f, 90.0f,"%.3f");
-            ImGui::SliderFloat("Zoom", &mapZoom, 1.0f, 32.0f, "x%.2f");
-            if(ImGui::Button("Reset")) { mapCenterLon = 0.0f; mapCenterLat = 0.0f; mapZoom = 1.0f; }
-            ImGui::PopItemWidth();
+    ImGui::BeginGroup();
+    ImGui::Text("Mercator Preview:");
 
-            // Image and interactions
-            ImGui::Text(" "); // spacer
-            ImVec2 imgSize((float)texWidth, (float)texHeight);
-            ImGui::Text(" ");
-            ImGui::BeginGroup();
-            ImGui::BeginGroup();
-            ImGui::Text("Map Preview:");
+    ImGui::Combo("layer", &worldMapLayer, layerNamesNullSeparated.c_str());
+    std::string selectedLayerName = layerNames[worldMapLayer];
+    // save current cursor position
+    ImVec2 cursorPos = ImGui::GetCursorPos();
 
-            //save current cursor position
-            ImVec2 cursorPos = ImGui::GetCursorPos();
+    // Update Mercator projection camera from UI state (deg -> rad)
+    mercatorProj.setViewCenterRadians(mapCenterLon * static_cast<float>(M_PI) / 180.0f, mapCenterLat * static_cast<float>(M_PI) / 180.0f);
+    mercatorProj.setZoomLevel(mapZoom);
 
-            // Update Mercator projection camera from UI state (deg -> rad)
-            mercatorProj.setViewCenterRadians(mapCenterLon * static_cast<float>(M_PI) / 180.0f, mapCenterLat * static_cast<float>(M_PI) / 180.0f);
-            mercatorProj.setZoomLevel(mapZoom);
+    worldMapTexture = mercatorProj.project(world, texSize.x, texSize.y, selectedLayerName);
 
-            worldMapTexture = mercatorProj.project(world,texWidth, texHeight, selectedLayerName);
+    if (worldMapTexture != 0)
+    {
+        ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture), texSize, ImVec2(0, 0), ImVec2(1, 1));
+    }
+    else
+    {
+        // Reserve the image area so layout remains consistent
+        ImGui::Dummy(texSize);
+    }
 
-            if(worldMapTexture != 0){
-                ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture), imgSize, ImVec2(0,0), ImVec2(1,1));
-            } else {
-                // Reserve the image area so layout remains consistent
-                ImGui::Dummy(imgSize);
-            }
+    // restore cursor position to overlay invisible button
+    ImGui::SetCursorPos(cursorPos);
 
-            //restore cursor position to overlay invisible button
-            ImGui::SetCursorPos(cursorPos);
+    // Use an invisible button over the image so we can reliably capture mouse interaction (hover, wheel, drag)
+    ImGui::InvisibleButton("WorldMap_Invisible_Button", texSize);
+    ImGuiIO &io = ImGui::GetIO();
 
-            // Use an invisible button over the image so we can reliably capture mouse interaction (hover, wheel, drag)
-            ImGui::InvisibleButton("WorldMap_Invisible_Button", imgSize);
-            ImGuiIO& io = ImGui::GetIO();
-
-            // Mouse wheel zoom when hovered
-            if (ImGui::IsItemHovered()){
-                if(io.MouseWheel != 0.0f){
-                    float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f/1.1f);
-                    mapZoom = std::clamp(mapZoom * factor, 1.0f, 128.0f);
-                }
-            }
-
-            // Panning with left mouse drag (operate in Mercator projected space)
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
-                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                float dx = drag.x;
-                float dy = drag.y;
-                // Convert current center lon/lat to projected u/v
-                float u_center = (mapCenterLon + 180.0f) / 360.0f;
-                float lat_rad = mapCenterLat * static_cast<float>(M_PI) / 180.0f;
-                float mercN_center = std::log(std::tan(static_cast<float>(M_PI)/4.0f + lat_rad/2.0f));
-                float v_center = 0.5f * (1.0f - mercN_center / static_cast<float>(M_PI));
-
-                // Compute delta in projected normalized space
-                float du = -dx / static_cast<float>(texWidth) / mapZoom; // negative so drag right moves map left
-                float dv = dy / static_cast<float>(texHeight) / mapZoom;
-                u_center += du;
-                v_center += dv;
-
-                // Wrap
-                if (u_center < 0.0f) u_center = u_center - std::floor(u_center);
-                if (u_center >= 1.0f) u_center = u_center - std::floor(u_center);
-                if (v_center < 0.0f) v_center = v_center-std::floor(v_center);
-                if (v_center > 1.0f) v_center = v_center - std::floor(v_center);
-
-                // Convert back to lon/lat
-                mapCenterLon = u_center * 360.0f - 180.0f;
-                float mercN = static_cast<float>(M_PI) * (1.0f - 2.0f * v_center);
-                mapCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
-
-                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-            }
-            ImGui::EndGroup();
-            ImGui::SameLine();
-            // --- Globe Preview (screen-space spherical sampling) ---
-            ImGui::BeginGroup();
-            ImGui::Separator();
-            ImGui::Text("Globe Preview:");
-            ImVec2 avail = ImGui::GetContentRegionAvail();
-            // Make the globe viewport square: use the smaller of available width/height
-            int maxDim = static_cast<int>(std::min(avail.x, avail.y));
-            int glSide = std::max(128, std::min(2048, maxDim));
-            int glW = glSide;
-            int glH = glSide;
-            ImVec2 globeSize((float)glSide, (float)glSide);
-
-            // Save cursor for overlay
-            ImVec2 globeCursor = ImGui::GetCursorPos();
-
-            // Update spherical projection with current orbit camera state
-            sphereProj.setViewCenterRadians(globeCenterLon * static_cast<float>(M_PI) / 180.0f, globeCenterLat * static_cast<float>(M_PI) / 180.0f);
-            sphereProj.setZoomLevel(globeZoom);
-            sphereProj.setFov(globeFovDeg * static_cast<float>(M_PI) / 180.0f);
-
-            std::string selectedLayerNameGlobe = selectedLayerName; // reuse selection
-            globeTexture = sphereProj.project(world, glW, glH, selectedLayerNameGlobe);
-
-            if(globeTexture != 0){
-                ImGui::Image((ImTextureID)(intptr_t)(globeTexture), globeSize, ImVec2(0,0), ImVec2(1,1));
-            } else {
-                ImGui::Dummy(globeSize);
-            }
-
-            // Overlay invisible button for interactions
-            ImGui::SetCursorPos(globeCursor);
-            ImGui::InvisibleButton("Globe_Invisible_Button", globeSize);
-
-            // Mouse wheel zoom when hovered (wheel-up => zoom in)
-            if(ImGui::IsItemHovered()){
-                if(io.MouseWheel != 0.0f){
-                    float factor = std::pow(globeZoomFactor, fabsf(io.MouseWheel));
-                    if(io.MouseWheel > 0.0f){
-                        // Wheel up -> zoom in (smaller zoom value => closer)
-                        globeZoom = std::clamp(globeZoom / factor, globeMinZoom, globeMaxZoom);
-                    } else {
-                        // Wheel down -> zoom out
-                        globeZoom = std::clamp(globeZoom * factor, globeMinZoom, globeMaxZoom);
-                    }
-                }
-            }
-
-            // Drag to rotate globe (left mouse drag)
-            if(ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)){
-                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                float dx = drag.x; float dy = drag.y;
-                globeCenterLon += dx * globeRotDegPerPixel;
-                float sign = globeInvertY ? -1.0f : 1.0f;
-                globeCenterLat += sign * dy * globeRotDegPerPixel;
-
-                // Wrap longitude to [-180,180)
-                while(globeCenterLon < -180.0f) globeCenterLon += 360.0f;
-                while(globeCenterLon >= 180.0f) globeCenterLon -= 360.0f;
-
-                // Clamp latitude to avoid gimbal lock
-                globeCenterLat = std::clamp(globeCenterLat, -89.9f, 89.9f);
-
-                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
-            }
-
-            // Small overlay UI under the globe
-            ImGui::BeginGroup();
-            ImGui::SetCursorPos(ImVec2(globeCursor.x + 8, globeCursor.y + glSide - 60));
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0,0,0,0.3f));
-            ImGui::BeginChild("GlobeOverlay", ImVec2(glSide - 16, 56), false, ImGuiWindowFlags_NoDecoration);
-            ImGui::Checkbox("Invert Y", &globeInvertY); ImGui::SameLine();
-            ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", globeCenterLon, globeCenterLat, globeZoom);
-            ImGui::SameLine(); if(ImGui::Button("Reset Camera")) { globeCenterLon = 0.0f; globeCenterLat = 0.0f; globeZoom = 3.0f; globeFovDeg = 45.0f; globeInvertY = false; }
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            ImGui::EndGroup();
-
-            ImGui::EndGroup();
-            ImGui::EndGroup();
-            
+    // Mouse wheel zoom when hovered
+    if (ImGui::IsItemHovered())
+    {
+        if (io.MouseWheel != 0.0f)
+        {
+            float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f / 1.1f);
+            mapZoom = std::clamp(mapZoom * factor, 1.0f, 128.0f);
         }
-        ImGui::End();
+    }
+
+    // Panning with left mouse drag (operate in Mercator projected space)
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    {
+        ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+        float dx = drag.x;
+        float dy = drag.y;
+        // Convert current center lon/lat to projected u/v
+        float u_center = (mapCenterLon + 180.0f) / 360.0f;
+        float lat_rad = mapCenterLat * static_cast<float>(M_PI) / 180.0f;
+        float mercN_center = std::log(std::tan(static_cast<float>(M_PI) / 4.0f + lat_rad / 2.0f));
+        float v_center = 0.5f * (1.0f - mercN_center / static_cast<float>(M_PI));
+
+        // Compute delta in projected normalized space
+        float du = -dx / static_cast<float>(texSize.x) / mapZoom; // negative so drag right moves map left
+        float dv = dy / static_cast<float>(texSize.y) / mapZoom;
+        u_center += du;
+        v_center += dv;
+
+        // Wrap
+        if (u_center < 0.0f)
+            u_center = u_center - std::floor(u_center);
+        if (u_center >= 1.0f)
+            u_center = u_center - std::floor(u_center);
+        if (v_center < 0.0f)
+            v_center = v_center - std::floor(v_center);
+        if (v_center > 1.0f)
+            v_center = v_center - std::floor(v_center);
+
+        // Convert back to lon/lat
+        mapCenterLon = u_center * 360.0f - 180.0f;
+        float mercN = static_cast<float>(M_PI) * (1.0f - 2.0f * v_center);
+        mapCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
+
+        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    }
+    ImGui::EndGroup();
+
+    ImGui::PopID();
+    ImGui::PopItemWidth();
+}
+
+static void globeMap(const char *label, ImVec2 texSize, World &world)
+{
+    // get imgui id
+    ImGuiID id = ImGui::GetID(label);
+
+    ImGui::PushItemWidth(texSize.x);
+    ImGui::PushID(id);
+
+    static std::unordered_map<unsigned int, int> worldMapLayerMap;
+    // Globe camera state (per-session)
+    static std::unordered_map<unsigned int, float> globeCenterLonMap;      // degrees
+    static std::unordered_map<unsigned int, float> globeCenterLatMap;      // degrees
+    static std::unordered_map<unsigned int, float> globeZoomMap;           // SphericalProjection::zoomLevel (smaller = closer)
+    static std::unordered_map<unsigned int, float> globeFovDegMap;         // degrees
+    static std::unordered_map<unsigned int, bool> globeInvertYMap;         // invert vertical drag
+    static std::unordered_map<unsigned int, float> globeRotDegPerPixelMap; // degrees per pixel
+    static std::unordered_map<unsigned int, float> globeZoomFactorMap;     // per wheel tick
+    static std::unordered_map<unsigned int, float> globeMinZoomMap;
+    static std::unordered_map<unsigned int, float> globeMaxZoomMap;
+
+    static std::unordered_map<unsigned int, GLuint> globeTextureMap;
+
+    // Globe state (per-session)
+    int worldMapLayer = 0;
+    float globeCenterLon = 0.0f;       // degrees
+    float globeCenterLat = 0.0f;       // degrees
+    float globeZoom = 3.0f;            // SphericalProjection::zoomLevel (smaller = closer)
+    float globeFovDeg = 45.0f;         // degrees
+    bool globeInvertY = false;         // invert vertical drag
+    float globeRotDegPerPixel = 0.25f; // degrees per pixel
+    float globeZoomFactor = 1.12f;     // per wheel tick
+    float globeMinZoom = 0.01f;
+    float globeMaxZoom = 64.0f;
+    GLuint globeTexture = 0;
+
+    // find or create values in maps
+    if (worldMapLayerMap.find(id) == worldMapLayerMap.end())
+    {
+        worldMapLayerMap[id] = 0;
+    }
+    else
+    {
+        worldMapLayer = worldMapLayerMap[id];
+    }
+    if (globeCenterLonMap.find(id) == globeCenterLonMap.end())
+    {
+        globeCenterLonMap[id] = 0.0f;
+    }
+    else
+    {
+        globeCenterLon = globeCenterLonMap[id];
+    }
+    if (globeCenterLatMap.find(id) == globeCenterLatMap.end())
+    {
+        globeCenterLatMap[id] = 0.0f;
+    }
+    else
+    {
+        globeCenterLat = globeCenterLatMap[id];
+    }
+    if (globeZoomMap.find(id) == globeZoomMap.end())
+    {
+        globeZoomMap[id] = 3.0f;
+    }
+    else
+    {
+        globeZoom = globeZoomMap[id];
+    }
+    if (globeFovDegMap.find(id) == globeFovDegMap.end())
+    {
+        globeFovDegMap[id] = 45.0f;
+    }
+    else
+    {
+        globeFovDeg = globeFovDegMap[id];
+    }
+    if (globeInvertYMap.find(id) == globeInvertYMap.end())
+    {
+        globeInvertYMap[id] = false;
+    }
+    else
+    {
+        globeInvertY = globeInvertYMap[id];
+    }
+    if (globeRotDegPerPixelMap.find(id) == globeRotDegPerPixelMap.end())
+    {
+        globeRotDegPerPixelMap[id] = 0.25f;
+    }
+    else
+    {
+        globeRotDegPerPixel = globeRotDegPerPixelMap[id];
+    }
+    if (globeZoomFactorMap.find(id) == globeZoomFactorMap.end())
+    {
+        globeZoomFactorMap[id] = 1.12f;
+    }
+    else
+    {
+        globeZoomFactor = globeZoomFactorMap[id];
+    }
+    if (globeMinZoomMap.find(id) == globeMinZoomMap.end())
+    {
+        globeMinZoomMap[id] = 0.01f;
+    }
+    else
+    {
+        globeMinZoom = globeMinZoomMap[id];
+    }
+    if (globeMaxZoomMap.find(id) == globeMaxZoomMap.end())
+    {
+        globeMaxZoomMap[id] = 64.0f;
+    }
+    else
+    {
+        globeMaxZoom = globeMaxZoomMap[id];
+    }
+    if (globeTextureMap.find(id) == globeTextureMap.end())
+    {
+        globeTextureMap[id] = 0;
+    }
+    else
+    {
+        globeTexture = globeTextureMap[id];
+    }
+
+    ImGuiIO &io = ImGui::GetIO();
+
+    SphericalProjection sphereProj;
+    std::vector<std::string> layerNames = world.getLayerNames();
+    std::string layerNamesNullSeparated;
+    for (const auto &name : layerNames)
+    {
+        layerNamesNullSeparated += name + '\0';
+    }
+    layerNamesNullSeparated += '\0';
+
+    ImGui::BeginGroup();
+    ImGui::Text("Globe Preview:");
+    ImGui::Combo("layer", &worldMapLayer, layerNamesNullSeparated.c_str());
+    std::string selectedLayerName = layerNames[worldMapLayer];
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    // Make the globe viewport square: use the smaller of available width/height
+    int maxDim = static_cast<int>(std::min(avail.x, avail.y));
+    int glSide = std::max(128, std::min(2048, maxDim));
+    int glW = glSide;
+    int glH = glSide;
+    ImVec2 globeSize((float)glSide, (float)glSide);
+
+    // Save cursor for overlay
+    ImVec2 globeCursor = ImGui::GetCursorPos();
+
+    // Update spherical projection with current orbit camera state
+    sphereProj.setViewCenterRadians(globeCenterLon * static_cast<float>(M_PI) / 180.0f, globeCenterLat * static_cast<float>(M_PI) / 180.0f);
+    sphereProj.setZoomLevel(globeZoom);
+    sphereProj.setFov(globeFovDeg * static_cast<float>(M_PI) / 180.0f);
+
+    std::string selectedLayerNameGlobe = selectedLayerName; // reuse selection
+    globeTexture = sphereProj.project(world, glW, glH, selectedLayerNameGlobe);
+
+    if (globeTexture != 0)
+    {
+        ImGui::Image((ImTextureID)(intptr_t)(globeTexture), globeSize, ImVec2(0, 0), ImVec2(1, 1));
+    }
+    else
+    {
+        ImGui::Dummy(globeSize);
+    }
+
+    // Overlay invisible button for interactions
+    ImGui::SetCursorPos(globeCursor);
+    ImGui::InvisibleButton("Globe_Invisible_Button", globeSize);
+
+    // Mouse wheel zoom when hovered (wheel-up => zoom in)
+    if (ImGui::IsItemHovered())
+    {
+        if (io.MouseWheel != 0.0f)
+        {
+            float factor = std::pow(globeZoomFactor, fabsf(io.MouseWheel));
+            if (io.MouseWheel > 0.0f)
+            {
+                // Wheel up -> zoom in (smaller zoom value => closer)
+                globeZoom = std::clamp(globeZoom / factor, globeMinZoom, globeMaxZoom);
+            }
+            else
+            {
+                // Wheel down -> zoom out
+                globeZoom = std::clamp(globeZoom * factor, globeMinZoom, globeMaxZoom);
+            }
+        }
+    }
+
+    // Drag to rotate globe (left mouse drag)
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    {
+        ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+        float dx = drag.x;
+        float dy = drag.y;
+        globeCenterLon += dx * globeRotDegPerPixel;
+        float sign = globeInvertY ? -1.0f : 1.0f;
+        globeCenterLat += sign * dy * globeRotDegPerPixel;
+
+        // Wrap longitude to [-180,180)
+        while (globeCenterLon < -180.0f)
+            globeCenterLon += 360.0f;
+        while (globeCenterLon >= 180.0f)
+            globeCenterLon -= 360.0f;
+
+        // Clamp latitude to avoid gimbal lock
+        globeCenterLat = std::clamp(globeCenterLat, -89.9f, 89.9f);
+
+        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    }
+
+    // Small overlay UI under the globe
+    ImGui::BeginGroup();
+    ImGui::SetCursorPos(ImVec2(globeCursor.x + 8, globeCursor.y + glSide - 60));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.3f));
+    ImGui::BeginChild("GlobeOverlay", ImVec2(glSide - 16, 56), false, ImGuiWindowFlags_NoDecoration);
+    ImGui::Checkbox("Invert Y", &globeInvertY);
+    ImGui::SameLine();
+    ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", globeCenterLon, globeCenterLat, globeZoom);
+    ImGui::SameLine();
+    if (ImGui::Button("Reset Camera"))
+    {
+        globeCenterLon = 0.0f;
+        globeCenterLat = 0.0f;
+        globeZoom = 3.0f;
+        globeFovDeg = 45.0f;
+        globeInvertY = false;
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
+
+    ImGui::EndGroup();
+    ImGui::PopID();
+    ImGui::PopItemWidth();
+}
+
+static void worldMap()
+{
+    // Worldmap window
+    if (ImGui::Begin("World Map"))
+    {
+        static World world;
+        static ImVec2 texSize(512, 512);
+        mercatorMap("Mercator World Map", texSize, world);
+        ImGui::SameLine();
+        globeMap("Globe World Map", texSize, world);
+    }
+    ImGui::End();
 }

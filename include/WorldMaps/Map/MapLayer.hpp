@@ -9,6 +9,7 @@
 #include <CL/cl2.hpp>
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include <OpenCLContext.hpp>
+#include <stringUtils.hpp>
 
 // Global shared mutex used to protect layer mutations (reseed and parameter changes).
 // Sampling remains unlocked for performance.
@@ -29,6 +30,7 @@ public:
     // Layers can sample themselves given access to the full World so they can query other layers
     virtual SampleData sample(const World &world)= 0;
     virtual cl_mem getColor(const World &world) = 0;
+    virtual void parseParameters(const std::string &params) {}
 
     static std::array<uint8_t, 4> rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {

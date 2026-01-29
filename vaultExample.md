@@ -1,0 +1,1 @@
+[](vault://World/INSERT_NAME(Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature)/Mercator)
