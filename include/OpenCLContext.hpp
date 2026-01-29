@@ -293,16 +293,14 @@ static void scalarToColor(cl_mem& output,
     OpenCLContext::get().releaseMem(paletteBuf);
 }
 
-static cl_program gConcatVolumesProgram = nullptr;
-static cl_kernel gConcatVolumesKernel = nullptr;
 
 static void concatVolumes(cl_mem& output,
-                std::vector<cl_mem> &inputVolumes,
-                int fieldW,
-                int fieldH,
-                int fieldD)
+                                std::vector<cl_mem> &inputVolumes,
+                                int fieldW,
+                                int fieldH,
+                                int fieldD)
 {
-    if (!OpenCLContext::get().isReady())
+   if (!OpenCLContext::get().isReady())
         return;
 
     cl_context ctx = OpenCLContext::get().getContext();
@@ -310,40 +308,11 @@ static void concatVolumes(cl_mem& output,
     cl_command_queue queue = OpenCLContext::get().getQueue();
     cl_int err = CL_SUCCESS;
 
-    if (gConcatVolumesProgram == nullptr)
-    {
-        std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/ConcatVolumes.cl");
-        const char *src = kernel_code.c_str();
-        size_t len = kernel_code.length();
-        gConcatVolumesProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
-        if (err != CL_SUCCESS || gConcatVolumesProgram == nullptr)
-            throw std::runtime_error("clCreateProgramWithSource failed");
-
-        err = clBuildProgram(gConcatVolumesProgram, 1, &device, nullptr, nullptr, nullptr);
-        if (err != CL_SUCCESS)
-        {
-            size_t log_size = 0;
-            clGetProgramBuildInfo(gConcatVolumesProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-            std::string log;
-            log.resize(log_size);
-            clGetProgramBuildInfo(gConcatVolumesProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
-            throw std::runtime_error(std::string("Failed to build OpenCL program: ") + log);
-        }
-    }
-
-    if (gConcatVolumesKernel == nullptr)
-    {
-        gConcatVolumesKernel = clCreateKernel(gConcatVolumesProgram, "concatVolumesSVM", &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for concatVolumesSVM");
-    }
-
     int num_channels = static_cast<int>(inputVolumes.size());
-    int num_voxels = fieldW * fieldH * fieldD;
-    if (num_channels == 0 || num_voxels <= 0)
-        return;
 
-    size_t outSize = (size_t)num_channels * (size_t)num_voxels * sizeof(float);
+    size_t voxel_count = static_cast<size_t>(fieldW) * fieldH * fieldD;
+    size_t outSize = (size_t)num_channels * voxel_count * sizeof(float);
+
     if (output != nullptr)
     {
         size_t current_size = 0;
@@ -369,50 +338,23 @@ static void concatVolumes(cl_mem& output,
             throw std::runtime_error("clCreateBuffer failed for concatVolumes output");
         }
     }
-
-    // Allocate an SVM buffer holding the cl_mem handles for each input volume
-    cl_device_svm_capabilities svmCaps = 0;
-    err = clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(svmCaps), &svmCaps, nullptr);
-    if (err != CL_SUCCESS) {
-        throw std::runtime_error("clGetDeviceInfo failed for SVM capabilities");
+    
+    for (int c = 0; c < num_channels; c++) {
+        //dowload each channel and copy to the right location in output
+        size_t channel_offset = static_cast<size_t>(c) * voxel_count * sizeof(float);
+        err = clEnqueueCopyBuffer(queue,
+                                  inputVolumes[c],
+                                  output,
+                                  0,
+                                  channel_offset,
+                                  voxel_count * sizeof(float),
+                                  0,
+                                  nullptr,
+                                  nullptr);
+        if (err != CL_SUCCESS) {
+            throw std::runtime_error("clEnqueueCopyBuffer failed in concatVolumes");
+        }
     }
 
-    // Require fine-grain SVM so we can memcpy the handles directly and let the device read them
-    if (!(svmCaps & CL_DEVICE_SVM_FINE_GRAIN_BUFFER))
-    {
-        throw std::runtime_error("Device does not support required SVM fine-grain buffers for concatVolumes");
-    }
-
-    cl_mem *svmVolumes = (cl_mem *)clSVMAlloc(ctx, CL_MEM_SVM_FINE_GRAIN_BUFFER, sizeof(cl_mem) * inputVolumes.size(), 0);
-    if (svmVolumes == nullptr)
-    {
-        throw std::runtime_error("clSVMAlloc failed for concatVolumes volumes SVM buffer");
-    }
-
-    // Copy the cl_mem handles into the SVM array
-    std::memcpy(svmVolumes, inputVolumes.data(), sizeof(cl_mem) * inputVolumes.size());
-
-    // Inform the runtime about the SVM pointer (required on some implementations)
-    err = clSetKernelExecInfo(gConcatVolumesKernel, CL_KERNEL_EXEC_INFO_SVM_PTRS, sizeof(void *), &svmVolumes);
-    if (err != CL_SUCCESS)
-    {
-        clSVMFree(ctx, svmVolumes);
-        throw std::runtime_error("clSetKernelExecInfo failed for SVM_PTRS");
-    }
-
-    // diagnostics: log memory usage after allocating concatVolumes SVM buffer
-    OpenCLContext::get().logMemoryUsage();
-
-    clSetKernelArg(gConcatVolumesKernel, 0, sizeof(cl_mem), &output);
-    // pass the SVM pointer as the second argument
-    clSetKernelArg(gConcatVolumesKernel, 1, sizeof(void *), &svmVolumes);
-    clSetKernelArg(gConcatVolumesKernel, 2, sizeof(int), &num_channels);
-    clSetKernelArg(gConcatVolumesKernel, 3, sizeof(int), &num_voxels);
-
-    size_t global = (size_t)num_voxels;
-    err = clEnqueueNDRangeKernel(queue, gConcatVolumesKernel, 1, nullptr, &global, nullptr, 0, nullptr, nullptr);
     clFinish(queue);
-
-    // free SVM memory once kernel completed
-    clSVMFree(ctx, svmVolumes);
 }
