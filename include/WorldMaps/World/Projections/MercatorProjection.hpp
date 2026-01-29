@@ -6,6 +6,11 @@ class MercatorProjection : public Projection
 {
 public:
     MercatorProjection()= default;
+
+    // Camera controls (center in radians, zoom > 0: larger = closer)
+    void setViewCenterRadians(float lonRad, float latRad) { centerLon = lonRad; centerLat = latRad; centerMercY = std::log(std::tan(static_cast<float>(M_PI)/4.0f + latRad/2.0f)); }
+    void setZoomLevel(float z) { zoomLevel = z; }
+
     GLuint project(World &world, int width, int height, std::string layerName) override
     {
         cl_mem fieldBuffer = world.getColor(layerName);
@@ -15,11 +20,13 @@ public:
         {
             try
             {
+                // Pass in camera center and zoom
                 mercatorBuffer = mercatorProject(
                     fieldBuffer,
                     256, 256, 256,
                     width, height,
-                    1.0f);
+                    1.0f,
+                    centerLon, centerMercY, zoomLevel);
                 OpenCLContext::get().releaseMem(fieldBuffer);
             }
             catch (const std::exception &ex)
@@ -84,6 +91,12 @@ public:
 private:
     GLuint texture = 0;
 
+    // Camera state (radians/mercator y/zoom): set via setters above
+    float centerLon = 0.0f;
+    float centerLat = 0.0f;
+    float centerMercY = 0.0f;
+    float zoomLevel = 1.0f;
+
     static cl_program mercatorProgram;
 
     static cl_mem mercatorProject(
@@ -93,7 +106,10 @@ private:
         int fieldD,
         int outW,
         int outH,
-        float radius)
+        float radius,
+        float centerLon,
+        float centerMercY,
+        float zoom)
     {
         if (!OpenCLContext::get().isReady())
             return nullptr;
@@ -130,7 +146,17 @@ private:
 
             kernel = clCreateKernel(mercatorProgram, "field3d_to_mercator_rgba", &err);
             if (err != CL_SUCCESS)
-                throw std::runtime_error("clCreateKernel failed for field3d_to_mercator_rgba");
+            {
+                // Retrieve build log for diagnostics
+                size_t log_size = 0;
+                clGetProgramBuildInfo(mercatorProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+                std::string log;
+                if (log_size > 0) {
+                    log.resize(log_size);
+                    clGetProgramBuildInfo(mercatorProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
+                }
+                throw std::runtime_error(std::string("clCreateKernel failed for field3d_to_mercator_rgba: err=") + std::to_string(err) + std::string(" build_log:\n") + log);
+            }
 
             size_t total = (size_t)outW * (size_t)outH * sizeof(cl_float4);
             output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
@@ -148,6 +174,9 @@ private:
             clSetKernelArg(kernel, 5, sizeof(int), &outW);
             clSetKernelArg(kernel, 6, sizeof(int), &outH);
             clSetKernelArg(kernel, 7, sizeof(float), &radius);
+            clSetKernelArg(kernel, 8, sizeof(float), &centerLon);
+            clSetKernelArg(kernel, 9, sizeof(float), &centerMercY);
+            clSetKernelArg(kernel, 10, sizeof(float), &zoom);
 
         // Debug buffer for sampling info (5 ints)
         cl_mem debugBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int) * 5, nullptr, &err);
@@ -166,7 +195,8 @@ private:
             clReleaseMemObject(debugBuf);
             throw std::runtime_error("clEnqueueWriteBuffer failed for mercator debugBuf");
         }
-        clSetKernelArg(kernel, 8, sizeof(cl_mem), &debugBuf);
+        // Debug buffer argument index is 11 after adding center/zoom args
+        clSetKernelArg(kernel, 11, sizeof(cl_mem), &debugBuf);
 
         size_t global[2] = {(size_t)outW, (size_t)outH};
         err = clEnqueueNDRangeKernel(queue, kernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);

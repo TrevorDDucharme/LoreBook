@@ -9,6 +9,9 @@ __kernel void field3d_to_mercator_rgba(
     int outH,
 
     float radius,
+    float centerLon,
+    float centerMercY,
+    float zoom,
     __global int* debugBuf
 )
 {
@@ -22,12 +25,15 @@ __kernel void field3d_to_mercator_rgba(
     float nx = (float)u / (float)outW;
     float ny = (float)v / (float)outH;
 
-    // Longitude [-pi, pi]
-    float lon = (nx - 0.5f) * 6.2831853f;
+    // Apply center/zoom to normalized coords and compute longitude
+    // nx in [0,1] -> centered around 0: (nx - 0.5)
+    float uxf = (nx - 0.5f) / zoom; // apply horizontal zoom (avoid reusing int 'u')
+    float lon = uxf * 6.2831853f + centerLon; // [-pi,pi] centered and offset
 
-    // Mercator inverse
-    float y = (0.5f - ny) * 2.0f;
-    float lat = 2.0f * atan(exp(y)) - 1.5707963f;
+    // Mercator inverse with vertical center/zoom applied in Mercator Y space
+    float y = (0.5f - ny) * 2.0f; // original mercator Y
+    float yc = (y - centerMercY) / zoom; // translate and scale
+    float lat = 2.0f * atan(exp(yc)) - 1.5707963f;
 
     // Spherical to Cartesian
     float3 p;

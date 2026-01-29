@@ -1227,6 +1227,10 @@ int main(int argc, char** argv)
             //save current cursor position
             ImVec2 cursorPos = ImGui::GetCursorPos();
 
+            // Update Mercator projection camera from UI state (deg -> rad)
+            mercatorProj.setViewCenterRadians(mapCenterLon * static_cast<float>(M_PI) / 180.0f, mapCenterLat * static_cast<float>(M_PI) / 180.0f);
+            mercatorProj.setZoomLevel(mapZoom);
+
             worldMapTexture = mercatorProj.project(world,texWidth, texHeight, selectedLayerName);
 
             if(worldMapTexture != 0){
