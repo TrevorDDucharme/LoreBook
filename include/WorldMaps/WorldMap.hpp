@@ -310,13 +310,6 @@ static void globeMap(const char *label, ImVec2 texSize, World &world)
     ImGui::Text("Globe Preview:");
     ImGui::Combo("layer", &worldMapLayer, layerNamesNullSeparated.c_str());
     std::string selectedLayerName = layerNames[worldMapLayer];
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-    // Make the globe viewport square: use the smaller of available width/height
-    int maxDim = static_cast<int>(std::min(avail.x, avail.y));
-    int glSide = std::max(128, std::min(2048, maxDim));
-    int glW = glSide;
-    int glH = glSide;
-    ImVec2 globeSize((float)glSide, (float)glSide);
 
     // Save cursor for overlay
     ImVec2 globeCursor = ImGui::GetCursorPos();
@@ -327,20 +320,20 @@ static void globeMap(const char *label, ImVec2 texSize, World &world)
     sphereProj.setFov(globeFovDeg * static_cast<float>(M_PI) / 180.0f);
 
     std::string selectedLayerNameGlobe = selectedLayerName; // reuse selection
-    globeTexture = sphereProj.project(world, glW, glH, selectedLayerNameGlobe);
+    globeTexture = sphereProj.project(world, texSize.x, texSize.y, selectedLayerNameGlobe);
 
     if (globeTexture != 0)
     {
-        ImGui::Image((ImTextureID)(intptr_t)(globeTexture), globeSize, ImVec2(0, 0), ImVec2(1, 1));
+        ImGui::Image((ImTextureID)(intptr_t)(globeTexture), texSize, ImVec2(0, 0), ImVec2(1, 1));
     }
     else
     {
-        ImGui::Dummy(globeSize);
+        ImGui::Dummy(texSize);
     }
 
     // Overlay invisible button for interactions
     ImGui::SetCursorPos(globeCursor);
-    ImGui::InvisibleButton("Globe_Invisible_Button", globeSize);
+    ImGui::InvisibleButton("Globe_Invisible_Button", texSize);
 
     // Mouse wheel zoom when hovered (wheel-up => zoom in)
     if (ImGui::IsItemHovered())
@@ -385,9 +378,9 @@ static void globeMap(const char *label, ImVec2 texSize, World &world)
 
     // Small overlay UI under the globe
     ImGui::BeginGroup();
-    ImGui::SetCursorPos(ImVec2(globeCursor.x + 8, globeCursor.y + glSide - 60));
+    ImGui::SetCursorPos(ImVec2(globeCursor.x + 8, globeCursor.y + texSize.y - 60));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.3f));
-    ImGui::BeginChild("GlobeOverlay", ImVec2(glSide - 16, 56), false, ImGuiWindowFlags_NoDecoration);
+    ImGui::BeginChild("GlobeOverlay", ImVec2(texSize.x - 16, 56), false, ImGuiWindowFlags_NoDecoration);
     ImGui::Checkbox("Invert Y", &globeInvertY);
     ImGui::SameLine();
     ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", globeCenterLon, globeCenterLat, globeZoom);
