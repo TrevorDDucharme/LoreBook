@@ -1,6 +1,5 @@
 #pragma once
 #include <WorldMaps/Map/MapLayer.hpp>
-#include <noise/noise.h>
 
 class TemperatureLayer : public MapLayer {
 public:

@@ -26,24 +26,71 @@ public:
         const int fieldH = 256;
         const int fieldD = 256;
         size_t totalSize = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD * (size_t)biomeCount * sizeof(float);
-        cl_mem colorBuffer = clCreateBuffer(ctx, CL_MEM_READ_WRITE, totalSize, nullptr, &err);
-        if (err != CL_SUCCESS)
+        cl_mem colorBuffer = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, totalSize, nullptr, &err);
+        if (err != CL_SUCCESS || colorBuffer == nullptr)
         {
             throw std::runtime_error("clCreateBuffer failed for BiomeLayer colorBuffer");
         }
-        //copy each biome mask into the colorBuffer at the appropriate offset
-        for(int i=0; i<biomeCount; ++i){
-            size_t offset = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD * (size_t)i * sizeof(float);
-            err = clEnqueueCopyBuffer(queue, sampleData.channels[i], colorBuffer, 0, offset, (size_t)fieldW * (size_t)fieldH * (size_t)fieldD * sizeof(float), 0, nullptr, nullptr);
-            if (err != CL_SUCCESS)
-            {
-                clReleaseMemObject(colorBuffer);
-                throw std::runtime_error("clEnqueueCopyBuffer failed for BiomeLayer colorBuffer");
+        // Diagnostics: log memory usage after allocating the combined color buffer
+        OpenCLContext::get().logMemoryUsage();
+        // Validate channels and copy each biome mask into the colorBuffer at the appropriate offset
+        size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+        size_t sliceBytes = voxels * sizeof(float);
+        if (sampleData.channels.size() != (size_t)biomeCount) {
+            for (auto &c : sampleData.channels) if (c) OpenCLContext::get().releaseMem(c);
+            OpenCLContext::get().releaseMem(colorBuffer);
+            throw std::runtime_error("BiomeLayer: unexpected number of perlin channels");
+        }
+
+        auto releaseChannels = [&](int upto) {
+            for (int j = 0; j < upto; ++j) {
+                if (sampleData.channels[j]) {
+                    OpenCLContext::get().releaseMem(sampleData.channels[j]);
+                    sampleData.channels[j] = nullptr;
+                }
+            }
+        };
+
+        for (int i = 0; i < biomeCount; ++i) {
+            cl_mem src = sampleData.channels[i];
+            if (src == nullptr) {
+                OpenCLContext::get().releaseMem(colorBuffer);
+                releaseChannels(i);
+                throw std::runtime_error(std::string("BiomeLayer: perlin channel ") + std::to_string(i) + " is null");
+            }
+
+            // verify same context
+            cl_context srcCtx = nullptr;
+            err = clGetMemObjectInfo(src, CL_MEM_CONTEXT, sizeof(cl_context), &srcCtx, nullptr);
+            if (err != CL_SUCCESS || srcCtx != ctx) {
+                OpenCLContext::get().releaseMem(colorBuffer);
+                releaseChannels(i+1);
+                throw std::runtime_error(std::string("BiomeLayer: channel context mismatch or clGetMemObjectInfo failed (err=") + std::to_string(err) + ")");
+            }
+
+            // verify size
+            size_t srcSize = 0;
+            err = clGetMemObjectInfo(src, CL_MEM_SIZE, sizeof(size_t), &srcSize, nullptr);
+            if (err != CL_SUCCESS || srcSize < sliceBytes) {
+                OpenCLContext::get().releaseMem(colorBuffer);
+                releaseChannels(i+1);
+                throw std::runtime_error(std::string("BiomeLayer: channel size too small or clGetMemObjectInfo failed (err=") + std::to_string(err) + ")");
+            }
+
+            size_t offset = sliceBytes * (size_t)i;
+            err = clEnqueueCopyBuffer(queue, src, colorBuffer, 0, offset, sliceBytes, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) {
+                OpenCLContext::get().releaseMem(colorBuffer);
+                releaseChannels(biomeCount);
+                throw std::runtime_error(std::string("clEnqueueCopyBuffer failed for BiomeLayer colorBuffer (err=") + std::to_string(err) + ")");
             }
         }
+        // Ensure copies finish before freeing source buffers to avoid races
+        clFinish(queue);
+
         //release individual biome mask buffers
         for(auto& ch : sampleData.channels){
-            clReleaseMemObject(ch);
+            OpenCLContext::get().releaseMem(ch);
         }
         
         //perform Biome color mapping
@@ -51,10 +98,10 @@ public:
         try {
             outColor = biomeColorMap(colorBuffer, biomeCount);
         } catch (const std::exception &ex) {
-            clReleaseMemObject(colorBuffer);
+            OpenCLContext::get().releaseMem(colorBuffer);
             throw;
         }
-        clReleaseMemObject(colorBuffer);
+        OpenCLContext::get().releaseMem(colorBuffer);
         return outColor;
     }
 private:
@@ -119,19 +166,19 @@ private:
             paletteFloats.push_back(static_cast<float>(c[3]) / 255.0f);
         }
 
-        cl_mem paletteBuf = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * paletteFloats.size(), paletteFloats.data(), &err);
-        if (err != CL_SUCCESS)
+        cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * paletteFloats.size(), paletteFloats.data(), &err);
+        if (err != CL_SUCCESS || paletteBuf == nullptr)
         {
             clReleaseKernel(kernel);
             throw std::runtime_error("clCreateBuffer failed for BiomeColorMap paletteBuf");
         }
 
         size_t outSize = voxels * sizeof(cl_float4);
-        cl_mem output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, outSize, nullptr, &err);
-        if (err != CL_SUCCESS)
+        cl_mem output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+        if (err != CL_SUCCESS || output == nullptr)
         {
             clReleaseKernel(kernel);
-            clReleaseMemObject(paletteBuf);
+            OpenCLContext::get().releaseMem(paletteBuf);
             throw std::runtime_error("clCreateBuffer failed for BiomeColorMap output");
         }
 
@@ -150,7 +197,7 @@ private:
         clFinish(queue);
 
         clReleaseKernel(kernel);
-        clReleaseMemObject(paletteBuf);
+        OpenCLContext::get().releaseMem(paletteBuf);
 
         return output;
     }

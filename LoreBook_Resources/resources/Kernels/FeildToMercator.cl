@@ -8,7 +8,8 @@ __kernel void field3d_to_mercator(
     int outW,
     int outH,
 
-    float radius
+    float radius,
+    __global int* debugBuf
 )
 {
     int u = get_global_id(0);
@@ -49,7 +50,17 @@ __kernel void field3d_to_mercator(
     int idx2d = u + v * outW;
 
     output2d[idx2d] = field3d[idx3d];
-}
+
+    int centerU = outW / 2;
+    int centerV = outH / 2;
+    if (debugBuf != 0 && u == centerU && v == centerV) {
+        debugBuf[0] = ix;
+        debugBuf[1] = iy;
+        debugBuf[2] = iz;
+        debugBuf[3] = as_int(field3d[idx3d]);
+        debugBuf[4] = 1;
+    }
+
 
 // RGBA variant: sample a float4 field3d and copy the float4 to output
 __kernel void field3d_to_mercator_rgba(
@@ -62,7 +73,8 @@ __kernel void field3d_to_mercator_rgba(
     int outW,
     int outH,
 
-    float radius
+    float radius,
+    __global int* debugBuf
 )
 {
     int u = get_global_id(0);
@@ -103,4 +115,14 @@ __kernel void field3d_to_mercator_rgba(
     int idx2d = u + v * outW;
 
     output2d[idx2d] = field3d[idx3d];
+
+    int centerU = outW / 2;
+    int centerV = outH / 2;
+    if (debugBuf != 0 && u == centerU && v == centerV) {
+        debugBuf[0] = ix;
+        debugBuf[1] = iy;
+        debugBuf[2] = iz;
+        debugBuf[3] = as_int(field3d[idx3d].x);
+        debugBuf[4] = 1;
+    }
 }

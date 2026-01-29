@@ -85,8 +85,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Boost::beast)
 find_package(CLI11 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE CLI11::CLI11)
 
-# find_package(OpenCL CONFIG REQUIRED)
-# target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
+find_package(OpenCL CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 
 #compile tim arg -lOpenCL
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lOpenCL")
@@ -94,8 +94,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lOpenCL")
 target_link_options(${PROJECT_NAME} PRIVATE "-Wl,-rpath,/usr/local/lib64")
 
 
-find_package(unofficial-whereami CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::whereami::whereami)
+# find_package(unofficial-whereami CONFIG REQUIRED)
+# target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::whereami::whereami)
 
 #ffmpeg
 find_package(PkgConfig REQUIRED)
@@ -125,11 +125,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE assimp::assimp)
 
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::sqlite3::sqlite3)
-
-find_package(unofficial-noise CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::noise::noise-static)
-find_package(unofficial-noiseutils CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::noiseutils::noiseutils-static)
 
 # MySQL Connector/C++ (required via vcpkg "unofficial" port)
 find_package(unofficial-mysql-connector-cpp CONFIG REQUIRED)

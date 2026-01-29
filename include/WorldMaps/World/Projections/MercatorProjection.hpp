@@ -9,19 +9,19 @@ public:
     GLuint project(World &world, int width, int height, int channels, std::string layerName, GLuint existingTexture) override
     {
         cl_mem fieldBuffer = world.getColor(layerName);
+        cl_mem mercatorBuffer = nullptr;
 
         if (fieldBuffer)
         {
             try
             {
-                if (mercatorBuffer)
-                    clReleaseMemObject(mercatorBuffer);
                 mercatorBuffer = mercatorProject(
                     fieldBuffer,
                     256, 256, 256,
                     width, height,
                     1.0f,
                     channels);
+                OpenCLContext::get().releaseMem(fieldBuffer);
             }
             catch (const std::exception &ex)
             {
@@ -100,6 +100,7 @@ public:
                     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_FLOAT, hostBuf.data());
                 }
             }
+            OpenCLContext::get().releaseMem(mercatorBuffer);
         }
         else
         {
@@ -111,7 +112,6 @@ public:
 private:
     GLuint texture = 0;
     int textureChannels = 0;
-    cl_mem mercatorBuffer = nullptr;
 
     static cl_program mercatorProgram;
 
@@ -165,7 +165,7 @@ private:
                 throw std::runtime_error("clCreateKernel failed for field3d_to_mercator_rgba");
 
             size_t total = (size_t)outW * (size_t)outH * sizeof(cl_float4);
-            output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, total, nullptr, &err);
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
             if (err != CL_SUCCESS)
             {
                 clReleaseKernel(kernel);
@@ -188,7 +188,7 @@ private:
                 throw std::runtime_error("clCreateKernel failed for field3d_to_mercator");
 
             size_t total = (size_t)outW * (size_t)outH * sizeof(float);
-            output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, total, nullptr, &err);
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
             if (err != CL_SUCCESS)
             {
                 clReleaseKernel(kernel);

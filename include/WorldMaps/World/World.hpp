@@ -36,6 +36,8 @@ public:
         }
     }
     cl_mem getColor(const std::string& layerName="") const{
+        // NOTE: Caller is responsible for releasing returned buffer via OpenCLContext::get().releaseMem()
+
         auto it = layers.find(layerName);
         if(it != layers.end()){
             return it->second->getColor(*this);
@@ -47,6 +49,7 @@ public:
         else{
             return nullptr; //empty color
         }
+        
     }
     void addLayer(const std::string& name, std::unique_ptr<MapLayer> layer){
         layers[name] = std::move(layer);
