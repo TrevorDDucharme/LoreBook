@@ -16,13 +16,6 @@ public:
         SampleData elevationData = sample(world);
         cl_mem elevationBuffer = elevationData.channels[0];
         cl_int err = CL_SUCCESS;
-        size_t totalVoxels = (size_t)256 * (size_t)256 * (size_t)256;
-        cl_mem colorBuffer = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, totalVoxels * sizeof(cl_float4), nullptr, &err);
-        if(err != CL_SUCCESS){
-            throw std::runtime_error("clCreateBuffer failed for ElevationLayer colorBuffer");
-        }
-        // Diagnostics: log memory usage after allocating the color buffer
-        OpenCLContext::get().logMemoryUsage();
         // Convert elevation scalar values to grayscale RGBA colors
         static std::vector<std::array<uint8_t,4>> grayRamp = {
             MapLayer::rgba(0,0,0,255),
