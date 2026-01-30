@@ -1,6 +1,6 @@
 #pragma once
 #include <WorldMaps/Map/MapLayer.hpp>
-
+#include <WorldMaps/World/World.hpp>
 class ElevationLayer : public MapLayer {
 public:
     ElevationLayer()= default;
@@ -14,13 +14,13 @@ public:
             coloredBuffer = nullptr;
         }
     }
-    SampleData sample(const World&) override{
+    SampleData sample() override{
         SampleData data;
         data.channels.push_back(getElevationBuffer());
         return data;
     }
 
-    cl_mem getColor(const World& world) override{
+    cl_mem getColor() override{
         //build new cl_mem buffer with RGBA colors based on elevation data (gray scale, full alpha)
         cl_mem elevationBuffer = getElevationBuffer();
         cl_int err = CL_SUCCESS;
@@ -30,7 +30,7 @@ public:
             MapLayer::rgba(255,255,255,255)
         };
         if(coloredBuffer == nullptr){
-            scalarToColor(coloredBuffer, elevationBuffer, 256, 256, 256, 2, grayRamp);
+            scalarToColor(coloredBuffer, elevationBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
         }
         return coloredBuffer;
     }
@@ -38,7 +38,7 @@ public:
 private:
     cl_mem getElevationBuffer(){
         if(elevationBuffer == nullptr){
-            perlin(elevationBuffer,256, 256, 256, .01f, 2.0f, 8, 0.5f, 12345u);
+            perlin(elevationBuffer,parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
         }
         return elevationBuffer;
     }

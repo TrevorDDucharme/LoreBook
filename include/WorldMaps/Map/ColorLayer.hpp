@@ -19,17 +19,17 @@ public:
             coloredBuffer = nullptr;
         }
     }
-    SampleData sample(const World &) override
+    SampleData sample() override
     {
         SampleData data;
-        data.channels.push_back(getcolorBuffer());
+        data.channels.push_back(getColorBuffer());
         return data;
     }
 
-    cl_mem getColor(const World &world) override
+    cl_mem getColor() override
     {
         // build new cl_mem buffer with RGBA colors based on elevation data (gray scale, full alpha)
-        cl_mem colorBuffer = getcolorBuffer();
+        cl_mem colorBuffer = getColorBuffer();
         cl_int err = CL_SUCCESS;
         // Convert elevation scalar values to grayscale RGBA colors
         static std::vector<std::array<uint8_t, 4>> grayRamp = {
@@ -37,17 +37,17 @@ public:
             MapLayer::rgba(0, 0, 255, 255)};
         if (coloredBuffer == nullptr)
         {
-            scalarToColor(coloredBuffer, colorBuffer, 256, 256, 256, 2, grayRamp);
+            scalarToColor(coloredBuffer, colorBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
         }
         return coloredBuffer;
     }
 
 private:
-    cl_mem getcolorBuffer()
+    cl_mem getColorBuffer()
     {
         if (colorBuffer == nullptr)
         {
-            perlin(colorBuffer, 256, 256, 256, .01f, 2.0f, 8, 0.5f, 12345u);
+            perlin(colorBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
         }
         return colorBuffer;
     }

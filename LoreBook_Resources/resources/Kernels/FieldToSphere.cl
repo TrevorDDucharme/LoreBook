@@ -1,3 +1,4 @@
+// RGBA variant: read float4 field and output float4 per pixel
 __kernel void sphere_perspective_sample_rgba(
     __global const float4* field3d,
     int fieldW,
@@ -83,5 +84,4 @@ __kernel void sphere_perspective_sample_rgba(
     int fieldIdx = ix + iy * fieldW + iz * fieldW * fieldH;
 
     output[idx] = field3d[fieldIdx];
-    output[idx].w = 1.0f; // ensure alpha is 1.0
 }

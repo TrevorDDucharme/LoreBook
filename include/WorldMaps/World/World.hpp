@@ -36,12 +36,12 @@ public:
         auto it = layers.find(layerName);
         if (it != layers.end())
         {
-            return it->second->sample(*this);
+            return it->second->sample();
         }
         // if map layer not found and we have at least one layer, use the first one
         if (!layers.empty())
         {
-            return layers.begin()->second->sample(*this);
+            return layers.begin()->second->sample();
         }
         else
         {
@@ -53,12 +53,12 @@ public:
         auto it = layers.find(layerName);
         if (it != layers.end())
         {
-            return it->second->getColor(*this);
+            return it->second->getColor();
         }
         // if map layer not found and we have at least one layer, use the first one
         if (!layers.empty())
         {
-            return layers.begin()->second->getColor(*this);
+            return layers.begin()->second->getColor();
         }
         else
         {
@@ -68,6 +68,7 @@ public:
 
     void addLayer(const std::string &name, std::unique_ptr<MapLayer> layer)
     {
+        layer->setParentWorld(this);
         layers[name] = std::move(layer);
     }
 
@@ -93,9 +94,15 @@ public:
         return names;
     }
 
+    int getWorldWidth() const { return worldW; }
+    int getWorldHeight() const { return worldH; }
+    int getWorldDepth() const { return worldD; }
+
 private:
 
-    
+    int worldW=256;
+    int worldH=256;
+    int worldD=256;
 
     //Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature
     void parseConfig(const std::string &config)

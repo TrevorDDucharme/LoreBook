@@ -65,7 +65,7 @@ public:
                 spherePerspectiveSample(
                     sphereBuffer,
                     fieldBuffer,
-                    256, 256, 256,
+                    world.getWorldWidth(), world.getWorldHeight(), world.getWorldDepth(),
                     width, height,
                     camPosX, camPosY, camPosZ,
                     camForwardX, camForwardY, camForwardZ,
@@ -104,8 +104,8 @@ public:
         if (sphereBuffer)
         {
             cl_int err = CL_SUCCESS;
-            size_t bufSize = (size_t)width * (size_t)height * sizeof(cl_float4);
-            std::vector<cl_float4> hostBuf((size_t)width * (size_t)height);
+            size_t bufSize = (size_t)width * (size_t)height * sizeof(float)*4;
+            std::vector<float> hostBuf((size_t)width * (size_t)height*4);
             err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), sphereBuffer, CL_TRUE, 0, bufSize, hostBuf.data(), 0, nullptr, nullptr);
             if (err != CL_SUCCESS)
             {
