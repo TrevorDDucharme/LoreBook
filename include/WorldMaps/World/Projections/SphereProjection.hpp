@@ -127,11 +127,6 @@ public:
 
     ~SphericalProjection() override
     {
-        if (texture != 0)
-        {
-            glDeleteTextures(1, &texture);
-            texture = 0;
-        }
         if (sphereBuffer != nullptr)
         {
             OpenCLContext::get().releaseMem(sphereBuffer);
@@ -237,7 +232,7 @@ public:
         }
 
         if(output == nullptr){
-            output = clCreateBuffer(ctx, CL_MEM_READ_WRITE, outSize, nullptr, &err);
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "spherePerspective rgba output");
             if (err != CL_SUCCESS)
             {
                 throw std::runtime_error("clCreateBuffer failed for spherePerspective rgba output");

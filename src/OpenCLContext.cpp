@@ -94,15 +94,6 @@ bool OpenCLContext::init()
 
     clReady = true;
 
-    // Create persistent debug buffer (always-on). If this fails we log but continue.
-    try
-    {
-        ensureDebugBuffer();
-    }
-    catch (const std::exception &e)
-    {
-        fprintf(stderr, "[OpenCL Debug] failed to create persistent debug buffer: %s\n", e.what());
-    }
     PLOG_INFO << "OpenCL initialized successfully";
     return true;
 }
@@ -125,9 +116,16 @@ void OpenCLContext::cleanup()
     clDeviceIsGPU = false;
 }
 
+static std::unordered_map<std::string, size_t> debugMemAllocations={};
+static std::unordered_map<cl_mem, std::string> tagLookup={};
+
 // --- Tracked buffer helpers ---
-cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err)
+cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err, std::string debugTag)
 {
+    if(debugTag=="unknown"){
+        PLOG_WARNING << "OpenCLContext::createBuffer called with default debugTag 'unknown'";
+    }
+
     cl_int localErr = CL_SUCCESS;
     cl_mem mem = clCreateBuffer(clContext, flags, size, hostPtr, &localErr);
     if (localErr == CL_SUCCESS && mem != nullptr)
@@ -135,6 +133,8 @@ cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPt
         std::lock_guard<std::mutex> lk(memTrackMutex_);
         memSizes_[mem] = size;
         totalAllocated_ += size;
+        debugMemAllocations[debugTag]++;
+        tagLookup[mem] = debugTag;
         // PLOG_INFO << "OpenCL alloc: mem=" << mem << " size=" << size << " totalAllocated=" << totalAllocated_;
 
         // Check device global memory and warn if we are nearing capacity
@@ -175,6 +175,8 @@ void OpenCLContext::releaseMem(cl_mem mem)
             totalAllocated_ -= it->second;
             memSizes_.erase(it);
         }
+        debugMemAllocations[tagLookup[mem]]--;
+        tagLookup.erase(mem);
     }
     cl_int e = clReleaseMemObject(mem);
     // PLOG_INFO << "OpenCL free: mem=" << mem << " freed=" << size << " totalAllocated=" << totalAllocated_ << " clReleaseErr=" << e;
@@ -183,14 +185,24 @@ void OpenCLContext::releaseMem(cl_mem mem)
 void OpenCLContext::logMemoryUsage() const
 {
     size_t total = 0, count = 0;
+    std::vector<std::pair<std::string, size_t>> debugAllocSnapshot;
     {
         std::lock_guard<std::mutex> lk(memTrackMutex_);
         total = totalAllocated_;
         count = memSizes_.size();
+        debugAllocSnapshot.reserve(debugMemAllocations.size());
+        for (const auto &kv : debugMemAllocations)
+        {
+            debugAllocSnapshot.emplace_back(kv.first, kv.second);
+        }
     }
     cl_ulong deviceTotal = 0;
     clGetDeviceInfo(clDevice, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(deviceTotal), &deviceTotal, nullptr);
     PLOG_INFO << "OpenCL Memory: allocated=" << total << " bytes in " << count << " buffers; deviceTotal=" << deviceTotal;
+    for (const auto &kv : debugAllocSnapshot)
+    {
+        PLOG_INFO << "  Tag: " << kv.first << " Count: " << kv.second;
+    }
 }
 
 size_t OpenCLContext::getTotalAllocated() const

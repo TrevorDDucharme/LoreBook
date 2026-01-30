@@ -32,39 +32,8 @@ public:
     cl_device_id getDevice() const { return clDevice; }
     cl_platform_id getPlatform() const { return clPlatform; }
 
-    // Persistent, always-on debug buffer (8 ints): see layout above in kernels
-    cl_mem getDebugBuffer() const { return debugBuf_; }
-
-    // Ensure a debug buffer exists (creates it lazily). Throws on failure.
-    cl_mem ensureDebugBuffer()
-    {
-        if (debugBuf_ != nullptr)
-            return debugBuf_;
-
-        cl_int err = CL_SUCCESS;
-        debugBuf_ = createBuffer(CL_MEM_READ_WRITE, sizeof(int) * 8, nullptr, &err);
-        if (err != CL_SUCCESS || debugBuf_ == nullptr)
-            throw std::runtime_error("Failed to create OpenCL debug buffer");
-
-        int zeros[8] = {0,0,0,0,0,0,0,0};
-        if (clEnqueueWriteBuffer(clQueue, debugBuf_, CL_TRUE, 0, sizeof(zeros), zeros, 0, nullptr, nullptr) != CL_SUCCESS)
-            throw std::runtime_error("Failed to initialize OpenCL debug buffer");
-
-        return debugBuf_;
-    }
-
-    // Release the persistent debug buffer (safe to call multiple times)
-    void releaseDebugBuffer()
-    {
-        if (debugBuf_ != nullptr)
-        {
-            releaseMem(debugBuf_);
-            debugBuf_ = nullptr;
-        }
-    }
-
     // Tracked allocation helpers (wrap clCreateBuffer / clReleaseMemObject)
-    cl_mem createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err = nullptr);
+    cl_mem createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err = nullptr, std::string debugTag = "unknown");
     void releaseMem(cl_mem mem);
     void logMemoryUsage() const;
     size_t getTotalAllocated() const;
@@ -160,7 +129,7 @@ static void perlin(cl_mem& output,int width,
     }
 
     if(output == nullptr){
-        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err);
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "perlin output");
         if (err != CL_SUCCESS || output == nullptr)
         {
             throw std::runtime_error("clCreateBuffer failed for perlin output");
@@ -242,7 +211,7 @@ static void scalarToColor(cl_mem& output,
         col.s[3] = static_cast<float>(c[3]) / 255.0f;
         paletteFloats.push_back(col);
     }
-    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err);
+    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err, "scalarToColor paletteBuf");
     if (err != CL_SUCCESS || paletteBuf == nullptr)
     {
         throw std::runtime_error("clCreateBuffer failed for scalarToColor paletteBuf");
@@ -267,7 +236,7 @@ static void scalarToColor(cl_mem& output,
     }
 
     if(output == nullptr){
-        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "scalarToColor output");
         if (err != CL_SUCCESS || output == nullptr)
         {
             OpenCLContext::get().releaseMem(paletteBuf);
@@ -332,7 +301,7 @@ static void concatVolumes(cl_mem& output,
 
     if (output == nullptr)
     {
-        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err);
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "concatVolumes output");
         if (err != CL_SUCCESS || output == nullptr)
         {
             throw std::runtime_error("clCreateBuffer failed for concatVolumes output");

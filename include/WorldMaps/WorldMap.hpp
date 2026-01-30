@@ -413,9 +413,11 @@ static void worldMap()
         world.addLayer("biome", std::make_unique<BiomeLayer>());
 
         static ImVec2 texSize(512, 512);
+        
+
         mercatorMap("Mercator World Map", texSize, world);
         ImGui::SameLine();
-        globeMap("Globe World Map", texSize, world);
+        //globeMap("Globe World Map", texSize, world);
     }
     ImGui::End();
 }
