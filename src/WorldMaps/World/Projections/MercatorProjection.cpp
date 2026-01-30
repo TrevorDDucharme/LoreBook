@@ -82,10 +82,8 @@ GLuint MercatorProjection::project(World &world, int width, int height, std::str
         {
             PLOGE << "clEnqueueReadBuffer failed: " << err;
         }
-        else
-        {
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, hostBuf.data());
-        }
+        clFinish(OpenCLContext::get().getQueue());
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, hostBuf.data());
     }
     else
     {
@@ -198,5 +196,4 @@ void MercatorProjection::mercatorProject(
 
     size_t global[2] = {(size_t)outW, (size_t)outH};
     err = clEnqueueNDRangeKernel(queue, mercatorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
-    clFinish(queue);
 }

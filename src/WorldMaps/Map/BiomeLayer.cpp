@@ -264,7 +264,6 @@ void BiomeLayer::biomeColorMap(cl_mem &output, cl_mem biomeMasks, int fieldW, in
 
     size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
     err = clEnqueueNDRangeKernel(queue, kernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
-    clFinish(queue);
 
     OpenCLContext::get().releaseMem(paletteBuf);
 }

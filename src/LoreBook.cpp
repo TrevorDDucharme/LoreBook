@@ -1196,6 +1196,7 @@ int main(int argc, char** argv)
             glfwMakeContextCurrent(backup_current_context);
         }
 
+        FrameMark;
         glfwSwapBuffers(window);
     }
 

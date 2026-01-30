@@ -111,10 +111,8 @@ public:
             {
                 PLOGE << "clEnqueueReadBuffer failed: " << err;
             }
-            else
-            {
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, hostBuf.data());
-            }
+            clFinish(OpenCLContext::get().getQueue());
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, hostBuf.data());
         }
         else
         {
@@ -264,6 +262,5 @@ public:
 
         size_t global[2] = {(size_t)screenW, (size_t)screenH};
         err = clEnqueueNDRangeKernel(queue, spherePerspectiveKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
-        clFinish(queue);
     }
 };

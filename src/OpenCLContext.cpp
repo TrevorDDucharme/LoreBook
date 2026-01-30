@@ -122,6 +122,7 @@ static std::unordered_map<cl_mem, std::string> tagLookup={};
 // --- Tracked buffer helpers ---
 cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err, std::string debugTag)
 {
+    ZoneScopedN("OpenCLContext::createBuffer");
     if(debugTag=="unknown"){
         PLOG_WARNING << "OpenCLContext::createBuffer called with default debugTag 'unknown'";
     }
@@ -135,6 +136,8 @@ cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPt
         totalAllocated_ += size;
         debugMemAllocations[debugTag]++;
         tagLookup[mem] = debugTag;
+        TracyPlot("OpenCL Total Allocated", static_cast<double>(totalAllocated_));
+        TracyPlot(("Buffers For Tag " + debugTag).c_str(), static_cast<double>(debugMemAllocations[debugTag]));
         // PLOG_INFO << "OpenCL alloc: mem=" << mem << " size=" << size << " totalAllocated=" << totalAllocated_;
 
         // Check device global memory and warn if we are nearing capacity
@@ -177,6 +180,9 @@ void OpenCLContext::releaseMem(cl_mem mem)
         }
         debugMemAllocations[tagLookup[mem]]--;
         tagLookup.erase(mem);
+
+        TracyPlot("OpenCL Total Allocated", static_cast<double>(totalAllocated_));
+        TracyPlot(("Buffers For Tag " + tagLookup[mem]).c_str(), static_cast<double>(debugMemAllocations[tagLookup[mem]]));
     }
     cl_int e = clReleaseMemObject(mem);
     // PLOG_INFO << "OpenCL free: mem=" << mem << " freed=" << size << " totalAllocated=" << totalAllocated_ << " clReleaseErr=" << e;

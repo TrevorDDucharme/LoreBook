@@ -85,6 +85,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Boost::beast)
 find_package(CLI11 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE CLI11::CLI11)
 
+#tracy profiler
+find_package(Tracy CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE Tracy::TracyClient)
+
 find_package(OpenCL CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 

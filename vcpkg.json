@@ -42,7 +42,12 @@
 		"assimp",
 		"mysql-connector-cpp",
 		"libgit2",
-		"tracy",
+		{
+			"name": "tracy",
+			"features": [
+				"gui-tools"
+			]
+		},
 		"opencl"
 	]
 }

@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstddef>
+#define TRACY_ENABLE
+#include <tracy/Tracy.hpp>
+#include <tracy/TracyOpenCL.hpp>
+
 
 /// Global OpenCL context manager - provides shared OpenCL resources
 /// for all parts of the application (nodes, utilities, etc.)
@@ -75,6 +79,7 @@ static void perlin(cl_mem& output,int width,
                      float persistence,
                      unsigned int seed)
 {
+    ZoneScopedN("Perlin");
     if (!OpenCLContext::get().isReady())
         return;
 
@@ -85,6 +90,7 @@ static void perlin(cl_mem& output,int width,
 
     if (gPerlinProgram == nullptr)
     {
+        ZoneScopedN("Perlin Program Init");
         std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/Perlin.cl");
         const char *src = kernel_code.c_str();
         size_t len = kernel_code.length();
@@ -106,37 +112,41 @@ static void perlin(cl_mem& output,int width,
     }
 
     if(gPerlinKernel == nullptr){
+        ZoneScopedN("Perlin Kernel Init");
         gPerlinKernel = clCreateKernel(gPerlinProgram, "perlin_fbm_3d", &err);
         if (err != CL_SUCCESS)
             throw std::runtime_error("clCreateKernel failed for perlin_fbm_3d");
     }
 
-    size_t total = (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
-    size_t buffer_size;
-    if(output != nullptr){
-        cl_int err = clGetMemObjectInfo(output,
-                                        CL_MEM_SIZE,
-                                        sizeof(buffer_size),
-                                        &buffer_size,
-                                        NULL);
-        if (err != CL_SUCCESS) {
-            throw std::runtime_error("clGetMemObjectInfo failed for perlin output buffer size");
+    {
+        ZoneScopedN("Perlin Buffer Alloc");
+        size_t total = (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
+        size_t buffer_size;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(buffer_size),
+                                            &buffer_size,
+                                            NULL);
+            if (err != CL_SUCCESS) {
+                throw std::runtime_error("clGetMemObjectInfo failed for perlin output buffer size");
+            }
+            if(buffer_size < total){
+                TracyMessageL("Reallocating perlin output buffer required");
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
         }
-        if(buffer_size < total){
-            OpenCLContext::get().releaseMem(output);
-            output = nullptr;
-        }
-    }
 
-    if(output == nullptr){
-        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "perlin output");
-        if (err != CL_SUCCESS || output == nullptr)
-        {
-            throw std::runtime_error("clCreateBuffer failed for perlin output");
-        }
-    }   
-    // diagnostics: log memory usage after allocating perlin output buffer
-    OpenCLContext::get().logMemoryUsage();
+        if(output == nullptr){
+            TracyMessageL("Allocating perlin output buffer");
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "perlin output");
+            if (err != CL_SUCCESS || output == nullptr)
+            {
+                throw std::runtime_error("clCreateBuffer failed for perlin output");
+            }
+        }   
+    }
 
     clSetKernelArg(gPerlinKernel, 0, sizeof(cl_mem), &output);
     clSetKernelArg(gPerlinKernel, 1, sizeof(int), &width);
@@ -149,8 +159,14 @@ static void perlin(cl_mem& output,int width,
     clSetKernelArg(gPerlinKernel, 8, sizeof(unsigned int), &seed);
 
     size_t global[3] = {(size_t)width, (size_t)height, (size_t)depth};
-    err = clEnqueueNDRangeKernel(queue, gPerlinKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
-    clFinish(queue);
+    {
+        ZoneScopedN("Perlin Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gPerlinKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for perlin");
+        }
+    }
 }
 
 static cl_program gScalarToColorProgram = nullptr;
@@ -164,6 +180,7 @@ static void scalarToColor(cl_mem& output,
                             int colorCount,
                             const std::vector<std::array<unsigned char, 4>> &paletteColors)
 {
+    ZoneScopedN("ScalarToColor");
     if (!OpenCLContext::get().isReady())
         return;
 
@@ -174,6 +191,7 @@ static void scalarToColor(cl_mem& output,
 
     if (gScalarToColorProgram == nullptr)
     {
+        ZoneScopedN("ScalarToColor Program Init");
         std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/ScalarToColor.cl");
         const char *src = kernel_code.c_str();
         size_t len = kernel_code.length();
@@ -194,6 +212,7 @@ static void scalarToColor(cl_mem& output,
     }
 
     if (gScalarToColorKernel == nullptr){
+        ZoneScopedN("ScalarToColor Kernel Init");
         gScalarToColorKernel = clCreateKernel(gScalarToColorProgram, "scalar_to_rgba_float4", &err);
         if (err != CL_SUCCESS)
             throw std::runtime_error("clCreateKernel failed for scalar_to_rgba_float4");
@@ -221,6 +240,7 @@ static void scalarToColor(cl_mem& output,
     size_t outSize = voxels * sizeof(cl_float4);
 
     if(output != nullptr){
+        TracyMessageL("Reallocating scalarToColor output buffer required");
         cl_int err = clGetMemObjectInfo(output,
                                         CL_MEM_SIZE,
                                         sizeof(size_t),
@@ -236,6 +256,7 @@ static void scalarToColor(cl_mem& output,
     }
 
     if(output == nullptr){
+        TracyMessageL("Allocating scalarToColor output buffer");
         output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "scalarToColor output");
         if (err != CL_SUCCESS || output == nullptr)
         {
@@ -243,9 +264,6 @@ static void scalarToColor(cl_mem& output,
             throw std::runtime_error("clCreateBuffer failed for scalarToColor output");
         }
     }
-
-    // diagnostics: log memory usage after allocating scalarToColor output buffer
-    OpenCLContext::get().logMemoryUsage();
 
     clSetKernelArg(gScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
     clSetKernelArg(gScalarToColorKernel, 1, sizeof(int), &fieldW);
@@ -256,8 +274,11 @@ static void scalarToColor(cl_mem& output,
     clSetKernelArg(gScalarToColorKernel, 6, sizeof(cl_mem), &output);
 
     size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
-    err = clEnqueueNDRangeKernel(queue, gScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
-    clFinish(queue);
+    
+    {
+        ZoneScopedN("ScalarToColor Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+    }
 
     OpenCLContext::get().releaseMem(paletteBuf);
 }
@@ -269,6 +290,7 @@ static void concatVolumes(cl_mem& output,
                                 int fieldH,
                                 int fieldD)
 {
+    ZoneScopedN("ConcatVolumes");
    if (!OpenCLContext::get().isReady())
         return;
 
@@ -284,6 +306,7 @@ static void concatVolumes(cl_mem& output,
 
     if (output != nullptr)
     {
+        TracyMessageL("Reallocating concatVolumes output buffer required");
         size_t current_size = 0;
         cl_int info_err = clGetMemObjectInfo(output,
                                             CL_MEM_SIZE,
@@ -301,6 +324,7 @@ static void concatVolumes(cl_mem& output,
 
     if (output == nullptr)
     {
+        TracyMessageL("Allocating concatVolumes output buffer");
         output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "concatVolumes output");
         if (err != CL_SUCCESS || output == nullptr)
         {
@@ -308,22 +332,23 @@ static void concatVolumes(cl_mem& output,
         }
     }
     
-    for (int c = 0; c < num_channels; c++) {
-        //dowload each channel and copy to the right location in output
-        size_t channel_offset = static_cast<size_t>(c) * voxel_count * sizeof(float);
-        err = clEnqueueCopyBuffer(queue,
-                                  inputVolumes[c],
-                                  output,
-                                  0,
-                                  channel_offset,
-                                  voxel_count * sizeof(float),
-                                  0,
-                                  nullptr,
-                                  nullptr);
-        if (err != CL_SUCCESS) {
-            throw std::runtime_error("clEnqueueCopyBuffer failed in concatVolumes");
+    {
+        ZoneScopedN("ConcatVolumes Enqueue Copies");
+        for (int c = 0; c < num_channels; c++) {
+            //dowload each channel and copy to the right location in output
+            size_t channel_offset = static_cast<size_t>(c) * voxel_count * sizeof(float);
+            err = clEnqueueCopyBuffer(queue,
+                                    inputVolumes[c],
+                                    output,
+                                    0,
+                                    channel_offset,
+                                    voxel_count * sizeof(float),
+                                    0,
+                                    nullptr,
+                                    nullptr);
+            if (err != CL_SUCCESS) {
+                throw std::runtime_error("clEnqueueCopyBuffer failed in concatVolumes");
+            }
         }
     }
-
-    clFinish(queue);
 }
