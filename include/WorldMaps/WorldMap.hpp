@@ -24,11 +24,11 @@ static void mercatorMap(const char *label, ImVec2 texSize, World &world)
 
     // Map control state
     int worldMapLayer = 0;
-    static float mapCenterLon = 0.0f;
-    static float mapCenterLat = 0.0f;
-    static float mapZoom = 1.0f;
-    static GLuint worldMapTexture = 0;
-    static float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
+    float mapCenterLon = 0.0f;
+    float mapCenterLat = 0.0f;
+    float mapZoom = 1.0f;
+    GLuint worldMapTexture = 0;
+    float lastCenterLon = 0.0f, lastCenterLat = 0.0f, lastZoom = 1.0f;
     
     if(worldMapLayerMap.find(id) == worldMapLayerMap.end())
     {
@@ -410,14 +410,13 @@ static void worldMap()
         static World world;
         static ElevationLayer elevationLayer;
         world.addLayer("elevation", std::make_unique<ElevationLayer>());
-        world.addLayer("biome", std::make_unique<BiomeLayer>());
 
         static ImVec2 texSize(512, 512);
         
 
         mercatorMap("Mercator World Map", texSize, world);
         ImGui::SameLine();
-        //globeMap("Globe World Map", texSize, world);
+        globeMap("Globe World Map", texSize, world);
     }
     ImGui::End();
 }
