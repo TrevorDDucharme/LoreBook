@@ -129,6 +129,9 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
     }
     // Step 3: Iteratively accumulate flow
     const int flowIterations = maxSteps;
+    float river_threshold = 0.1f;
+    float slope_epsilon = 0.0002f;
+    float height_epsilon = 0.001f;
     for (int iter = 0; iter < flowIterations; ++iter) {
 
         clSetKernelArg(gRiverFlowAccumulateKernel, 0, sizeof(cl_mem), &elevationBuf);
@@ -138,6 +141,9 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
         clSetKernelArg(gRiverFlowAccumulateKernel, 4, sizeof(int), &longitudeResolution);
         clSetKernelArg(gRiverFlowAccumulateKernel, 5, sizeof(cl_mem), &flowAccBufA);
         clSetKernelArg(gRiverFlowAccumulateKernel, 6, sizeof(cl_mem), &flowAccBufB);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 7, sizeof(float), &river_threshold);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 8, sizeof(float), &slope_epsilon);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 9, sizeof(float), &height_epsilon);
         size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
         err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowAccumulateKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
