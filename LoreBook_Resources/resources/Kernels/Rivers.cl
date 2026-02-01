@@ -87,7 +87,7 @@ __kernel void river_flow_source(
         return;
     }
 
-    flow[idx] = rand_chance(12345, x, y, 0.01f) ? 1.0f : 0.0f;
+    flow[idx] = rand_chance(12345, x, y, chance) ? 1.0f : 0.0f;
 }
 
 __kernel void river_flow_accumulate(
@@ -110,41 +110,71 @@ __kernel void river_flow_accumulate(
     
     float2 flow_vec = river_flow_dir(x, y, elevation, water, longitude, latitude);
     float mag = length(flow_vec);
-    float2 dir = normalize(flow_vec);
+    
+    float in_flow = flow_in[idx] + flow_sources[idx];
+    
     /*
-        create a matrix of the 3x3 neighborhood using the direction vector and the magnitude
-        to distribute flow to the neighboring cells a higher magnitude means less spread
+        Use magnitude to control spread:
+        - High magnitude = tight/focused spread (steep terrain)
+        - Low magnitude = broad spread (gentle terrain)
+        - Zero magnitude = even distribution (flat terrain)
     */
     if (mag <= 0.0f)
     {
-        flow_out[idx] = flow_in[idx] + flow_sources[idx];
+        // Completely flat - distribute evenly to all 8 neighbors (excluding center)
+        float distributed = in_flow / 8.0f;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                int nx = x + dx;
+                int ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= longitude || ny >= latitude)
+                    continue;
+                int nidx = nx + ny * longitude;
+                atomic_add_float(&flow_out[nidx], distributed);
+            }
+        }
         return;
     }
+    
+    float2 dir = normalize(flow_vec);
+    
+    // Use magnitude to control sharpness: higher magnitude = more focused flow
+    // Exponential mapping for much sharper directional flow at high magnitudes
+    float sharpness = exp(mag * 20.0f);
+    
     float total_weight = 0.0f;
     float weights[3][3];
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) {
+                weights[dy+1][dx+1] = 0.0f;
+                continue;
+            }
             float2 offset = (float2)(dx, dy);
             float proj = dot(normalize(offset), dir);
             float weight = fmax(proj, 0.0f);
-            weight *= weight; // square to sharpen
+            // Apply sharpness based on magnitude
+            weight = pow(weight, sharpness);
             weights[dy+1][dx+1] = weight;
             total_weight += weight;
         }
     }
-    // distribute flow to neighbors
-    float in_flow = flow_in[idx] + flow_sources[idx];
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            float weight = weights[dy+1][dx+1];
-            if (weight <= 0.0f) continue;
-            int nx = x + dx;
-            int ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= longitude || ny >= latitude)
-                continue;
-            int nidx = nx + ny * longitude;
-            float distributed_flow = in_flow * (weight / total_weight);
-            atomic_add_float(&flow_out[nidx], distributed_flow);
+    
+    // Distribute flow to neighbors
+    if (total_weight > 0.0f) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                float weight = weights[dy+1][dx+1];
+                if (weight <= 0.0f) continue;
+                int nx = x + dx;
+                int ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= longitude || ny >= latitude)
+                    continue;
+                int nidx = nx + ny * longitude;
+                float distributed_flow = in_flow * (weight / total_weight);
+                atomic_add_float(&flow_out[nidx], distributed_flow);
+            }
         }
     }
 }

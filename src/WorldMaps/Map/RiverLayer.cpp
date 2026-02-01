@@ -48,7 +48,7 @@ cl_mem RiverLayer::getRiverBuffer()
                            riverBuffer,
                            parentWorld->getWorldLatitudeResolution(),
                            parentWorld->getWorldLongitudeResolution(),
-                           2); // maxSteps
+                           100); // maxSteps
     }
     return riverBuffer;
 }
@@ -111,7 +111,7 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
     {
         float minHeight = 0.6f;
         float maxHeight = .61f;
-        float chance = 0.00000001f;
+        float chance = 0.001f;
         clSetKernelArg(gRiverFlowSourceKernel, 0, sizeof(cl_mem), &elevationBuf);
         clSetKernelArg(gRiverFlowSourceKernel, 1, sizeof(cl_mem), &waterTableBuf);
         clSetKernelArg(gRiverFlowSourceKernel, 2, sizeof(int), &latitudeResolution);
