@@ -30,7 +30,7 @@ cl_mem HumidityLayer::getColor()
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
     {
-        scalarToColor(coloredBuffer, humidityBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
+        scalarToColor(coloredBuffer, humidityBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), 2, grayRamp);
     }
     return coloredBuffer;
 }
@@ -39,7 +39,7 @@ cl_mem HumidityLayer::getHumidityBuffer()
 {
     if (humidityBuffer == nullptr)
     {
-        perlin(humidityBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
+        perlin(humidityBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), .01f, 2.0f, 8, 0.5f, 12345u);
     }
     return humidityBuffer;
 }

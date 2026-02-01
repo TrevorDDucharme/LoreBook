@@ -111,21 +111,7 @@ public:
         }
         return result;
     }
-
-    static float ComputeMaxAmplitude(int octaves, float persistence)
-    {
-        float amp = 1.0f;
-        float maxAmp = 0.0f;
-
-        for (int i = 0; i < octaves; ++i)
-        {
-            maxAmp += amp;
-            amp *= persistence;
-        }
-
-        return maxAmp;
-    }
-
+    
     void setParentWorld(World* world){
         parentWorld = world;
     }

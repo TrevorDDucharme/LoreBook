@@ -30,7 +30,7 @@ cl_mem ColorLayer::getColor()
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
     {
-        scalarToColor(coloredBuffer, colorBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
+        scalarToColor(coloredBuffer, colorBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), 2, grayRamp);
     }
     return coloredBuffer;
 }
@@ -39,7 +39,7 @@ cl_mem ColorLayer::getColorBuffer()
 {
     if (colorBuffer == nullptr)
     {
-        perlin(colorBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
+        perlin(colorBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), .01f, 2.0f, 8, 0.5f, 12345u);
     }
     return colorBuffer;
 }

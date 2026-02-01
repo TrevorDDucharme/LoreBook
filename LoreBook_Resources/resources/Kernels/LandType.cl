@@ -1,6 +1,6 @@
 #include "Perlin.cl"
 
-__kernel void landtype(int W, int H, int D, int landtypeCount,
+__kernel void landtype(int latitudeResolution, int longitudeResolution, int landtypeCount,
                        __global const float *frequency,
                        __global const float *lacunarity,
                        __global const int *octaves,
@@ -9,23 +9,21 @@ __kernel void landtype(int W, int H, int D, int landtypeCount,
                        __global const float4 *palette,
                        int mode, 
                        __global float4 *outRGBA) {
-  int x = get_global_id(0);
-  int y = get_global_id(1);
-  int z = get_global_id(2);
-  if (x >= W || y >= H || z >= D)
+  int latitude = get_global_id(0);
+  int longitude = get_global_id(1);
+  if (latitude >= latitudeResolution || longitude >= longitudeResolution)
     return;
 
-  int idx = x + y * W + z * W * H;
-  int voxels = W * H * D;
+  int idx = latitude * longitudeResolution + longitude;
+  int voxels = latitudeResolution * longitudeResolution;
 
   if (mode == 0) {
-    // Argmax mapping
+    // Argmax mapping (sample channels on the sphere by lat/long)
     float bestVal = -INFINITY;
     int bestIdx = 0;
     for (int b = 0; b < landtypeCount; ++b) {
-      float val = perlin_3d_channels_util(
-            x, y, z, b,
-            W, H, D, landtypeCount,
+      float val = perlin_3d_sphere_sample_channels_util(
+            latitude, longitude, latitudeResolution, longitudeResolution, b, landtypeCount,
             frequency,
             lacunarity,
             octaves,
@@ -47,13 +45,12 @@ __kernel void landtype(int W, int H, int D, int landtypeCount,
     const float minNormalizedForBlend =
         0.05f; // if best landtype < this, use argmax
 
-    // Find max (best) value and best index
+    // Find max (best) value and best index (sphere sampling)
     float maxW = -INFINITY;
     int bestIdx = 0;
     for (int b = 0; b < landtypeCount; ++b) {
-      float v = perlin_3d_channels_util(
-            x, y, z, b,
-            W, H, D, landtypeCount,
+      float v = perlin_3d_sphere_sample_channels_util(
+            latitude, longitude, latitudeResolution, longitudeResolution, b, landtypeCount,
             frequency,
             lacunarity,
             octaves,
@@ -76,14 +73,12 @@ __kernel void landtype(int W, int H, int D, int landtypeCount,
       float accX = 0.0f, accY = 0.0f, accZ = 0.0f, accW = 0.0f;
       float sumExp = 0.0f;
       for (int b = 0; b < landtypeCount; ++b) {
-        float w = perlin_3d_channels_util(
-            x, 
-            y, 
-            z, 
+        float w = perlin_3d_sphere_sample_channels_util(
+            latitude, 
+            longitude, 
+            latitudeResolution, 
+            longitudeResolution, 
             b,
-            W, 
-            H, 
-            D, 
             landtypeCount,
             frequency,
             lacunarity,

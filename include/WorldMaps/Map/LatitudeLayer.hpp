@@ -18,8 +18,7 @@ private:
 
     static void latitude(
         cl_mem &output,
-        int fieldW, 
-        int fieldH, 
-        int fieldD
+        int latitudeResolution,
+        int longitudeResolution
     );
 };

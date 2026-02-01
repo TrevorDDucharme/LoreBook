@@ -35,9 +35,7 @@ private:
 
     static void landtypeColorMap(
     cl_mem &output,
-    int fieldW, 
-    int fieldH, 
-    int fieldD, 
+    int latitudeResolution, int longitudeResolution,
     int landtypeCount, 
     const std::vector<float> &frequency,
     const std::vector<float> &lacunarity,

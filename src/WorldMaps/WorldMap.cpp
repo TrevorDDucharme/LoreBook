@@ -207,7 +207,9 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     bool globeInvertY = false;         // invert vertical drag
     float globeRotDegPerPixel = 0.25f; // degrees per pixel
     float globeZoomFactor = 1.12f;     // per wheel tick
-    float globeMinZoom = 0.01f;
+    // Allow camera to enter the sphere by permitting negative zoomLevel (distance from surface).
+    // Keep a safe minimum to avoid the camera reaching the origin.
+    float globeMinZoom = -0.95f;
     float globeMaxZoom = 64.0f;
     GLuint globeTexture = 0;
 
@@ -278,7 +280,7 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     }
     if (globeMinZoomMap.find(id) == globeMinZoomMap.end())
     {
-        globeMinZoomMap[id] = 0.01f;
+        globeMinZoomMap[id] = -0.95f; // allow entering the sphere, but not reaching center
     }
     else
     {
@@ -390,6 +392,12 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     ImGui::Checkbox("Invert Y", &globeInvertY);
     ImGui::SameLine();
     ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", globeCenterLon, globeCenterLat, globeZoom);
+
+    ImGui::SameLine();
+    ImGui::PushItemWidth(110);
+    ImGui::DragFloat("##GlobeFOV", &globeFovDeg, 1.0f, 10.0f, 120.0f, "FOV: %.1f");
+    ImGui::PopItemWidth();
+
     ImGui::SameLine();
     if (ImGui::Button("Reset Camera"))
     {

@@ -159,9 +159,9 @@ private:
 
 static cl_program gPerlinProgram = nullptr;
 
-static void perlin(cl_mem& output,int width,
-                     int height,
-                     int depth,
+static void perlin(cl_mem& output,
+                     int latitudeResolution,
+                     int longitudeResolution,
                      float frequency,
                      float lacunarity,
                      int octaves,
@@ -180,7 +180,7 @@ static void perlin(cl_mem& output,int width,
     static cl_kernel gPerlinKernel = nullptr;
     try{
         OpenCLContext::get().createProgram(gPerlinProgram,"Kernels/Perlin.cl");
-        OpenCLContext::get().createKernelFromProgram(gPerlinKernel,gPerlinProgram,"perlin_fbm_3d");
+        OpenCLContext::get().createKernelFromProgram(gPerlinKernel,gPerlinProgram,"perlin_fbm_3d_sphere_sample");
     }
     catch (const std::runtime_error &e)
     {
@@ -190,7 +190,7 @@ static void perlin(cl_mem& output,int width,
 
     {
         ZoneScopedN("Perlin Buffer Alloc");
-        size_t total = (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
+        size_t total = (size_t)latitudeResolution * (size_t)longitudeResolution * sizeof(float);
         size_t buffer_size;
         if(output != nullptr){
             cl_int err = clGetMemObjectInfo(output,
@@ -219,19 +219,18 @@ static void perlin(cl_mem& output,int width,
     }
 
     clSetKernelArg(gPerlinKernel, 0, sizeof(cl_mem), &output);
-    clSetKernelArg(gPerlinKernel, 1, sizeof(int), &width);
-    clSetKernelArg(gPerlinKernel, 2, sizeof(int), &height);
-    clSetKernelArg(gPerlinKernel, 3, sizeof(int), &depth);
-    clSetKernelArg(gPerlinKernel, 4, sizeof(float), &frequency);
-    clSetKernelArg(gPerlinKernel, 5, sizeof(float), &lacunarity);
-    clSetKernelArg(gPerlinKernel, 6, sizeof(int), &octaves);
-    clSetKernelArg(gPerlinKernel, 7, sizeof(float), &persistence);
-    clSetKernelArg(gPerlinKernel, 8, sizeof(unsigned int), &seed);
+    clSetKernelArg(gPerlinKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gPerlinKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(gPerlinKernel, 3, sizeof(float), &frequency);
+    clSetKernelArg(gPerlinKernel, 4, sizeof(float), &lacunarity);
+    clSetKernelArg(gPerlinKernel, 5, sizeof(int), &octaves);
+    clSetKernelArg(gPerlinKernel, 6, sizeof(float), &persistence);
+    clSetKernelArg(gPerlinKernel, 7, sizeof(unsigned int), &seed);
 
-    size_t global[3] = {(size_t)width, (size_t)height, (size_t)depth};
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     {
         ZoneScopedN("Perlin Enqueue");
-        err = clEnqueueNDRangeKernel(queue, gPerlinKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, gPerlinKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS)
         {
             throw std::runtime_error("clEnqueueNDRangeKernel failed for perlin");
@@ -240,9 +239,8 @@ static void perlin(cl_mem& output,int width,
 }
 
 static void perlin_channels(cl_mem& output,
-                     int width,
-                     int height,
-                     int depth,
+                     int latitudeResolution,
+                     int longitudeResolution,
                      int channels,
                      std::vector<float> frequency,
                      std::vector<float> lacunarity,
@@ -264,7 +262,7 @@ static void perlin_channels(cl_mem& output,
 
     try{
         OpenCLContext::get().createProgram(gPerlinProgram,"Kernels/Perlin.cl");
-        OpenCLContext::get().createKernelFromProgram(gPerlinChannelsKernel,gPerlinProgram,"perlin_fbm_3d_channels");
+        OpenCLContext::get().createKernelFromProgram(gPerlinChannelsKernel,gPerlinProgram,"perlin_fbm_3d_sphere_sample_channels");
     }
     catch (const std::runtime_error &e)
     {
@@ -274,7 +272,7 @@ static void perlin_channels(cl_mem& output,
 
     {
         ZoneScopedN("Perlin Channels Buffer Alloc");
-        size_t total = (size_t)channels * (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
+        size_t total = (size_t)channels * (size_t)latitudeResolution * (size_t)longitudeResolution * sizeof(float);
         size_t buffer_size;
         if(output != nullptr){
             cl_int err = clGetMemObjectInfo(output,
@@ -310,20 +308,19 @@ static void perlin_channels(cl_mem& output,
     cl_mem seedBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(unsigned int) * seed.size(), seed.data(), &err, "perlin channels seedBuf");
 
     clSetKernelArg(gPerlinChannelsKernel, 0, sizeof(cl_mem), &output);
-    clSetKernelArg(gPerlinChannelsKernel, 1, sizeof(int), &width);
-    clSetKernelArg(gPerlinChannelsKernel, 2, sizeof(int), &height);
-    clSetKernelArg(gPerlinChannelsKernel, 3, sizeof(int), &depth);
-    clSetKernelArg(gPerlinChannelsKernel, 4, sizeof(int), &channels);
-    clSetKernelArg(gPerlinChannelsKernel, 5, sizeof(cl_mem), &freqBuf);
-    clSetKernelArg(gPerlinChannelsKernel, 6, sizeof(cl_mem), &lacunarityBuf);
-    clSetKernelArg(gPerlinChannelsKernel, 7, sizeof(cl_mem), &octavesBuf);
-    clSetKernelArg(gPerlinChannelsKernel, 8, sizeof(cl_mem), &persistenceBuf);
-    clSetKernelArg(gPerlinChannelsKernel, 9, sizeof(cl_mem), &seedBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gPerlinChannelsKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(gPerlinChannelsKernel, 3, sizeof(int), &channels);
+    clSetKernelArg(gPerlinChannelsKernel, 4, sizeof(cl_mem), &freqBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 5, sizeof(cl_mem), &lacunarityBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 6, sizeof(cl_mem), &octavesBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 7, sizeof(cl_mem), &persistenceBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 8, sizeof(cl_mem), &seedBuf);
     
-    size_t global[3] = {(size_t)width, (size_t)height, (size_t)depth};
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     {
         ZoneScopedN("Perlin Channels Enqueue");
-        err = clEnqueueNDRangeKernel(queue, gPerlinChannelsKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, gPerlinChannelsKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS)
         {
             throw std::runtime_error("clEnqueueNDRangeKernel failed for perlin channels");
@@ -335,9 +332,8 @@ static cl_program gScalarToColorProgram = nullptr;
 
 static void scalarToColor(cl_mem& output, 
                             cl_mem scalarBuffer,
-                            int fieldW,
-                            int fieldH,
-                            int fieldD,
+                            int latitudeResolution,
+                            int longitudeResolution,
                             int colorCount,
                             const std::vector<std::array<unsigned char, 4>> &paletteColors)
 {
@@ -354,7 +350,7 @@ static void scalarToColor(cl_mem& output,
 
     try{
         OpenCLContext::get().createProgram(gScalarToColorProgram,"Kernels/ScalarToColor.cl");
-        OpenCLContext::get().createKernelFromProgram(gScalarToColorKernel,gScalarToColorProgram,"scalarToColor");
+        OpenCLContext::get().createKernelFromProgram(gScalarToColorKernel,gScalarToColorProgram,"scalar_to_rgba_float4");
     }
     catch (const std::runtime_error &e)
     {
@@ -381,7 +377,7 @@ static void scalarToColor(cl_mem& output,
         throw std::runtime_error("clCreateBuffer failed for scalarToColor paletteBuf");
     }
 
-    size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+    size_t voxels = (size_t)latitudeResolution * (size_t)longitudeResolution;
     size_t outSize = voxels * sizeof(cl_float4);
 
     if(output != nullptr){
@@ -411,18 +407,17 @@ static void scalarToColor(cl_mem& output,
     }
 
     clSetKernelArg(gScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
-    clSetKernelArg(gScalarToColorKernel, 1, sizeof(int), &fieldW);
-    clSetKernelArg(gScalarToColorKernel, 2, sizeof(int), &fieldH);
-    clSetKernelArg(gScalarToColorKernel, 3, sizeof(int), &fieldD);
-    clSetKernelArg(gScalarToColorKernel, 4, sizeof(int), &colorCount);
-    clSetKernelArg(gScalarToColorKernel, 5, sizeof(cl_mem), &paletteBuf);
-    clSetKernelArg(gScalarToColorKernel, 6, sizeof(cl_mem), &output);
+    clSetKernelArg(gScalarToColorKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gScalarToColorKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(gScalarToColorKernel, 3, sizeof(int), &colorCount);
+    clSetKernelArg(gScalarToColorKernel, 4, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(gScalarToColorKernel, 5, sizeof(cl_mem), &output);
 
-    size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     
     {
         ZoneScopedN("ScalarToColor Enqueue");
-        err = clEnqueueNDRangeKernel(queue, gScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, gScalarToColorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
     }
 
     OpenCLContext::get().releaseMem(paletteBuf);
@@ -430,9 +425,8 @@ static void scalarToColor(cl_mem& output,
 
 static void weightedScalarToColor(cl_mem& output, 
                             cl_mem scalarBuffer,
-                            int fieldW,
-                            int fieldH,
-                            int fieldD,
+                            int latitudeResolution,
+                            int longitudeResolution,
                             int colorCount,
                             const std::vector<std::array<unsigned char, 4>> &paletteColors,
                             const std::vector<float> &weights)
@@ -448,7 +442,7 @@ static void weightedScalarToColor(cl_mem& output,
     static cl_kernel gWeightedScalarToColorKernel = nullptr;
     try{
         OpenCLContext::get().createProgram(gScalarToColorProgram,"Kernels/ScalarToColor.cl");
-        OpenCLContext::get().createKernelFromProgram(gWeightedScalarToColorKernel,gScalarToColorProgram,"weighed_scalar_to_rgba_float4");
+        OpenCLContext::get().createKernelFromProgram(gWeightedScalarToColorKernel,gScalarToColorProgram,"weighted_scalar_to_rgba_float4");
     }
     catch (const std::runtime_error &e)
     {
@@ -480,7 +474,7 @@ static void weightedScalarToColor(cl_mem& output,
         OpenCLContext::get().releaseMem(paletteBuf);
         throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor weightsBuf");
     }
-    size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+    size_t voxels = (size_t)latitudeResolution * (size_t)longitudeResolution;
     size_t outSize = voxels * sizeof(cl_float4);
     if(output != nullptr){
         TracyMessageL("Reallocating weightedScalarToColor output buffer required");
@@ -508,90 +502,19 @@ static void weightedScalarToColor(cl_mem& output,
         }
     }
     clSetKernelArg(gWeightedScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
-    clSetKernelArg(gWeightedScalarToColorKernel, 1, sizeof(int), &fieldW);
-    clSetKernelArg(gWeightedScalarToColorKernel, 2, sizeof(int), &fieldH);
-    clSetKernelArg(gWeightedScalarToColorKernel, 3, sizeof(int), &fieldD);
-    clSetKernelArg(gWeightedScalarToColorKernel, 4, sizeof(int), &colorCount);
-    clSetKernelArg(gWeightedScalarToColorKernel, 5, sizeof(cl_mem), &paletteBuf);
-    clSetKernelArg(gWeightedScalarToColorKernel, 6, sizeof(cl_mem), &weightsBuf);
-    clSetKernelArg(gWeightedScalarToColorKernel, 7, sizeof(cl_mem), &output);
-    size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+    clSetKernelArg(gWeightedScalarToColorKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gWeightedScalarToColorKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(gWeightedScalarToColorKernel, 3, sizeof(int), &colorCount);
+    clSetKernelArg(gWeightedScalarToColorKernel, 4, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 5, sizeof(cl_mem), &weightsBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 6, sizeof(cl_mem), &output);
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     
     {
         ZoneScopedN("WeightedScalarToColor Enqueue");
-        err = clEnqueueNDRangeKernel(queue, gWeightedScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, gWeightedScalarToColorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
     }
     OpenCLContext::get().releaseMem(paletteBuf);
     OpenCLContext::get().releaseMem(weightsBuf);
-}
-
-
-static void concatVolumes(cl_mem& output,
-                                std::vector<cl_mem> &inputVolumes,
-                                int fieldW,
-                                int fieldH,
-                                int fieldD)
-{
-    ZoneScopedN("ConcatVolumes");
-   if (!OpenCLContext::get().isReady())
-        return;
-
-    cl_context ctx = OpenCLContext::get().getContext();
-    cl_device_id device = OpenCLContext::get().getDevice();
-    cl_command_queue queue = OpenCLContext::get().getQueue();
-    cl_int err = CL_SUCCESS;
-
-    int num_channels = static_cast<int>(inputVolumes.size());
-
-    size_t voxel_count = static_cast<size_t>(fieldW) * fieldH * fieldD;
-    size_t outSize = (size_t)num_channels * voxel_count * sizeof(float);
-
-    if (output != nullptr)
-    {
-        TracyMessageL("Reallocating concatVolumes output buffer required");
-        size_t current_size = 0;
-        cl_int info_err = clGetMemObjectInfo(output,
-                                            CL_MEM_SIZE,
-                                            sizeof(size_t),
-                                            &current_size,
-                                            NULL);
-        if (info_err != CL_SUCCESS) {
-            throw std::runtime_error("clGetMemObjectInfo failed for concatVolumes output buffer size");
-        }
-        if (current_size < outSize) {
-            OpenCLContext::get().releaseMem(output);
-            output = nullptr;
-        }
-    }
-
-    if (output == nullptr)
-    {
-        TracyMessageL("Allocating concatVolumes output buffer");
-        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "concatVolumes output");
-        if (err != CL_SUCCESS || output == nullptr)
-        {
-            throw std::runtime_error("clCreateBuffer failed for concatVolumes output");
-        }
-    }
-    
-    {
-        ZoneScopedN("ConcatVolumes Enqueue Copies");
-        for (int c = 0; c < num_channels; c++) {
-            //dowload each channel and copy to the right location in output
-            size_t channel_offset = static_cast<size_t>(c) * voxel_count * sizeof(float);
-            err = clEnqueueCopyBuffer(queue,
-                                    inputVolumes[c],
-                                    output,
-                                    0,
-                                    channel_offset,
-                                    voxel_count * sizeof(float),
-                                    0,
-                                    nullptr,
-                                    nullptr);
-            if (err != CL_SUCCESS) {
-                throw std::runtime_error("clEnqueueCopyBuffer failed in concatVolumes");
-            }
-        }
-    }
 }
 

@@ -30,7 +30,7 @@ cl_mem ElevationLayer::getColor()
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
     {
-        scalarToColor(coloredBuffer, elevationBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
+        scalarToColor(coloredBuffer, elevationBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), 2, grayRamp);
     }
     return coloredBuffer;
 }
@@ -39,7 +39,14 @@ cl_mem ElevationLayer::getElevationBuffer()
 {
     if (elevationBuffer == nullptr)
     {
-        perlin(elevationBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
+        perlin(elevationBuffer,
+            parentWorld->getWorldLatitudeResolution(), 
+            parentWorld->getWorldLongitudeResolution(), 
+            1.5f, 
+            2.0f, 
+            8, 
+            0.5f, 
+            12345u);
     }
     return elevationBuffer;
 }

@@ -13,7 +13,7 @@ LandTypeLayer::~LandTypeLayer()
 
 cl_mem LandTypeLayer::sample()
 {
-    std::vector<float> frequency(landtypeCount, 0.01f);
+    std::vector<float> frequency(landtypeCount, 1.5f);
     std::vector<float> lacunarity(landtypeCount, 2.0f);
     std::vector<int> octaves(landtypeCount, 8);
     std::vector<float> persistence(landtypeCount, 0.5f);
@@ -27,7 +27,7 @@ cl_mem LandTypeLayer::sample()
         // perform LandType color mapping
         try
         {
-            landtypeColorMap(outColor, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), landtypeCount, frequency, lacunarity, octaves, persistence, seed, landtypeColors, 1);
+            landtypeColorMap(outColor, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), landtypeCount, frequency, lacunarity, octaves, persistence, seed, landtypeColors, 1);
         }
         catch (const std::exception &ex)
         {
@@ -156,9 +156,7 @@ void LandTypeLayer::parseParameters(const std::string &params)
 
 void LandTypeLayer::landtypeColorMap(
     cl_mem &output,
-    int fieldW, 
-    int fieldH, 
-    int fieldD, 
+    int latitudeResolution, int longitudeResolution,
     int landtypeCount, 
     const std::vector<float> &frequency,
     const std::vector<float> &lacunarity,
@@ -178,12 +176,12 @@ void LandTypeLayer::landtypeColorMap(
     cl_command_queue queue = OpenCLContext::get().getQueue();
     cl_int err = CL_SUCCESS;
 
-    size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+    size_t voxels = (size_t)latitudeResolution * (size_t)longitudeResolution;
 
     static cl_program program = nullptr;
     static cl_kernel kernel = nullptr;
     try{
-        OpenCLContext::get().createProgram(program,"Kernels/LandTypeLayer.cl");
+        OpenCLContext::get().createProgram(program,"Kernels/LandType.cl");
         OpenCLContext::get().createKernelFromProgram(kernel,program,"landtype");
     }
     catch (const std::runtime_error &e)
@@ -289,23 +287,22 @@ void LandTypeLayer::landtypeColorMap(
         throw std::runtime_error("clCreateBuffer failed for LandTypeColorMap seedBuf");
     }
 
-    clSetKernelArg(kernel, 0, sizeof(int), &fieldW);
-    clSetKernelArg(kernel, 1, sizeof(int), &fieldH);
-    clSetKernelArg(kernel, 2, sizeof(int), &fieldD);
-    clSetKernelArg(kernel, 3, sizeof(int), &landtypeCount);
-    clSetKernelArg(kernel, 4, sizeof(cl_mem), &frequencyBuf);
-    clSetKernelArg(kernel, 5, sizeof(cl_mem), &lacunarityBuf);
-    clSetKernelArg(kernel, 6, sizeof(cl_mem), &octavesBuf);
-    clSetKernelArg(kernel, 7, sizeof(cl_mem), &persistenceBuf);
-    clSetKernelArg(kernel, 8, sizeof(cl_mem), &seedBuf);
-    clSetKernelArg(kernel, 9, sizeof(cl_mem), &paletteBuf);
-    clSetKernelArg(kernel, 10, sizeof(int), &mode);
-    clSetKernelArg(kernel, 11, sizeof(cl_mem), &output);
+    clSetKernelArg(kernel, 0, sizeof(int), &latitudeResolution);
+    clSetKernelArg(kernel, 1, sizeof(int), &longitudeResolution);
+    clSetKernelArg(kernel, 2, sizeof(int), &landtypeCount);
+    clSetKernelArg(kernel, 3, sizeof(cl_mem), &frequencyBuf);
+    clSetKernelArg(kernel, 4, sizeof(cl_mem), &lacunarityBuf);
+    clSetKernelArg(kernel, 5, sizeof(cl_mem), &octavesBuf);
+    clSetKernelArg(kernel, 6, sizeof(cl_mem), &persistenceBuf);
+    clSetKernelArg(kernel, 7, sizeof(cl_mem), &seedBuf);
+    clSetKernelArg(kernel, 8, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(kernel, 9, sizeof(int), &mode);
+    clSetKernelArg(kernel, 10, sizeof(cl_mem), &output);
 
-    size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     {
         //ZoneScopedN("LandTypeLayer::landtypeColorMap enqueue kernel");
-        err = clEnqueueNDRangeKernel(queue, kernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, kernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
     }
 
     OpenCLContext::get().releaseMem(paletteBuf);

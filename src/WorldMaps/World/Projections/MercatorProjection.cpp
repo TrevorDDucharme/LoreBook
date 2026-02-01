@@ -35,9 +35,9 @@ void MercatorProjection::project(World &world, int width, int height, GLuint &te
             // Pass in camera center and zoom
             mercatorProject(mercatorBuffer,
                             fieldBuffer,
-                            world.getWorldWidth(), world.getWorldHeight(), world.getWorldDepth(),
+                            world.getWorldLatitudeResolution(),
+                            world.getWorldLongitudeResolution(),
                             width, height,
-                            world.getWorldRadius(),
                             centerLon, centerMercY, zoomLevel);
         }
         catch (const std::exception &ex)
@@ -104,13 +104,11 @@ void MercatorProjection::project(World &world, int width, int height, GLuint &te
 
 void MercatorProjection::mercatorProject(
     cl_mem &output,
-    cl_mem field3d,
-    int fieldW,
-    int fieldH,
-    int fieldD,
+    cl_mem sphereTex,
+    int latitudeResolution,
+    int longitudeResolution,
     int outW,
     int outH,
-    float radius,
     float centerLon,
     float centerMercY,
     float zoom)
@@ -127,7 +125,7 @@ void MercatorProjection::mercatorProject(
     if (mercatorProgram == nullptr)
     {
         ZoneScopedN("MercatorProjection Program Init");
-        std::string kernel_code = preprocessCLIncludes("Kernels/FeildToMercator.cl");
+        std::string kernel_code = preprocessCLIncludes("Kernels/Mercator.cl");
         const char *src = kernel_code.c_str();
         size_t len = kernel_code.length();
         mercatorProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
@@ -150,7 +148,7 @@ void MercatorProjection::mercatorProject(
     if (mercatorKernel == nullptr)
     {
         ZoneScopedN("MercatorProjection Kernel Init");
-        mercatorKernel = clCreateKernel(mercatorProgram, "field3d_to_mercator_rgba", &err);
+        mercatorKernel = clCreateKernel(mercatorProgram, "sphere_to_mercator_rgba", &err);
         if (err != CL_SUCCESS)
         {
             // Retrieve build log for diagnostics
@@ -162,7 +160,7 @@ void MercatorProjection::mercatorProject(
                 log.resize(log_size);
                 clGetProgramBuildInfo(mercatorProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
             }
-            throw std::runtime_error(std::string("clCreateKernel failed for field3d_to_mercator_rgba: err=") + std::to_string(err) + std::string(" build_log:\n") + log);
+            throw std::runtime_error(std::string("clCreateKernel failed for sphere_to_mercator_rgba: err=") + std::to_string(err) + std::string(" build_log:\n") + log);
         }
     }
 
@@ -197,17 +195,15 @@ void MercatorProjection::mercatorProject(
         }
     }
 
-    clSetKernelArg(mercatorKernel, 0, sizeof(cl_mem), &field3d);
-    clSetKernelArg(mercatorKernel, 1, sizeof(int), &fieldW);
-    clSetKernelArg(mercatorKernel, 2, sizeof(int), &fieldH);
-    clSetKernelArg(mercatorKernel, 3, sizeof(int), &fieldD);
-    clSetKernelArg(mercatorKernel, 4, sizeof(cl_mem), &output);
-    clSetKernelArg(mercatorKernel, 5, sizeof(int), &outW);
-    clSetKernelArg(mercatorKernel, 6, sizeof(int), &outH);
-    clSetKernelArg(mercatorKernel, 7, sizeof(float), &radius);
-    clSetKernelArg(mercatorKernel, 8, sizeof(float), &centerLon);
-    clSetKernelArg(mercatorKernel, 9, sizeof(float), &centerMercY);
-    clSetKernelArg(mercatorKernel, 10, sizeof(float), &zoom);
+    clSetKernelArg(mercatorKernel, 0, sizeof(cl_mem), &sphereTex);
+    clSetKernelArg(mercatorKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(mercatorKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(mercatorKernel, 3, sizeof(cl_mem), &output);
+    clSetKernelArg(mercatorKernel, 4, sizeof(int), &outW);
+    clSetKernelArg(mercatorKernel, 5, sizeof(int), &outH);
+    clSetKernelArg(mercatorKernel, 6, sizeof(float), &centerLon);
+    clSetKernelArg(mercatorKernel, 7, sizeof(float), &centerMercY);
+    clSetKernelArg(mercatorKernel, 8, sizeof(float), &zoom);
 
     size_t global[2] = {(size_t)outW, (size_t)outH};
     {

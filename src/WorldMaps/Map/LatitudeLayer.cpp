@@ -30,7 +30,7 @@ cl_mem LatitudeLayer::getColor()
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
     {
-        scalarToColor(coloredBuffer, latitudeBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
+        scalarToColor(coloredBuffer, latitudeBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), 2, grayRamp);
     }
     return coloredBuffer;
 }
@@ -39,16 +39,15 @@ cl_mem LatitudeLayer::getLatitudeBuffer()
 {
     if (latitudeBuffer == nullptr)
     {
-        latitude(latitudeBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth());
+        latitude(latitudeBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution());
     }
     return latitudeBuffer;
 }
 
 void LatitudeLayer::latitude(
     cl_mem &output,
-    int fieldW,
-    int fieldH,
-    int fieldD)
+    int latitudeResolution,
+    int longitudeResolution)
 {
     static cl_kernel gLatitude = nullptr;
     static cl_program gLatitudeProgram = nullptr;
@@ -73,7 +72,7 @@ void LatitudeLayer::latitude(
 
     {
         ZoneScopedN("Latitude Buffer Alloc");
-        size_t total = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD * sizeof(float);
+        size_t total = (size_t)latitudeResolution * (size_t)longitudeResolution * sizeof(cl_float);
         size_t buffer_size;
         if (output != nullptr)
         {
@@ -106,13 +105,12 @@ void LatitudeLayer::latitude(
     }
 
     clSetKernelArg(gLatitude, 0, sizeof(cl_mem), &output);
-    clSetKernelArg(gLatitude, 1, sizeof(int), &fieldW);
-    clSetKernelArg(gLatitude, 2, sizeof(int), &fieldH);
-    clSetKernelArg(gLatitude, 3, sizeof(int), &fieldD);
-    size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+    clSetKernelArg(gLatitude, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gLatitude, 2, sizeof(int), &longitudeResolution);
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
     {
         ZoneScopedN("Latitude Enqueue");
-        err = clEnqueueNDRangeKernel(queue, gLatitude, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(queue, gLatitude, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS)
         {
             throw std::runtime_error("clEnqueueNDRangeKernel failed for latitude");

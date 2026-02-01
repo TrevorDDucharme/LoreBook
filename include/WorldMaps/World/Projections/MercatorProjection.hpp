@@ -31,12 +31,10 @@ private:
     static void mercatorProject(
         cl_mem& output,
         cl_mem field3d,
-        int fieldW,
-        int fieldH,
-        int fieldD,
+        int latitudeResolution,
+        int longitudeResolution,
         int outW,
         int outH,
-        float radius,
         float centerLon,
         float centerMercY,
         float zoom);

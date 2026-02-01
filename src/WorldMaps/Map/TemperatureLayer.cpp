@@ -35,7 +35,7 @@ cl_mem TemperatureLayer::getColor()
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
     {
-        scalarToColor(coloredBuffer, temperatureBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), 2, grayRamp);
+        scalarToColor(coloredBuffer, temperatureBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), 2, grayRamp);
     }
     return coloredBuffer;
 }
@@ -44,7 +44,7 @@ cl_mem TemperatureLayer::getTemperatureBuffer()
 {
     if (temperatureBuffer == nullptr)
     {
-        perlin(temperatureBuffer, parentWorld->getWorldWidth(), parentWorld->getWorldHeight(), parentWorld->getWorldDepth(), .01f, 2.0f, 8, 0.5f, 12345u);
+        perlin(temperatureBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), .01f, 2.0f, 8, 0.5f, 12345u);
     }
     return temperatureBuffer;
 }

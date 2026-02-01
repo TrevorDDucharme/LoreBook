@@ -33,20 +33,20 @@ cl_mem WaterTableLayer::getColor()
     if (coloredBuffer == nullptr)
     {
         // pass grayRamp.size() here (3), not 2
-        weightedScalarToColor(coloredBuffer, watertableBuffer,
-            parentWorld->getWorldWidth(),
-            parentWorld->getWorldHeight(),
-            parentWorld->getWorldDepth(),
+        waterTableWeightedScalarToColor(coloredBuffer, watertableBuffer,
+            parentWorld->getWorldLatitudeResolution(),
+            parentWorld->getWorldLongitudeResolution(),
             (int)grayRamp.size(), grayRamp, weights);
     }
     return coloredBuffer;
 }
 
+static cl_program gWaterTableProgram = nullptr;
+
 cl_mem WaterTableLayer::getWaterTableBuffer()
 {
     if (watertableBuffer == nullptr)
     {
-        static cl_program gWaterTableProgram = nullptr;
         static cl_kernel gWaterTableKernel = nullptr;
         ZoneScopedN("WaterTableLayer::getWaterTableBuffer");
         if (!OpenCLContext::get().isReady())
@@ -73,11 +73,10 @@ cl_mem WaterTableLayer::getWaterTableBuffer()
             printf("WaterTableLayer::getWaterTableBuffer: elevation layer not found or has no data\n");
             return nullptr;
         }
-        int fieldW = parentWorld->getWorldWidth();
-        int fieldH = parentWorld->getWorldHeight();
-        int fieldD = parentWorld->getWorldDepth();
+        int latitudeResolution = parentWorld->getWorldLatitudeResolution();
+        int longitudeResolution = parentWorld->getWorldLongitudeResolution();
         cl_int err = CL_SUCCESS;
-        size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+        size_t voxels = (size_t)latitudeResolution * (size_t)longitudeResolution;
         size_t outSize = voxels * sizeof(cl_float);
         watertableBuffer = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "WaterTableLayer watertableBuffer");
         if (err != CL_SUCCESS || watertableBuffer == nullptr)
@@ -87,18 +86,17 @@ cl_mem WaterTableLayer::getWaterTableBuffer()
         }
         clSetKernelArg(gWaterTableKernel, 0, sizeof(cl_mem), &watertableBuffer);
         clSetKernelArg(gWaterTableKernel, 1, sizeof(cl_mem), &elevationBuffer);
-        clSetKernelArg(gWaterTableKernel, 2, sizeof(int), &fieldW);
-        clSetKernelArg(gWaterTableKernel, 3, sizeof(int), &fieldH);
-        clSetKernelArg(gWaterTableKernel, 4, sizeof(int), &fieldD);
-        clSetKernelArg(gWaterTableKernel, 5, sizeof(float), &water_table_level);
-        size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+        clSetKernelArg(gWaterTableKernel, 2, sizeof(int), &latitudeResolution);
+        clSetKernelArg(gWaterTableKernel, 3, sizeof(int), &longitudeResolution);
+        clSetKernelArg(gWaterTableKernel, 4, sizeof(float), &water_table_level);
+        size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
 
         {
             ZoneScopedN("WaterTableLayer::getWaterTableBuffer Enqueue");
             err = clEnqueueNDRangeKernel(
                 OpenCLContext::get().getQueue(),
                 gWaterTableKernel,
-                3,
+                2,
                 nullptr,
                 global,
                 nullptr,
@@ -115,4 +113,99 @@ cl_mem WaterTableLayer::getWaterTableBuffer()
         }
     }
     return watertableBuffer;
+}
+
+void WaterTableLayer::waterTableWeightedScalarToColor(cl_mem& output, 
+                            cl_mem scalarBuffer,
+                            int latitudeResolution,
+                            int longitudeResolution,
+                            int colorCount,
+                            const std::vector<std::array<unsigned char, 4>> &paletteColors,
+                            const std::vector<float> &weights)
+{
+    ZoneScopedN("WeightedScalarToColor");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+    static cl_kernel gWeightedScalarToColorKernel = nullptr;
+    try{
+        OpenCLContext::get().createProgram(gWaterTableProgram,"Kernels/WaterTable.cl");
+        OpenCLContext::get().createKernelFromProgram(gWeightedScalarToColorKernel,gWaterTableProgram,"water_table_weighted_scalar_to_rgba_float4");
+    }
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing WeightedScalarToColor OpenCL: %s\n", e.what());
+        return;
+    }
+    // create palette buffer
+    std::vector<cl_float4> paletteFloats;
+    paletteFloats.reserve((size_t)colorCount);
+    for (int i = 0; i < colorCount; ++i)
+    {
+        auto &c = paletteColors[i % paletteColors.size()];
+        cl_float4 col;
+        col.s[0] = static_cast<float>(c[0]) / 255.0f;
+        col.s[1] = static_cast<float>(c[1]) / 255.0f;
+        col.s[2] = static_cast<float>(c[2]) / 255.0f;
+        col.s[3] = static_cast<float>(c[3]) / 255.0f;
+        paletteFloats.push_back(col);
+    }
+    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err, "weightedScalarToColor paletteBuf");
+    if (err != CL_SUCCESS || paletteBuf == nullptr)
+    {
+        throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor paletteBuf");
+    }
+    // create weights buffer
+    cl_mem weightsBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * weights.size(), (void*)weights.data(), &err, "weightedScalarToColor weightsBuf");
+    if (err != CL_SUCCESS || weightsBuf == nullptr)
+    {
+        OpenCLContext::get().releaseMem(paletteBuf);
+        throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor weightsBuf");
+    }
+    size_t voxels = (size_t)latitudeResolution * (size_t)longitudeResolution;
+    size_t outSize = voxels * sizeof(cl_float4);
+    if(output != nullptr){
+        TracyMessageL("Reallocating weightedScalarToColor output buffer required");
+        cl_int err = clGetMemObjectInfo(output,
+                                        CL_MEM_SIZE,
+                                        sizeof(size_t),
+                                        &outSize,
+                                        NULL);
+        if (err != CL_SUCCESS) {
+            throw std::runtime_error("clGetMemObjectInfo failed for weightedScalarToColor output buffer size");
+        }
+        if(outSize < voxels * sizeof(cl_float4)){
+            OpenCLContext::get().releaseMem(output);
+            output = nullptr;
+        }
+    }
+    if(output == nullptr){
+        TracyMessageL("Allocating weightedScalarToColor output buffer");
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "weightedScalarToColor output");
+        if (err != CL_SUCCESS || output == nullptr)
+        {
+            OpenCLContext::get().releaseMem(paletteBuf);
+            OpenCLContext::get().releaseMem(weightsBuf);
+            throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor output");
+        }
+    }
+    clSetKernelArg(gWeightedScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
+    clSetKernelArg(gWeightedScalarToColorKernel, 1, sizeof(int), &latitudeResolution);
+    clSetKernelArg(gWeightedScalarToColorKernel, 2, sizeof(int), &longitudeResolution);
+    clSetKernelArg(gWeightedScalarToColorKernel, 3, sizeof(int), &colorCount);
+    clSetKernelArg(gWeightedScalarToColorKernel, 4, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 5, sizeof(cl_mem), &weightsBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 6, sizeof(cl_mem), &output);
+    size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
+    
+    {
+        ZoneScopedN("WeightedScalarToColor Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gWeightedScalarToColorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+    }
+    OpenCLContext::get().releaseMem(paletteBuf);
+    OpenCLContext::get().releaseMem(weightsBuf);
 }

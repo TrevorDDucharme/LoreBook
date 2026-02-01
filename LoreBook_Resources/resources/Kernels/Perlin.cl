@@ -1,3 +1,5 @@
+#include "Util.cl"
+
 // ------------------------------------------------------------
 // Hash & noise utilities (seeded)
 // ------------------------------------------------------------
@@ -135,6 +137,89 @@ inline float perlin_3d_channels_util(
     );
 }
 
+inline float perlin_3d_sphere_sample_util(
+    int lattitude,
+    int longitude,
+    int lattitude_resolution,
+    int longitude_resolution,
+    float frequency,
+    float lacunarity,
+    int octaves,
+    float persistence,
+    uint seed
+){
+    if (lattitude < 0 || lattitude >= lattitude_resolution ||
+        longitude < 0 || longitude >= longitude_resolution)
+    {
+        return 0.0f;
+    }
+
+    float theta = ((float)lattitude + 0.5f) / (float)lattitude_resolution * 3.14159265f; // [0, pi]
+    float phi = ((float)longitude + 0.5f) / (float)longitude_resolution * 2.0f * 3.14159265f; // [0, 2pi]
+
+    float3 p = (float3)(
+        sin(theta) * cos(phi),
+        sin(theta) * sin(phi),
+        cos(theta)
+    ) * frequency;
+
+    float value = 0.0f;
+    float amplitude = 1.0f;
+    float maxAmp = 0.0f;
+
+    for (int i = 0; i < octaves; i++)
+    {
+        value += perlin3(p, seed + i * 101u) * amplitude;
+        maxAmp += amplitude;
+
+        amplitude *= persistence;
+        p *= lacunarity;
+    }
+
+    // Normalize to [-1,1] / [0,1]
+    if (maxAmp <= 0.0f) {
+        value = 0.0f;
+    } else {
+        value = value / maxAmp;
+    }
+    float outVal = value * 0.5f + 0.5f;
+    return outVal;
+}
+
+inline float perlin_3d_sphere_sample_channels_util(
+    int lattitude,
+    int longitude,
+    int lattitude_resolution,
+    int longitude_resolution,
+    int channel,
+    int channels,
+    __global const float* frequency,
+    __global const float* lacunarity,
+    __global const int* octaves,
+    __global const float* persistence,
+    __global const uint* seed
+){
+    if (lattitude < 0 || lattitude >= lattitude_resolution ||
+        longitude < 0 || longitude >= longitude_resolution ||
+        channels <= 0)
+    {
+        return 0.0f;
+    }
+
+    float freq = frequency[channel];
+    float lac = lacunarity[channel];
+    int oct = octaves[channel];
+    float pers = persistence[channel];
+    uint s = seed[channel];
+    return perlin_3d_sphere_sample_util(
+        lattitude,
+        longitude,
+        lattitude_resolution,
+        longitude_resolution,
+        freq, lac, oct, pers, s
+    );
+}
+
 // ------------------------------------------------------------
 // FBM kernel
 // ------------------------------------------------------------
@@ -192,6 +277,66 @@ __kernel void perlin_fbm_3d_channels(
             perlin_3d_channels_util(
                 x, y, z, c,
                 width, height, depth, channels,
+                frequency, lacunarity, octaves, persistence, seed
+            );
+    }
+}
+
+__kernel void perlin_fbm_3d_sphere_sample(
+    __global float* output,
+    int lattitude_resolution,
+    int longitude_resolution,
+    float frequency,
+    float lacunarity,
+    int octaves,
+    float persistence,
+    uint seed
+)
+{
+    int lattitude = get_global_id(0);
+    int longitude = get_global_id(1);
+
+    if (lattitude >= lattitude_resolution || longitude >= longitude_resolution)
+        return;
+
+    output[lattitude * longitude_resolution + longitude] =
+        perlin_3d_sphere_sample_util(
+            lattitude,
+            longitude,
+            lattitude_resolution,
+            longitude_resolution,
+            frequency, lacunarity, octaves, persistence, seed
+        );
+}
+
+__kernel void perlin_fbm_3d_sphere_sample_channels(
+    __global float* output,
+    int lattitude_resolution,
+    int longitude_resolution,
+    int channels,
+    __global const float* frequency,
+    __global const float* lacunarity,
+    __global const int* octaves,
+    __global const float* persistence,
+    __global const uint* seed
+)
+{
+    int lattitude = get_global_id(0);
+    int longitude = get_global_id(1);
+
+    if (lattitude >= lattitude_resolution || longitude >= longitude_resolution || channels <= 0)
+        return;
+
+    for (int c = 0; c < channels; c++) {
+        int index = c * (lattitude_resolution * longitude_resolution) + lattitude * longitude_resolution + longitude;
+        output[index] =
+            perlin_3d_sphere_sample_channels_util(
+                lattitude,
+                longitude,
+                lattitude_resolution,
+                longitude_resolution,
+                c,
+                channels,
                 frequency, lacunarity, octaves, persistence, seed
             );
     }

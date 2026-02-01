@@ -3,6 +3,7 @@
 #include <WorldMaps/World/World.hpp>
 #include <cmath>
 #include <tracy/Tracy.hpp>
+#include <sstream>
 
 // Screen-space spherical projection: traces rays from a virtual orbit camera through
 // the requested viewport and samples the visible sphere pixels directly on the workers.
@@ -10,10 +11,12 @@ class SphericalProjection : public Projection
 {
 public:
     SphericalProjection() = default;
-    // longitude/latitude specify the center of view (the sphere surface point to center on),
-    // zoomLevel controls camera distance (larger zoomLevel = closer).
+    // longitude/latitude specify the center of view (the sphere surface point to center on).
+    // zoomLevel controls camera distance (smaller value = closer). zoomLevel is linear distance from
+    // the surface in sphere radii (camPos = target * (1.0f + zoomLevel)). Values below -0.95 are clamped
+    // to avoid placing the camera at or near the sphere center.
     void setViewCenterRadians(float lonRad, float latRad) { centerLon = lonRad; centerLat = latRad; }
-    void setZoomLevel(float z) { zoomLevel = z; }
+    void setZoomLevel(float z) { const float MIN_Z = -0.95f; zoomLevel = (z < MIN_Z) ? MIN_Z : z; }
     void setFov(float f) { fovY = f; }
     //caller must cleanup texture when done
     void project(World &world, int width, int height, GLuint& texture, std::string layerName="") override
@@ -81,15 +84,14 @@ public:
                 spherePerspectiveSample(
                     sphereBuffer,
                     fieldBuffer,
-                    world.getWorldWidth(), world.getWorldHeight(), world.getWorldDepth(),
+                    world.getWorldLatitudeResolution(),
+                    world.getWorldLongitudeResolution(),
                     width, height,
                     camPosX, camPosY, camPosZ,
                     camForwardX, camForwardY, camForwardZ,
                     camRightX, camRightY, camRightZ,
                     camUpX, camUpY, camUpZ,
-                    fovY,
-                    0.0f, 0.0f, 0.0f,
-                    world.getWorldRadius());
+                    fovY);
             }
             catch (const std::exception &ex)
             {
@@ -173,10 +175,9 @@ private:
 public:
     static void spherePerspectiveSample(
         cl_mem& output,
-        cl_mem field3d,
-        int fieldW,
-        int fieldH,
-        int fieldD,
+        cl_mem sphereTex,
+        int latitudeResolution,
+        int longitudeResolution,
 
         int screenW,
         int screenH,
@@ -197,11 +198,7 @@ public:
         float camUpY,
         float camUpZ,
 
-        float fovY, // radians
-        float sphereCenterX,
-        float sphereCenterY,
-        float sphereCenterZ,
-        float sphereRadius)
+        float fovY) // radians
     {
         ZoneScopedN("spherePerspectiveSample");
         if (!OpenCLContext::get().isReady())
@@ -215,7 +212,7 @@ public:
         if (spherePerspectiveProgram == nullptr)
         {
             ZoneScopedN("spherePerspectiveSample Program Init");
-            std::string kernel_code = preprocessCLIncludes("Kernels/FieldToSphere.cl");
+            std::string kernel_code = preprocessCLIncludes("Kernels/SpherePerspective.cl");
             const char *src = kernel_code.c_str();
             size_t len = kernel_code.length();
             spherePerspectiveProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
@@ -238,8 +235,29 @@ public:
         if(spherePerspectiveKernel == nullptr){
             ZoneScopedN("spherePerspectiveSample Kernel Init");
             spherePerspectiveKernel = clCreateKernel(spherePerspectiveProgram, "sphere_perspective_sample_rgba", &err);
-            if (err != CL_SUCCESS)
-                throw std::runtime_error("clCreateKernel failed for sphere_perspective_sample_rgba");
+            if (err != CL_SUCCESS) {
+                // retrieve build log
+                size_t log_size = 0;
+                clGetProgramBuildInfo(spherePerspectiveProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+                std::string log;
+                if (log_size > 0) {
+                    log.resize(log_size);
+                    clGetProgramBuildInfo(spherePerspectiveProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
+                }
+                // retrieve kernel names
+                size_t names_size = 0;
+                clGetProgramInfo(spherePerspectiveProgram, CL_PROGRAM_KERNEL_NAMES, 0, nullptr, &names_size);
+                std::string kernel_names;
+                if (names_size > 0) {
+                    kernel_names.resize(names_size);
+                    clGetProgramInfo(spherePerspectiveProgram, CL_PROGRAM_KERNEL_NAMES, names_size, &kernel_names[0], nullptr);
+                }
+                std::ostringstream oss;
+                oss << "clCreateKernel failed for sphere_perspective_sample_rgba err=" << err;
+                if (!kernel_names.empty()) oss << " kernels=\"" << kernel_names << "\"";
+                if (!log.empty()) oss << " build_log: " << log;
+                throw std::runtime_error(oss.str());
+            }
         }
         size_t outSize = (size_t)screenW * (size_t)screenH * sizeof(cl_float4);
         size_t bufSize;
@@ -267,28 +285,23 @@ public:
             }
         }
 
-        clSetKernelArg(spherePerspectiveKernel, 0, sizeof(cl_mem), &field3d);
-        clSetKernelArg(spherePerspectiveKernel, 1, sizeof(int), &fieldW);
-        clSetKernelArg(spherePerspectiveKernel, 2, sizeof(int), &fieldH);
-        clSetKernelArg(spherePerspectiveKernel, 3, sizeof(int), &fieldD);
-        clSetKernelArg(spherePerspectiveKernel, 4, sizeof(cl_mem), &output);
-        clSetKernelArg(spherePerspectiveKernel, 5, sizeof(int), &screenW);
-        clSetKernelArg(spherePerspectiveKernel, 6, sizeof(int), &screenH);
+        clSetKernelArg(spherePerspectiveKernel, 0, sizeof(cl_mem), &sphereTex);
+        clSetKernelArg(spherePerspectiveKernel, 1, sizeof(int), &latitudeResolution);
+        clSetKernelArg(spherePerspectiveKernel, 2, sizeof(int), &longitudeResolution);
+        clSetKernelArg(spherePerspectiveKernel, 3, sizeof(cl_mem), &output);
+        clSetKernelArg(spherePerspectiveKernel, 4, sizeof(int), &screenW);
+        clSetKernelArg(spherePerspectiveKernel, 5, sizeof(int), &screenH);
 
         cl_float3 camPos = {camPosX, camPosY, camPosZ};
         cl_float3 camForward = {camForwardX, camForwardY, camForwardZ};
         cl_float3 camRight = {camRightX, camRightY, camRightZ};
         cl_float3 camUp = {camUpX, camUpY, camUpZ};
-        cl_float3 sphereCenter = {sphereCenterX, sphereCenterY, sphereCenterZ};
         
-        clSetKernelArg(spherePerspectiveKernel, 7, sizeof(camPos), &camPos);
-        clSetKernelArg(spherePerspectiveKernel, 8, sizeof(camForward), &camForward);
-        clSetKernelArg(spherePerspectiveKernel, 9, sizeof(camRight), &camRight);
-        clSetKernelArg(spherePerspectiveKernel, 10, sizeof(camUp), &camUp);
-        clSetKernelArg(spherePerspectiveKernel, 11, sizeof(float), &fovY);
-        clSetKernelArg(spherePerspectiveKernel, 12, sizeof(sphereCenter), &sphereCenter);
-        clSetKernelArg(spherePerspectiveKernel, 13, sizeof(float), &sphereRadius);
-
+        clSetKernelArg(spherePerspectiveKernel, 6, sizeof(camPos), &camPos);
+        clSetKernelArg(spherePerspectiveKernel, 7, sizeof(camForward), &camForward);
+        clSetKernelArg(spherePerspectiveKernel, 8, sizeof(camRight), &camRight);
+        clSetKernelArg(spherePerspectiveKernel, 9, sizeof(camUp), &camUp);
+        clSetKernelArg(spherePerspectiveKernel, 10, sizeof(float), &fovY);
 
         size_t global[2] = {(size_t)screenW, (size_t)screenH};
         {

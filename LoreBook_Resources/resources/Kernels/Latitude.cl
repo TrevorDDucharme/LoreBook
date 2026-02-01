@@ -1,36 +1,33 @@
 
+// Latitude for 2D lat/lon texture
+// Conventions: get_global_id(0) -> latitude (x), get_global_id(1) -> longitude (y)
+// idx = latitude + longitude * latitudeResolution
+
 float latitude_util(
-    int x,
-    int y,
-    int z,
-    int width,
-    int height,
-    int depth
+    int latitude,
+    int longitude,
+    int latitudeResolution,
+    int longitudeResolution
 )
 {
-    //1.0 at equator, 0.0 at poles
-    float lat = 1.0f - fabs(((float)y / (float)(height - 1)) * 2.0f - 1.0f);
-    return lat;
+    // 1.0 at equator, 0.0 at poles
+    return 1.0f - fabs(((float)longitude / (float)(longitudeResolution - 1)) * 2.0f - 1.0f);
 }
 
 
 __kernel void latitude(
     __global float* output,
-    int width,
-    int height,
-    int depth
+    int latitudeResolution,
+    int longitudeResolution
 )
 {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-    int z = get_global_id(2);
+    int latitude = get_global_id(0);
+    int longitude = get_global_id(1);
 
-    if (x >= width || y >= height || z >= depth)
+    if (latitude >= latitudeResolution || longitude >= longitudeResolution)
         return;
 
-    output[x + y * width + z * width * height] =
-        latitude_util(
-            x, y, z,
-            width, height, depth
-        );
+    int idx = latitude + longitude * latitudeResolution;
+
+    output[idx] = latitude_util(latitude, longitude, latitudeResolution, longitudeResolution);
 }

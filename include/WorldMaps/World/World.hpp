@@ -88,17 +88,13 @@ public:
         return names;
     }
 
-    int getWorldWidth() const { return worldW; }
-    int getWorldHeight() const { return worldH; }
-    int getWorldDepth() const { return worldD; }
-    int getWorldRadius() const { return radius; }
+    int getWorldLatitudeResolution() const { return worldLatitudeResolution; }
+    int getWorldLongitudeResolution() const { return worldLongitudeResolution; }
 
 private:
 
-    int worldW=256*2;
-    int worldH=256*2;
-    int worldD=256*2;
-    int radius=1;
+    int worldLatitudeResolution=4096;
+    int worldLongitudeResolution=4096;
 
     //Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature
     void parseConfig(const std::string &config)

@@ -1,5 +1,6 @@
 #include <OpenCLContext.hpp>
 #include <plog/Log.h>
+#include <sstream>
 
 OpenCLContext &OpenCLContext::get()
 {
@@ -267,7 +268,29 @@ void OpenCLContext::createKernelFromProgram(cl_kernel& kernel,cl_program program
         //ZoneScopedN("LandTypeLayer::landtypeColorMap create kernel");
         cl_int err = CL_SUCCESS;
         kernel = clCreateKernel(program, kernelName.c_str(), &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for " + kernelName);
+        if (err != CL_SUCCESS) {
+            // retrieve build log
+            cl_device_id device = getDevice();
+            size_t log_size = 0;
+            clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+            std::string log;
+            if (log_size > 0) {
+                log.resize(log_size);
+                clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
+            }
+            // retrieve kernel names
+            size_t names_size = 0;
+            clGetProgramInfo(program, CL_PROGRAM_KERNEL_NAMES, 0, nullptr, &names_size);
+            std::string kernel_names;
+            if (names_size > 0) {
+                kernel_names.resize(names_size);
+                clGetProgramInfo(program, CL_PROGRAM_KERNEL_NAMES, names_size, &kernel_names[0], nullptr);
+            }
+            std::ostringstream oss;
+            oss << "clCreateKernel failed for " << kernelName << " err=" << err;
+            if (!kernel_names.empty()) oss << " kernels=\"" << kernel_names << "\"";
+            if (!log.empty()) oss << " build_log: " << log;
+            throw std::runtime_error(oss.str());
+        }
     }
 }
