@@ -6,9 +6,10 @@
 #include <WorldMaps/Map/HumidityLayer.hpp>
 #include <WorldMaps/Map/TemperatureLayer.hpp>
 #include <WorldMaps/Map/ColorLayer.hpp>
-#include <WorldMaps/Map/WaterLayer.hpp>
-#include <WorldMaps/Map/BiomeLayer.hpp>
+#include <WorldMaps/Map/WaterTableLayer.hpp>
+#include <WorldMaps/Map/LandTypeLayer.hpp>
 #include <WorldMaps/Map/RiverLayer.hpp>
+#include <WorldMaps/Map/LatitudeLayer.hpp>
 #include <memory>
 #include <stack>
 #include <stringUtils.hpp>
@@ -17,21 +18,13 @@
 class World
 {
 public:
-    World()
-    {
-        // initialize with default layers
-        //addLayer("elevation", std::make_unique<ElevationLayer>());
-        // addLayer("humidity", std::make_unique<HumidityLayer>());
-        // addLayer("temperature", std::make_unique<TemperatureLayer>());
-        // addLayer("color", std::make_unique<ColorLayer>());
-        // addLayer("biome", std::make_unique<BiomeLayer>());
-    }
+    World()=default;
     World(std::string config)
     {
         parseConfig(config);
     }
     ~World() = default;
-    SampleData sample(const std::string &layerName = "") const
+    cl_mem sample(const std::string &layerName = "") const
     {
         auto it = layers.find(layerName);
         if (it != layers.end())
@@ -45,11 +38,12 @@ public:
         }
         else
         {
-            return SampleData{}; // empty sample data
+            return cl_mem{}; // empty sample data
         }
     }
     cl_mem getColor(const std::string &layerName = "") const
     {
+        ZoneScopedN("World::getColor");
         auto it = layers.find(layerName);
         if (it != layers.end())
         {
@@ -97,12 +91,14 @@ public:
     int getWorldWidth() const { return worldW; }
     int getWorldHeight() const { return worldH; }
     int getWorldDepth() const { return worldD; }
+    int getWorldRadius() const { return radius; }
 
 private:
 
-    int worldW=256;
-    int worldH=256;
-    int worldD=256;
+    int worldW=256*2;
+    int worldH=256*2;
+    int worldD=256*2;
+    int radius=1;
 
     //Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature
     void parseConfig(const std::string &config)
@@ -132,15 +128,21 @@ private:
             {
                 addLayer(layerName, std::make_unique<ColorLayer>());
             }
-            else if (layerName == "water")
+            else if (layerName == "watertable")
             {
-                auto layer = std::make_unique<WaterLayer>();
+                auto layer = std::make_unique<WaterTableLayer>();
                 layer->parseParameters(layerParams);
                 addLayer(layerName, std::move(layer));
             }
-            else if (layerName == "biome")
+            else if (layerName == "landtype")
             {
-                auto layer = std::make_unique<BiomeLayer>();
+                auto layer = std::make_unique<LandTypeLayer>();
+                layer->parseParameters(layerParams);
+                addLayer(layerName, std::move(layer));
+            }
+            else if (layerName == "river")
+            {
+                auto layer = std::make_unique<RiverLayer>();
                 layer->parseParameters(layerParams);
                 addLayer(layerName, std::move(layer));
             }

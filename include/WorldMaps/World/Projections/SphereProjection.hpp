@@ -2,6 +2,7 @@
 #include <WorldMaps/World/Projections/Projection.hpp>
 #include <WorldMaps/World/World.hpp>
 #include <cmath>
+#include <tracy/Tracy.hpp>
 
 // Screen-space spherical projection: traces rays from a virtual orbit camera through
 // the requested viewport and samples the visible sphere pixels directly on the workers.
@@ -14,53 +15,68 @@ public:
     void setViewCenterRadians(float lonRad, float latRad) { centerLon = lonRad; centerLat = latRad; }
     void setZoomLevel(float z) { zoomLevel = z; }
     void setFov(float f) { fovY = f; }
-    GLuint project(World &world, int width, int height, std::string layerName) override
+    //caller must cleanup texture when done
+    void project(World &world, int width, int height, GLuint& texture, std::string layerName="") override
     {
+        ZoneScopedN("SphericalProjection::project");
         cl_mem fieldBuffer = world.getColor(layerName);
 
         if (fieldBuffer)
         {
             try
             {
-                // Compute camera orbiting the sphere from lon/lat/zoom
-                float targetX = cos(centerLat) * cos(centerLon);
-                float targetY = sin(centerLat);
-                float targetZ = cos(centerLat) * sin(centerLon);
+                float targetX, targetY, targetZ;
+                float camPosX, camPosY, camPosZ;
+                float camForwardX, camForwardY, camForwardZ;
+                float camRightX, camRightY, camRightZ;
+                float camUpX, camUpY, camUpZ;
+                float forwardLen, rightLen, upLen;
+                float worldUpX, worldUpY, worldUpZ;
+                float dotUpF;
+                {
+                    ZoneScopedN("Camera Math");
+                    // Compute camera orbiting the sphere from lon/lat/zoom
+                    targetX = cos(centerLat) * cos(centerLon);
+                    targetY = sin(centerLat);
+                    targetZ = cos(centerLat) * sin(centerLon);
 
-                // Place camera a distance "zoomLevel" away from the sphere surface along the target normal
-                float camPosX = targetX * (1.0f + zoomLevel);
-                float camPosY = targetY * (1.0f + zoomLevel);
-                float camPosZ = targetZ * (1.0f + zoomLevel);
+                    // Place camera a distance "zoomLevel" away from the sphere surface along the target normal
+                    camPosX = targetX * (1.0f + zoomLevel);
+                    camPosY = targetY * (1.0f + zoomLevel);
+                    camPosZ = targetZ * (1.0f + zoomLevel);
 
-                // Forward points from camera to the target on the sphere
-                float camForwardX = targetX - camPosX;
-                float camForwardY = targetY - camPosY;
-                float camForwardZ = targetZ - camPosZ;
-                float forwardLen = sqrt(camForwardX*camForwardX + camForwardY*camForwardY + camForwardZ*camForwardZ);
-                camForwardX /= forwardLen; camForwardY /= forwardLen; camForwardZ /= forwardLen;
+                    // Forward points from camera to the target on the sphere
+                    camForwardX = targetX - camPosX;
+                    camForwardY = targetY - camPosY;
+                    camForwardZ = targetZ - camPosZ;
+                    forwardLen = sqrt(camForwardX*camForwardX + camForwardY*camForwardY + camForwardZ*camForwardZ);
+                    camForwardX /= forwardLen; camForwardY /= forwardLen; camForwardZ /= forwardLen;
 
-                // Compute right and up vectors (world up = +Y)
-                float worldUpX = 0.0f, worldUpY = 1.0f, worldUpZ = 0.0f;
-                float dotUpF = camForwardX*worldUpX + camForwardY*worldUpY + camForwardZ*worldUpZ;
-                if (fabs(dotUpF) > 0.9999f) {
-                    // camera near pole, pick alternate up
-                    worldUpX = 0.0f; worldUpY = 0.0f; worldUpZ = 1.0f;
+                    // Compute right and up vectors (world up = +Y)
+                    worldUpX = 0.0f;
+                    worldUpY = 1.0f;
+                    worldUpZ = 0.0f;
+                    dotUpF = camForwardX*worldUpX + camForwardY*worldUpY + camForwardZ*worldUpZ;
+                    if (fabs(dotUpF) > 0.9999f) {
+                        // camera near pole, pick alternate up
+                        worldUpX = 0.0f; worldUpY = 0.0f; worldUpZ = 1.0f;
+                    }
+                    // right = normalize(cross(camForward, worldUp))
+                    camRightX = camForwardY * worldUpZ - camForwardZ * worldUpY;
+                    camRightY = camForwardZ * worldUpX - camForwardX * worldUpZ;
+                    camRightZ = camForwardX * worldUpY - camForwardY * worldUpX;
+                    rightLen = sqrt(camRightX*camRightX + camRightY*camRightY + camRightZ*camRightZ);
+                    if (rightLen == 0.0f) rightLen = 1.0f;
+                    camRightX /= rightLen; camRightY /= rightLen; camRightZ /= rightLen;
+
+                    // up = cross(right, forward)
+                    camUpX = camRightY * camForwardZ - camRightZ * camForwardY;
+                    camUpY = camRightZ * camForwardX - camRightX * camForwardZ;
+                    camUpZ = camRightX * camForwardY - camRightY * camForwardX;
+                    upLen = sqrt(camUpX*camUpX + camUpY*camUpY + camUpZ*camUpZ);
+                    if (upLen == 0.0f) upLen = 1.0f;
+                    camUpX /= upLen; camUpY /= upLen; camUpZ /= upLen;
                 }
-                // right = normalize(cross(camForward, worldUp))
-                float camRightX = camForwardY * worldUpZ - camForwardZ * worldUpY;
-                float camRightY = camForwardZ * worldUpX - camForwardX * worldUpZ;
-                float camRightZ = camForwardX * worldUpY - camForwardY * worldUpX;
-                float rightLen = sqrt(camRightX*camRightX + camRightY*camRightY + camRightZ*camRightZ);
-                if (rightLen == 0.0f) rightLen = 1.0f;
-                camRightX /= rightLen; camRightY /= rightLen; camRightZ /= rightLen;
-
-                // up = cross(right, forward)
-                float camUpX = camRightY * camForwardZ - camRightZ * camForwardY;
-                float camUpY = camRightZ * camForwardX - camRightX * camForwardZ;
-                float camUpZ = camRightX * camForwardY - camRightY * camForwardX;
-                float upLen = sqrt(camUpX*camUpX + camUpY*camUpY + camUpZ*camUpZ);
-                if (upLen == 0.0f) upLen = 1.0f;
-                camUpX /= upLen; camUpY /= upLen; camUpZ /= upLen;
 
                 spherePerspectiveSample(
                     sphereBuffer,
@@ -73,22 +89,23 @@ public:
                     camUpX, camUpY, camUpZ,
                     fovY,
                     0.0f, 0.0f, 0.0f,
-                    1.0f);
+                    world.getWorldRadius());
             }
             catch (const std::exception &ex)
             {
                 PLOGE << "spherePerspectiveSample() failed: " << ex.what();
-                return 0;
+                return;
             }
         }
         else
         {
             PLOGE << "fieldBuffer is null; skipping spherePerspectiveSample";
-            return 0;
+            return;
         }
         // Recreate texture if needed or channels changed
         if (texture == 0)
         {
+            ZoneScopedN("SphericalProjection Texture Create");
             glGenTextures(1, &texture);
             glBindTexture(GL_TEXTURE_2D, texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -97,12 +114,23 @@ public:
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glBindTexture(GL_TEXTURE_2D, texture);
+        }else{
+            ZoneScopedN("SphericalProjection Texture Resize Check");
+            // Texture exists, make sure its the right size
+            glBindTexture(GL_TEXTURE_2D, texture);
+            GLint texWidth = 0, texHeight = 0;
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texWidth);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texHeight);
+            if(texWidth != width || texHeight != height){
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+            }
         }
 
-        glBindTexture(GL_TEXTURE_2D, texture);
         // Download data from sphereBuffer to a host buffer and upload to the GL texture
         if (sphereBuffer)
         {
+            ZoneScopedN("SphericalProjection Readback");
             cl_int err = CL_SUCCESS;
             size_t bufSize = (size_t)width * (size_t)height * sizeof(float)*4;
             std::vector<float> hostBuf((size_t)width * (size_t)height*4);
@@ -117,10 +145,8 @@ public:
         else
         {
             PLOGE << "sphereBuffer is null";
-            return 0;
+            return;
         }
-
-        return texture;
     }
 
     ~SphericalProjection() override
@@ -133,7 +159,6 @@ public:
     }
 
 private:
-    GLuint texture = 0;
     cl_mem sphereBuffer = nullptr;
 
     // Camera controls (radians for lon/lat)
@@ -178,6 +203,7 @@ public:
         float sphereCenterZ,
         float sphereRadius)
     {
+        ZoneScopedN("spherePerspectiveSample");
         if (!OpenCLContext::get().isReady())
             return;
 
@@ -188,7 +214,8 @@ public:
 
         if (spherePerspectiveProgram == nullptr)
         {
-            std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/FieldToSphere.cl");
+            ZoneScopedN("spherePerspectiveSample Program Init");
+            std::string kernel_code = preprocessCLIncludes("Kernels/FieldToSphere.cl");
             const char *src = kernel_code.c_str();
             size_t len = kernel_code.length();
             spherePerspectiveProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
@@ -209,6 +236,7 @@ public:
         }
 
         if(spherePerspectiveKernel == nullptr){
+            ZoneScopedN("spherePerspectiveSample Kernel Init");
             spherePerspectiveKernel = clCreateKernel(spherePerspectiveProgram, "sphere_perspective_sample_rgba", &err);
             if (err != CL_SUCCESS)
                 throw std::runtime_error("clCreateKernel failed for sphere_perspective_sample_rgba");
@@ -216,6 +244,7 @@ public:
         size_t outSize = (size_t)screenW * (size_t)screenH * sizeof(cl_float4);
         size_t bufSize;
         if(output != nullptr){
+            ZoneScopedN("spherePerspectiveSample Output Buffer Check");
             cl_int err = clGetMemObjectInfo(output,
                                             CL_MEM_SIZE,
                                             sizeof(size_t),
@@ -230,6 +259,7 @@ public:
         }
 
         if(output == nullptr){
+            ZoneScopedN("spherePerspectiveSample Output Buffer Alloc");
             output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "spherePerspective rgba output");
             if (err != CL_SUCCESS)
             {
@@ -261,6 +291,9 @@ public:
 
 
         size_t global[2] = {(size_t)screenW, (size_t)screenH};
-        err = clEnqueueNDRangeKernel(queue, spherePerspectiveKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        {
+            ZoneScopedN("spherePerspectiveSample Enqueue");
+            err = clEnqueueNDRangeKernel(queue, spherePerspectiveKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        }
     }
 };

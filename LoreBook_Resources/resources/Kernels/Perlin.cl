@@ -59,12 +59,10 @@ inline float perlin3(float3 p, uint seed)
     return mix(nxy0, nxy1, u.z);
 }
 
-// ------------------------------------------------------------
-// FBM kernel
-// ------------------------------------------------------------
-
-__kernel void perlin_fbm_3d(
-    __global float* output,
+inline float perlin_3d_util(
+    int x,
+    int y,
+    int z,
     int width,
     int height,
     int depth,
@@ -75,12 +73,8 @@ __kernel void perlin_fbm_3d(
     uint seed
 )
 {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-    int z = get_global_id(2);
-
     if (x >= width || y >= height || z >= depth)
-        return;
+        return 0.0f;
 
     int index = x + y * width + z * width * height;
 
@@ -107,5 +101,98 @@ __kernel void perlin_fbm_3d(
         value = value / maxAmp;
     }
     float outVal = value * 0.5f + 0.5f;
-    output[index] = outVal;
+    return outVal;
+}
+
+inline float perlin_3d_channels_util(
+    int x,
+    int y,
+    int z,
+    int channel,
+    int width,
+    int height,
+    int depth,
+    int channels,
+    __global const float* frequency,
+    __global const float* lacunarity,
+    __global const int* octaves,
+    __global const float* persistence,
+    __global const uint* seed
+)
+{
+    if (x >= width || y >= height || z >= depth || channels <= 0)
+        return 0.0f;
+
+    float freq = frequency[channel];
+    float lac = lacunarity[channel];
+    int oct = octaves[channel];
+    float pers = persistence[channel];
+    uint s = seed[channel];
+    return perlin_3d_util(
+        x, y, z,
+        width, height, depth,
+        freq, lac, oct, pers, s
+    );
+}
+
+// ------------------------------------------------------------
+// FBM kernel
+// ------------------------------------------------------------
+
+__kernel void perlin_fbm_3d(
+    __global float* output,
+    int width,
+    int height,
+    int depth,
+    float frequency,
+    float lacunarity,
+    int octaves,
+    float persistence,
+    uint seed
+)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);
+
+    if (x >= width || y >= height || z >= depth)
+        return;
+
+    output[x + y * width + z * width * height] =
+        perlin_3d_util(
+            x, y, z,
+            width, height, depth,
+            frequency, lacunarity, octaves, persistence, seed
+        );
+}
+
+__kernel void perlin_fbm_3d_channels(
+    __global float* output,
+    int width,
+    int height,
+    int depth,
+    int channels,
+    __global const float* frequency,
+    __global const float* lacunarity,
+    __global const int* octaves,
+    __global const float* persistence,
+    __global const uint* seed
+)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);
+
+    if (x >= width || y >= height || z >= depth || channels <= 0)
+        return;
+
+    for (int c = 0; c < channels; c++) {
+        int index = c * (width * height * depth) + x + y * width + z * width * height;
+        output[index] =
+            perlin_3d_channels_util(
+                x, y, z, c,
+                width, height, depth, channels,
+                frequency, lacunarity, octaves, persistence, seed
+            );
+    }
 }

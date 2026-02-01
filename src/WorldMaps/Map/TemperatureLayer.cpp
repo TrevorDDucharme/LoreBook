@@ -1,5 +1,10 @@
 #include <WorldMaps/Map/TemperatureLayer.hpp>
 #include <WorldMaps/WorldMap.hpp>
+#include <ctime>
+
+TemperatureLayer::TemperatureLayer(){
+    seed = time(0);
+}
 
 TemperatureLayer::~TemperatureLayer()
 {
@@ -14,11 +19,9 @@ TemperatureLayer::~TemperatureLayer()
         coloredBuffer = nullptr;
     }
 }
-SampleData TemperatureLayer::sample()
+cl_mem TemperatureLayer::sample()
 {
-    SampleData data;
-    data.channels.push_back(getTemperatureBuffer());
-    return data;
+    return getTemperatureBuffer();
 }
 
 cl_mem TemperatureLayer::getColor()

@@ -10,7 +10,93 @@
 #define TRACY_ENABLE
 #include <tracy/Tracy.hpp>
 #include <tracy/TracyOpenCL.hpp>
+#include <regex>
+#include <unordered_set>
 
+inline static std::string normalizePath(const std::string &p) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : p) {
+        if (c == '/' || c == '\\') {
+            if (!cur.empty()) parts.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) parts.push_back(cur);
+    std::vector<std::string> out;
+    for (auto &seg : parts) {
+        if (seg == ".") continue;
+        if (seg == "..") {
+            if (!out.empty()) out.pop_back();
+        } else {
+            out.push_back(seg);
+        }
+    }
+    std::string res;
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (i) res += '/';
+        res += out[i];
+    }
+    return res;
+}
+
+inline static std::string preprocessCLIncludes(const std::string &entryPath)
+{
+    std::unordered_set<std::string> included;
+    std::vector<std::string> includeStack;
+
+    std::function<std::string(const std::string&)> process = [&](const std::string &path) -> std::string {
+        std::string norm = normalizePath(path);
+        if (included.count(norm)) {
+            return std::string("// [skipped duplicate include] ") + norm + "\n";
+        }
+        included.insert(norm);
+        includeStack.push_back(norm);
+        std::string content;
+        try {
+            content = loadLoreBook_ResourcesEmbeddedFileAsString(norm.c_str());
+        } catch (const std::exception &ex) {
+            // build a helpful chain for diagnostics
+            std::string chain;
+            for (size_t i = 0; i < includeStack.size(); ++i) {
+                chain += includeStack[i];
+                if (i + 1 < includeStack.size()) chain += " -> ";
+            }
+            throw std::runtime_error(std::string("Failed to load include '") + norm + "' included from: " + chain + " : " + ex.what());
+        }
+
+        // directory of current file for resolving relative includes
+        std::string dir;
+        size_t ppos = norm.find_last_of('/');
+        if (ppos != std::string::npos) dir = norm.substr(0, ppos + 1);
+
+        std::regex inc_re(R"(^\s*#\s*include\s*\"([^\"]+)\")");
+        std::istringstream iss(content);
+        std::string out;
+        std::string line;
+        while (std::getline(iss, line)) {
+            std::smatch m;
+            if (std::regex_search(line, m, inc_re)) {
+                std::string inc = m[1].str();
+                std::string resolved = inc;
+                if (!inc.empty() && inc[0] != '/') resolved = dir + inc;
+                resolved = normalizePath(resolved);
+                out += std::string("// Begin include: ") + resolved + "\n";
+                out += process(resolved);
+                out += std::string("// End include: ") + resolved + "\n";
+            } else {
+                out += line;
+                out.push_back('\n');
+            }
+        }
+        includeStack.pop_back();
+        return out;
+    };
+
+    return process(entryPath);
+}
 
 /// Global OpenCL context manager - provides shared OpenCL resources
 /// for all parts of the application (nodes, utilities, etc.)
@@ -42,6 +128,10 @@ public:
     void logMemoryUsage() const;
     size_t getTotalAllocated() const;
 
+    //program and kernel helpers
+    void createProgram(cl_program& program,std::string file_path);
+    void createKernelFromProgram(cl_kernel& kernel,cl_program program, const std::string &kernelName);
+
 private:
     OpenCLContext() = default;
     ~OpenCLContext();
@@ -66,9 +156,8 @@ private:
     size_t totalAllocated_ = 0;
 };
 
-// perlin noise opencl (C API)
+
 static cl_program gPerlinProgram = nullptr;
-static cl_kernel gPerlinKernel = nullptr;
 
 static void perlin(cl_mem& output,int width,
                      int height,
@@ -88,34 +177,15 @@ static void perlin(cl_mem& output,int width,
     cl_command_queue queue = OpenCLContext::get().getQueue();
     cl_int err = CL_SUCCESS;
 
-    if (gPerlinProgram == nullptr)
-    {
-        ZoneScopedN("Perlin Program Init");
-        std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/Perlin.cl");
-        const char *src = kernel_code.c_str();
-        size_t len = kernel_code.length();
-        gPerlinProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
-        if (err != CL_SUCCESS || gPerlinProgram == nullptr)
-            throw std::runtime_error("clCreateProgramWithSource failed");
-
-        err = clBuildProgram(gPerlinProgram, 1, &device, nullptr, nullptr, nullptr);
-        if (err != CL_SUCCESS)
-        {
-            // retrieve build log
-            size_t log_size = 0;
-            clGetProgramBuildInfo(gPerlinProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-            std::string log;
-            log.resize(log_size);
-            clGetProgramBuildInfo(gPerlinProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
-            throw std::runtime_error(std::string("Failed to build OpenCL program: ") + log);
-        }
+    static cl_kernel gPerlinKernel = nullptr;
+    try{
+        OpenCLContext::get().createProgram(gPerlinProgram,"Kernels/Perlin.cl");
+        OpenCLContext::get().createKernelFromProgram(gPerlinKernel,gPerlinProgram,"perlin_fbm_3d");
     }
-
-    if(gPerlinKernel == nullptr){
-        ZoneScopedN("Perlin Kernel Init");
-        gPerlinKernel = clCreateKernel(gPerlinProgram, "perlin_fbm_3d", &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for perlin_fbm_3d");
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing Perlin OpenCL: %s\n", e.what());
+        return;
     }
 
     {
@@ -169,8 +239,99 @@ static void perlin(cl_mem& output,int width,
     }
 }
 
+static void perlin_channels(cl_mem& output,
+                     int width,
+                     int height,
+                     int depth,
+                     int channels,
+                     std::vector<float> frequency,
+                     std::vector<float> lacunarity,
+                     std::vector<int> octaves,
+                     std::vector<float> persistence,
+                     std::vector<unsigned int> seed)
+{
+    ZoneScopedN("Perlin Channels");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+
+    static cl_kernel gPerlinChannelsKernel = nullptr;
+
+    try{
+        OpenCLContext::get().createProgram(gPerlinProgram,"Kernels/Perlin.cl");
+        OpenCLContext::get().createKernelFromProgram(gPerlinChannelsKernel,gPerlinProgram,"perlin_fbm_3d_channels");
+    }
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing PerlinChannels OpenCL: %s\n", e.what());
+        return;
+    }
+
+    {
+        ZoneScopedN("Perlin Channels Buffer Alloc");
+        size_t total = (size_t)channels * (size_t)width * (size_t)height * (size_t)depth * sizeof(float);
+        size_t buffer_size;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(buffer_size),
+                                            &buffer_size,
+                                            NULL);
+            if (err != CL_SUCCESS) {
+                throw std::runtime_error("clGetMemObjectInfo failed for perlin channels output buffer size");
+            }
+            if(buffer_size < total){
+                TracyMessageL("Reallocating perlin channels output buffer required");
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+
+        if(output == nullptr){
+            TracyMessageL("Allocating perlin channels output buffer");
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "perlin channels output");
+            if (err != CL_SUCCESS || output == nullptr)
+            {
+                throw std::runtime_error("clCreateBuffer failed for perlin channels output");
+            }
+        }   
+    }
+
+    //create buffers for parameters
+    cl_mem freqBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * frequency.size(), frequency.data(), &err, "perlin channels freqBuf");
+    cl_mem lacunarityBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * lacunarity.size(), lacunarity.data(), &err, "perlin channels lacunarityBuf");
+    cl_mem octavesBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * octaves.size(), octaves.data(), &err, "perlin channels octavesBuf");
+    cl_mem persistenceBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * persistence.size(), persistence.data(), &err, "perlin channels persistenceBuf");
+    cl_mem seedBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(unsigned int) * seed.size(), seed.data(), &err, "perlin channels seedBuf");
+
+    clSetKernelArg(gPerlinChannelsKernel, 0, sizeof(cl_mem), &output);
+    clSetKernelArg(gPerlinChannelsKernel, 1, sizeof(int), &width);
+    clSetKernelArg(gPerlinChannelsKernel, 2, sizeof(int), &height);
+    clSetKernelArg(gPerlinChannelsKernel, 3, sizeof(int), &depth);
+    clSetKernelArg(gPerlinChannelsKernel, 4, sizeof(int), &channels);
+    clSetKernelArg(gPerlinChannelsKernel, 5, sizeof(cl_mem), &freqBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 6, sizeof(cl_mem), &lacunarityBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 7, sizeof(cl_mem), &octavesBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 8, sizeof(cl_mem), &persistenceBuf);
+    clSetKernelArg(gPerlinChannelsKernel, 9, sizeof(cl_mem), &seedBuf);
+    
+    size_t global[3] = {(size_t)width, (size_t)height, (size_t)depth};
+    {
+        ZoneScopedN("Perlin Channels Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gPerlinChannelsKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for perlin channels");
+        }
+    }
+}
+
 static cl_program gScalarToColorProgram = nullptr;
-static cl_kernel gScalarToColorKernel = nullptr;
 
 static void scalarToColor(cl_mem& output, 
                             cl_mem scalarBuffer,
@@ -189,34 +350,18 @@ static void scalarToColor(cl_mem& output,
     cl_command_queue queue = OpenCLContext::get().getQueue();
     cl_int err = CL_SUCCESS;
 
-    if (gScalarToColorProgram == nullptr)
+    static cl_kernel gScalarToColorKernel = nullptr;
+
+    try{
+        OpenCLContext::get().createProgram(gScalarToColorProgram,"Kernels/ScalarToColor.cl");
+        OpenCLContext::get().createKernelFromProgram(gScalarToColorKernel,gScalarToColorProgram,"scalarToColor");
+    }
+    catch (const std::runtime_error &e)
     {
-        ZoneScopedN("ScalarToColor Program Init");
-        std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/ScalarToColor.cl");
-        const char *src = kernel_code.c_str();
-        size_t len = kernel_code.length();
-        gScalarToColorProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
-        if (err != CL_SUCCESS || gScalarToColorProgram == nullptr)
-            throw std::runtime_error("clCreateProgramWithSource failed");
-
-        err = clBuildProgram(gScalarToColorProgram, 1, &device, nullptr, nullptr, nullptr);
-        if (err != CL_SUCCESS)
-        {
-            size_t log_size = 0;
-            clGetProgramBuildInfo(gScalarToColorProgram, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
-            std::string log;
-            log.resize(log_size);
-            clGetProgramBuildInfo(gScalarToColorProgram, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
-            throw std::runtime_error(std::string("Failed to build OpenCL program: ") + log);
-        }
+        printf("Error initializing ScalarToColor OpenCL: %s\n", e.what());
+        return;
     }
 
-    if (gScalarToColorKernel == nullptr){
-        ZoneScopedN("ScalarToColor Kernel Init");
-        gScalarToColorKernel = clCreateKernel(gScalarToColorProgram, "scalar_to_rgba_float4", &err);
-        if (err != CL_SUCCESS)
-            throw std::runtime_error("clCreateKernel failed for scalar_to_rgba_float4");
-    }
     // create palette buffer
     std::vector<cl_float4> paletteFloats;
     paletteFloats.reserve((size_t)colorCount);
@@ -281,6 +426,103 @@ static void scalarToColor(cl_mem& output,
     }
 
     OpenCLContext::get().releaseMem(paletteBuf);
+}
+
+static void weightedScalarToColor(cl_mem& output, 
+                            cl_mem scalarBuffer,
+                            int fieldW,
+                            int fieldH,
+                            int fieldD,
+                            int colorCount,
+                            const std::vector<std::array<unsigned char, 4>> &paletteColors,
+                            const std::vector<float> &weights)
+{
+    ZoneScopedN("WeightedScalarToColor");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+    static cl_kernel gWeightedScalarToColorKernel = nullptr;
+    try{
+        OpenCLContext::get().createProgram(gScalarToColorProgram,"Kernels/ScalarToColor.cl");
+        OpenCLContext::get().createKernelFromProgram(gWeightedScalarToColorKernel,gScalarToColorProgram,"weighed_scalar_to_rgba_float4");
+    }
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing WeightedScalarToColor OpenCL: %s\n", e.what());
+        return;
+    }
+    // create palette buffer
+    std::vector<cl_float4> paletteFloats;
+    paletteFloats.reserve((size_t)colorCount);
+    for (int i = 0; i < colorCount; ++i)
+    {
+        auto &c = paletteColors[i % paletteColors.size()];
+        cl_float4 col;
+        col.s[0] = static_cast<float>(c[0]) / 255.0f;
+        col.s[1] = static_cast<float>(c[1]) / 255.0f;
+        col.s[2] = static_cast<float>(c[2]) / 255.0f;
+        col.s[3] = static_cast<float>(c[3]) / 255.0f;
+        paletteFloats.push_back(col);
+    }
+    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err, "weightedScalarToColor paletteBuf");
+    if (err != CL_SUCCESS || paletteBuf == nullptr)
+    {
+        throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor paletteBuf");
+    }
+    // create weights buffer
+    cl_mem weightsBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * weights.size(), (void*)weights.data(), &err, "weightedScalarToColor weightsBuf");
+    if (err != CL_SUCCESS || weightsBuf == nullptr)
+    {
+        OpenCLContext::get().releaseMem(paletteBuf);
+        throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor weightsBuf");
+    }
+    size_t voxels = (size_t)fieldW * (size_t)fieldH * (size_t)fieldD;
+    size_t outSize = voxels * sizeof(cl_float4);
+    if(output != nullptr){
+        TracyMessageL("Reallocating weightedScalarToColor output buffer required");
+        cl_int err = clGetMemObjectInfo(output,
+                                        CL_MEM_SIZE,
+                                        sizeof(size_t),
+                                        &outSize,
+                                        NULL);
+        if (err != CL_SUCCESS) {
+            throw std::runtime_error("clGetMemObjectInfo failed for weightedScalarToColor output buffer size");
+        }
+        if(outSize < voxels * sizeof(cl_float4)){
+            OpenCLContext::get().releaseMem(output);
+            output = nullptr;
+        }
+    }
+    if(output == nullptr){
+        TracyMessageL("Allocating weightedScalarToColor output buffer");
+        output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, outSize, nullptr, &err, "weightedScalarToColor output");
+        if (err != CL_SUCCESS || output == nullptr)
+        {
+            OpenCLContext::get().releaseMem(paletteBuf);
+            OpenCLContext::get().releaseMem(weightsBuf);
+            throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor output");
+        }
+    }
+    clSetKernelArg(gWeightedScalarToColorKernel, 0, sizeof(cl_mem), &scalarBuffer);
+    clSetKernelArg(gWeightedScalarToColorKernel, 1, sizeof(int), &fieldW);
+    clSetKernelArg(gWeightedScalarToColorKernel, 2, sizeof(int), &fieldH);
+    clSetKernelArg(gWeightedScalarToColorKernel, 3, sizeof(int), &fieldD);
+    clSetKernelArg(gWeightedScalarToColorKernel, 4, sizeof(int), &colorCount);
+    clSetKernelArg(gWeightedScalarToColorKernel, 5, sizeof(cl_mem), &paletteBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 6, sizeof(cl_mem), &weightsBuf);
+    clSetKernelArg(gWeightedScalarToColorKernel, 7, sizeof(cl_mem), &output);
+    size_t global[3] = {(size_t)fieldW, (size_t)fieldH, (size_t)fieldD};
+    
+    {
+        ZoneScopedN("WeightedScalarToColor Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gWeightedScalarToColorKernel, 3, nullptr, global, nullptr, 0, nullptr, nullptr);
+    }
+    OpenCLContext::get().releaseMem(paletteBuf);
+    OpenCLContext::get().releaseMem(weightsBuf);
 }
 
 
@@ -352,3 +594,4 @@ static void concatVolumes(cl_mem& output,
         }
     }
 }
+

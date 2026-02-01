@@ -18,7 +18,6 @@
 #include <mutex>
 #include <atomic>
 #include "GraphView.hpp"
-#include <WorldMaps/Map/WaterLayer.hpp>
 #include <Vault.hpp>
 #include "VaultChat.hpp"
 #include "Fonts.hpp"

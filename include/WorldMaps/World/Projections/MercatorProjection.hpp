@@ -12,8 +12,8 @@ public:
     void setViewCenterRadians(float lonRad, float latRad);
 
     void setZoomLevel(float z);
-
-    GLuint project(World &world, int width, int height, std::string layerName) override;
+    //caller must cleanup texture when done
+    void project(World &world, int width, int height, GLuint& texture, std::string layerName="") override;
 
 private:
     GLuint texture = 0;

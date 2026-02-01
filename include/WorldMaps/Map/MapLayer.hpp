@@ -11,12 +11,6 @@
 #include <OpenCLContext.hpp>
 #include <stringUtils.hpp>
 
-class World;
-
-struct SampleData
-{
-    std::vector<cl_mem> channels;
-};
 
 class World;
 
@@ -26,7 +20,7 @@ public:
     MapLayer() = default;
     virtual ~MapLayer() = default;
     // Layers can sample themselves given access to the full World so they can query other layers
-    virtual SampleData sample()= 0;
+    virtual cl_mem sample()= 0;
     virtual cl_mem getColor() = 0;
     virtual void parseParameters(const std::string &params) {}
 

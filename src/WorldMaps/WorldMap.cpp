@@ -96,7 +96,7 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
     mercatorProj.setViewCenterRadians(mapCenterLon * static_cast<float>(M_PI) / 180.0f, mapCenterLat * static_cast<float>(M_PI) / 180.0f);
     mercatorProj.setZoomLevel(mapZoom);
 
-    worldMapTexture = mercatorProj.project(world, texSize.x, texSize.y, selectedLayerName);
+    mercatorProj.project(world, texSize.x, texSize.y,worldMapTexture, selectedLayerName);
 
     if (worldMapTexture != 0)
     {
@@ -326,7 +326,7 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     sphereProj.setFov(globeFovDeg * static_cast<float>(M_PI) / 180.0f);
 
     std::string selectedLayerNameGlobe = selectedLayerName; // reuse selection
-    globeTexture = sphereProj.project(world, texSize.x, texSize.y, selectedLayerNameGlobe);
+    sphereProj.project(world, texSize.x, texSize.y, globeTexture, selectedLayerNameGlobe);
 
     if (globeTexture != 0)
     {
@@ -428,13 +428,19 @@ void worldMap()
     if (ImGui::Begin("World Map"))
     {
         static World world;
-        static ElevationLayer elevationLayer;
-        world.addLayer("elevation", std::make_unique<ElevationLayer>());
-        world.addLayer("humidity", std::make_unique<HumidityLayer>());
-        world.addLayer("temperature", std::make_unique<TemperatureLayer>());
-        world.addLayer("color", std::make_unique<ColorLayer>());
-        world.addLayer("biome", std::make_unique<BiomeLayer>());
-
+        static bool worldInitialized = false;
+        if (!worldInitialized)
+        {
+            world.addLayer("elevation", std::make_unique<ElevationLayer>());
+            world.addLayer("humidity", std::make_unique<HumidityLayer>());
+            world.addLayer("temperature", std::make_unique<TemperatureLayer>());
+            world.addLayer("color", std::make_unique<ColorLayer>());
+            world.addLayer("landtype", std::make_unique<LandTypeLayer>());
+            world.addLayer("latitude", std::make_unique<LatitudeLayer>());
+            world.addLayer("watertable", std::make_unique<WaterTableLayer>());
+            world.addLayer("rivers", std::make_unique<RiverLayer>());
+            worldInitialized = true;
+        }
         static ImVec2 texSize(512, 512);
         
 

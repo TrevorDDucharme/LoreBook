@@ -14,11 +14,9 @@ ElevationLayer::~ElevationLayer()
         coloredBuffer = nullptr;
     }
 }
-SampleData ElevationLayer::sample()
+cl_mem ElevationLayer::sample()
 {
-    SampleData data;
-    data.channels.push_back(getElevationBuffer());
-    return data;
+    return getElevationBuffer();
 }
 
 cl_mem ElevationLayer::getColor()

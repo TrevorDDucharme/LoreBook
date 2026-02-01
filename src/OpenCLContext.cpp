@@ -216,3 +216,58 @@ size_t OpenCLContext::getTotalAllocated() const
     std::lock_guard<std::mutex> lk(memTrackMutex_);
     return totalAllocated_;
 }
+
+//kernel and program helpers
+void OpenCLContext::createProgram(cl_program& program,std::string file_path)
+{
+    ZoneScopedN("OpenCLContext::createProgram");
+    if (program == nullptr)
+    {
+        cl_int err = CL_SUCCESS;
+        //ZoneScopedN("LandTypeLayer::landtypeColorMap create program");
+        std::string kernel_code = preprocessCLIncludes(file_path);
+        const char *src = kernel_code.c_str();
+        size_t len = kernel_code.length();
+        program = clCreateProgramWithSource(getContext(), 1, &src, &len, &err);
+        if (err != CL_SUCCESS || program == nullptr){
+            throw std::runtime_error("clCreateProgramWithSource failed for " + file_path);
+        }
+
+        cl_device_id device= getDevice();
+        err = clBuildProgram(program, 1, &device, nullptr, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            size_t log_size = 0;
+            clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+            std::string log;
+            log.resize(log_size);
+            clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, &log[0], nullptr);
+            //print the full source with line numbers for easier debugging
+            {
+                std::istringstream iss(kernel_code);
+                std::string line;
+                int lineNum = 1;
+                std::cerr << "---- " << file_path << " source ----" << std::endl;
+                while (std::getline(iss, line))
+                {
+                    std::cerr << lineNum << ": " << line << std::endl;
+                    ++lineNum;
+                }
+                std::cerr << "---- end source ----" << std::endl;
+            }
+            throw std::runtime_error(std::string("Failed to build " + file_path + " OpenCL program: ") + log);
+        }
+    }
+}
+
+void OpenCLContext::createKernelFromProgram(cl_kernel& kernel,cl_program program, const std::string &kernelName)
+{
+    ZoneScopedN("OpenCLContext::createKernelFromProgram");
+    if (kernel == nullptr){
+        //ZoneScopedN("LandTypeLayer::landtypeColorMap create kernel");
+        cl_int err = CL_SUCCESS;
+        kernel = clCreateKernel(program, kernelName.c_str(), &err);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clCreateKernel failed for " + kernelName);
+    }
+}

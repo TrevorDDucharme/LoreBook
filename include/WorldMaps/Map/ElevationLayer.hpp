@@ -4,7 +4,7 @@ class ElevationLayer : public MapLayer {
 public:
     ElevationLayer()= default;
     ~ElevationLayer() override;
-    SampleData sample() override;
+    cl_mem sample() override;
     cl_mem getColor() override;
 
 private:

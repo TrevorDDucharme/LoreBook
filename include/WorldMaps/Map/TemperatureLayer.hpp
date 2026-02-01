@@ -4,9 +4,9 @@
 class TemperatureLayer : public MapLayer
 {
 public:
-    TemperatureLayer() = default;
+    TemperatureLayer();
     ~TemperatureLayer() override;
-    SampleData sample() override;
+    cl_mem sample() override;
 
     cl_mem getColor() override;
 
@@ -15,4 +15,5 @@ private:
 
     cl_mem temperatureBuffer = nullptr;
     cl_mem coloredBuffer = nullptr;
+    unsigned int seed=12345u;
 };

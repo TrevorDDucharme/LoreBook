@@ -1,5 +1,6 @@
 #include <WorldMaps/World/Projections/MercatorProjection.hpp>
 #include <WorldMaps/World/World.hpp>
+#include <tracy/Tracy.hpp>
 
 cl_program MercatorProjection::mercatorProgram = nullptr;
 cl_kernel MercatorProjection::mercatorKernel = nullptr;
@@ -22,8 +23,9 @@ void MercatorProjection::setViewCenterRadians(float lonRad, float latRad)
 }
 void MercatorProjection::setZoomLevel(float z) { zoomLevel = z; }
 
-GLuint MercatorProjection::project(World &world, int width, int height, std::string layerName)
+void MercatorProjection::project(World &world, int width, int height, GLuint &texture, std::string layerName)
 {
+    ZoneScopedN("MercatorProjection::project");
     cl_mem fieldBuffer = world.getColor(layerName);
 
     if (fieldBuffer)
@@ -35,30 +37,25 @@ GLuint MercatorProjection::project(World &world, int width, int height, std::str
                             fieldBuffer,
                             world.getWorldWidth(), world.getWorldHeight(), world.getWorldDepth(),
                             width, height,
-                            1.0f,
+                            world.getWorldRadius(),
                             centerLon, centerMercY, zoomLevel);
         }
         catch (const std::exception &ex)
         {
             PLOGE << "mercatorProject() failed: " << ex.what();
-            return 0;
+            return;
         }
     }
     else
     {
         PLOGE << "fieldBuffer is null; skipping mercatorProject";
-        return 0;
+        return;
     }
 
     // Recreate texture if needed or channels changed
     if (texture == 0)
     {
-        if (texture != 0)
-        {
-            glDeleteTextures(1, &texture);
-            texture = 0;
-        }
-
+        ZoneScopedN("MercatorProjection Texture Create");
         glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -68,12 +65,26 @@ GLuint MercatorProjection::project(World &world, int width, int height, std::str
 
         // RGBA float texture
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glBindTexture(GL_TEXTURE_2D, texture);
+    }
+    else
+    {
+        ZoneScopedN("MercatorProjection Texture Resize Check");
+        // Texture exists, make sure its the right size
+        glBindTexture(GL_TEXTURE_2D, texture);
+        GLint texWidth = 0, texHeight = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &texWidth);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &texHeight);
+        if (texWidth != width || texHeight != height)
+        {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr);
+        }
     }
 
-    glBindTexture(GL_TEXTURE_2D, texture);
     // Download data from mercatorBuffer to a host buffer and upload to the GL texture
     if (mercatorBuffer)
     {
+        ZoneScopedN("MercatorProjection Readback");
         cl_int err = CL_SUCCESS;
         size_t bufSize = (size_t)width * (size_t)height * sizeof(cl_float4);
         std::vector<cl_float4> hostBuf((size_t)width * (size_t)height);
@@ -89,7 +100,6 @@ GLuint MercatorProjection::project(World &world, int width, int height, std::str
     {
         PLOGE << "mercatorBuffer is null";
     }
-    return texture;
 }
 
 void MercatorProjection::mercatorProject(
@@ -105,6 +115,7 @@ void MercatorProjection::mercatorProject(
     float centerMercY,
     float zoom)
 {
+    ZoneScopedN("MercatorProjection::mercatorProject");
     if (!OpenCLContext::get().isReady())
         return;
 
@@ -115,7 +126,8 @@ void MercatorProjection::mercatorProject(
 
     if (mercatorProgram == nullptr)
     {
-        std::string kernel_code = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/FeildToMercator.cl");
+        ZoneScopedN("MercatorProjection Program Init");
+        std::string kernel_code = preprocessCLIncludes("Kernels/FeildToMercator.cl");
         const char *src = kernel_code.c_str();
         size_t len = kernel_code.length();
         mercatorProgram = clCreateProgramWithSource(ctx, 1, &src, &len, &err);
@@ -137,6 +149,7 @@ void MercatorProjection::mercatorProject(
 
     if (mercatorKernel == nullptr)
     {
+        ZoneScopedN("MercatorProjection Kernel Init");
         mercatorKernel = clCreateKernel(mercatorProgram, "field3d_to_mercator_rgba", &err);
         if (err != CL_SUCCESS)
         {
@@ -158,6 +171,7 @@ void MercatorProjection::mercatorProject(
 
     if (output != nullptr)
     {
+        ZoneScopedN("MercatorProjection Output Buffer Check");
         cl_int err = clGetMemObjectInfo(output,
                                         CL_MEM_SIZE,
                                         sizeof(size_t),
@@ -175,6 +189,7 @@ void MercatorProjection::mercatorProject(
 
     if (output == nullptr)
     {
+        ZoneScopedN("MercatorProjection Output Buffer Alloc");
         output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "mercator rgba output");
         if (err != CL_SUCCESS)
         {
@@ -195,5 +210,8 @@ void MercatorProjection::mercatorProject(
     clSetKernelArg(mercatorKernel, 10, sizeof(float), &zoom);
 
     size_t global[2] = {(size_t)outW, (size_t)outH};
-    err = clEnqueueNDRangeKernel(queue, mercatorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+    {
+        ZoneScopedN("MercatorProjection Enqueue");
+        err = clEnqueueNDRangeKernel(queue, mercatorKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+    }
 }

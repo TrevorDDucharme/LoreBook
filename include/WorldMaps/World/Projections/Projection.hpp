@@ -20,5 +20,5 @@ class Projection
 public:
     Projection()= default;
     virtual ~Projection()= default;
-    virtual GLuint project(World &world, int width, int height, std::string layerName = "") = 0;
+    virtual void project(World &world, int width, int height, GLuint& texture, std::string layerName="") = 0;
 };

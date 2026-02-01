@@ -3,3 +3,4 @@ bin
 build
 build-windows
 Neior.db.bak
+vcpkg_installed

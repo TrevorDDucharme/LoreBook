@@ -14,11 +14,9 @@ HumidityLayer::~HumidityLayer()
         coloredBuffer = nullptr;
     }
 }
-SampleData HumidityLayer::sample()
+cl_mem HumidityLayer::sample()
 {
-    SampleData data;
-    data.channels.push_back(getHumidityBuffer());
-    return data;
+    return getHumidityBuffer();
 }
 
 cl_mem HumidityLayer::getColor()

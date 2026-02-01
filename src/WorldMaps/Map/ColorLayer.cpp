@@ -14,11 +14,9 @@ ColorLayer::~ColorLayer()
         coloredBuffer = nullptr;
     }
 }
-SampleData ColorLayer::sample()
+cl_mem ColorLayer::sample()
 {
-    SampleData data;
-    data.channels.push_back(getColorBuffer());
-    return data;
+    return getColorBuffer();
 }
 
 cl_mem ColorLayer::getColor()

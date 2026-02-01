@@ -28,24 +28,62 @@ __kernel void biome_masks_to_rgba_float4(__global const float* masks,
         col.w = 1.0f; // ensure opaque
         outRGBA[idx] = col;
     } else {
-        // Blended mapping: weighted average normalized by the sum of weights
-        float4 acc = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
-        float sum = 0.0f;
+        // Exponential falloff blend with argmax fallback to avoid unclassified zones
+        // Tune these for stronger/weaker falloff:
+        const float sharpness = 20.0f;            // higher => sharper peaks
+        const float minNormalizedForBlend = 0.05f; // if best biome < this, use argmax
+
+        // Find max (best) value and best index
+        float maxW = -INFINITY;
+        int bestIdx = 0;
         for (int b = 0; b < biomeCount; ++b) {
-            float w = masks[b * voxels + idx];
-            if (w <= 0.0f) continue;
-            float4 c = palette[b];
-            acc += c * w;
-            sum += w;
+            float v = masks[b * voxels + idx];
+            if (v > maxW) {
+                maxW = v;
+                bestIdx = b;
+            }
         }
-        if (sum <= 0.0f) {
-            float4 col = palette[0];
+
+        // If all zero or negative, fall back to argmax palette color
+        if (maxW <= 0.0f) {
+            float4 col = palette[bestIdx];
             col.w = 1.0f;
             outRGBA[idx] = col;
         } else {
-            float4 col = acc / sum;
-            col.w = 1.0f;
-            outRGBA[idx] = col;
+            // Compute exponential weights relative to maxW
+            float accX = 0.0f, accY = 0.0f, accZ = 0.0f, accW = 0.0f;
+            float sumExp = 0.0f;
+            for (int b = 0; b < biomeCount; ++b) {
+                float w = masks[b * voxels + idx];
+                // treat negatives as zero influence
+                if (w <= 0.0f) continue;
+                float wexp = exp(sharpness * (w - maxW)); // max -> exp(0) = 1.0
+                float4 c = palette[b];
+                accX += c.x * wexp;
+                accY += c.y * wexp;
+                accZ += c.z * wexp;
+                accW += c.w * wexp;
+                sumExp += wexp;
+            }
+
+            if (sumExp <= 0.0f) {
+                // Defensive fallback (shouldn't happen)
+                float4 col = palette[bestIdx];
+                col.w = 1.0f;
+                outRGBA[idx] = col;
+            } else {
+                // If the best biome's normalized weight is too small, use argmax to ensure classification
+                // best normalized weight = 1.0 / sumExp (since best wexp is 1.0)
+                if ((1.0f / sumExp) < minNormalizedForBlend) {
+                    float4 col = palette[bestIdx];
+                    col.w = 1.0f;
+                    outRGBA[idx] = col;
+                } else {
+                    float4 col = (float4)(accX / sumExp, accY / sumExp, accZ / sumExp, accW / sumExp);
+                    col.w = 1.0f;
+                    outRGBA[idx] = col;
+                }
+            }
         }
     }
 }

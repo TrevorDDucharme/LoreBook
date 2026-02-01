@@ -51,7 +51,7 @@ Notes:
 
 ## Sampling API & Layer Changes (Conceptual)
 
-- `SampleData` becomes multichannel-aware and can hold per-layer channel vectors.
+- `cl_mem` becomes multichannel-aware and can hold per-layer channel vectors.
 - `MapLayer::sample(World&, lon, lat, const ChunkDelta* delta)` (conceptual) — the sampling path takes an optional chunk delta pointer for the current sample and must apply deltas according to the chosen semantics.
 - Semantics supported:
   - Add: sample_value += delta_value
@@ -148,7 +148,7 @@ Compatibility:
 
 1. Extend `ChunkLOD` to contain generic per-layer dense deltas and confirm LOD0 is editable.
 2. Implement the chunk cache, dirty flags, and partial rebuild hooks in projections.
-3. Update `SampleData` and `MapLayer` interfaces to support multichannel sampling and delta application.
+3. Update `cl_mem` and `MapLayer` interfaces to support multichannel sampling and delta application.
 4. Add DB schema & Vault helpers for `LayerDeltas` and background write queue.
 5. Implement UI: Layer Parameters panel, per-sample editor, and painting tools.
 6. Performance tuning: caching, LRU, background tasks, and test across zooms/resolutions.

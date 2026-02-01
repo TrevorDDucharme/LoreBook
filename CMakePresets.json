@@ -13,7 +13,8 @@
                 "VCPKG_TARGET_TRIPLET": "x64-linux",
                 "VCPKG_HOST_TRIPLET": "x64-linux",
                 "CMAKE_C_COMPILER": "gcc-14",
-                "CMAKE_CXX_COMPILER": "g++-14"
+                "CMAKE_CXX_COMPILER": "g++-14",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"
             }
         },
         {
@@ -29,7 +30,8 @@
                 "VCPKG_HOST_TRIPLET": "x64-linux",
                 "CMAKE_C_COMPILER": "gcc-14",
                 "CMAKE_CXX_COMPILER": "g++-14",
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "OFF"
             }
         },
         {

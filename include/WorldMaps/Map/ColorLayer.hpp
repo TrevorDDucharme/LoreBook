@@ -7,7 +7,7 @@ class ColorLayer : public MapLayer {
 public:
  ColorLayer() = default;
     ~ColorLayer() override;
-    SampleData sample() override;
+    cl_mem sample() override;
 
     cl_mem getColor() override;
 
