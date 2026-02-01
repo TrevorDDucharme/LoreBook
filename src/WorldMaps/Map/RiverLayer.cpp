@@ -48,14 +48,14 @@ cl_mem RiverLayer::getRiverBuffer()
                            riverBuffer,
                            parentWorld->getWorldLatitudeResolution(),
                            parentWorld->getWorldLongitudeResolution(),
-                           100); // maxSteps
+                           2); // maxSteps
     }
     return riverBuffer;
 }
 
 void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
                                cl_mem waterTableBuf,
-                               cl_mem& riverVolumeBuf,
+                               cl_mem& riverBuf,
                                int latitudeResolution, int longitudeResolution,
                                uint32_t maxSteps)
 {
@@ -64,16 +64,12 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
 
     cl_int err = CL_SUCCESS;
     static cl_program gRiverPathsProgram = nullptr;
-    static cl_kernel gRiverFlowDirKernel = nullptr;
-    static cl_kernel gRiverFlowInitKernel = nullptr;
+    static cl_kernel gRiverFlowSourceKernel = nullptr;
     static cl_kernel gRiverFlowAccumulateKernel = nullptr;
-    static cl_kernel gRiverVolumeKernel = nullptr;
     try {
         OpenCLContext::get().createProgram(gRiverPathsProgram, "Kernels/Rivers.cl");
-        OpenCLContext::get().createKernelFromProgram(gRiverFlowDirKernel, gRiverPathsProgram, "river_flow_dir");
-        OpenCLContext::get().createKernelFromProgram(gRiverFlowInitKernel, gRiverPathsProgram, "river_flow_init");
+        OpenCLContext::get().createKernelFromProgram(gRiverFlowSourceKernel, gRiverPathsProgram, "river_flow_source");
         OpenCLContext::get().createKernelFromProgram(gRiverFlowAccumulateKernel, gRiverPathsProgram, "river_flow_accumulate");
-        OpenCLContext::get().createKernelFromProgram(gRiverVolumeKernel, gRiverPathsProgram, "river_volume");
     } catch (const std::runtime_error &e) {
         printf("Error initializing RiverPaths OpenCL: %s\n", e.what());
         return;
@@ -83,25 +79,24 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
     size_t outSize = voxels * sizeof(cl_float);
 
     // allocate & zero output if needed (use host-zero copy for simplicity)
-    if (riverVolumeBuf != nullptr) {
-        cl_int r = clGetMemObjectInfo(riverVolumeBuf, CL_MEM_SIZE, sizeof(size_t), &outSize, NULL);
+    if (riverBuf != nullptr) {
+        cl_int r = clGetMemObjectInfo(riverBuf, CL_MEM_SIZE, sizeof(size_t), &outSize, NULL);
         if (r != CL_SUCCESS || outSize < voxels * sizeof(cl_float)) {
-            OpenCLContext::get().releaseMem(riverVolumeBuf);
-            riverVolumeBuf = nullptr;
+            OpenCLContext::get().releaseMem(riverBuf);
+            riverBuf = nullptr;
         }
     }
-    if (riverVolumeBuf == nullptr) {
+    if (riverBuf == nullptr) {
         std::vector<float> zeros(voxels, 0.0f);
-        riverVolumeBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, outSize, zeros.data(), &err, "generateRiverPaths riverVolumeBuf");
-        if (err != CL_SUCCESS || riverVolumeBuf == nullptr) {
-            throw std::runtime_error("clCreateBuffer failed for generateRiverPaths riverVolumeBuf");
+        riverBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, outSize, zeros.data(), &err, "generateRiverPaths riverBuf");
+        if (err != CL_SUCCESS || riverBuf == nullptr) {
+            throw std::runtime_error("clCreateBuffer failed for generateRiverPaths riverBuf");
         }
     }
 
-    //initialize flow buffers for ping-pong
-    cl_mem flowDirBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, voxels * sizeof(cl_int), nullptr, &err, "generateRiverPaths flowDirBuf");
-    if (err != CL_SUCCESS || flowDirBuf == nullptr) {
-        throw std::runtime_error("clCreateBuffer failed for generateRiverPaths flowDirBuf");
+    cl_mem flowSourceBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, voxels * sizeof(cl_float), nullptr, &err, "generateRiverPaths flowSourceBuf");
+    if (err != CL_SUCCESS || flowSourceBuf == nullptr) {
+        throw std::runtime_error("clCreateBuffer failed for generateRiverPaths flowSourceBuf");
     }
     cl_mem flowAccBufA = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, voxels * sizeof(cl_float), nullptr, &err, "generateRiverPaths flowAccBufA");
     if (err != CL_SUCCESS || flowAccBufA == nullptr) {
@@ -111,48 +106,38 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
     if (err != CL_SUCCESS || flowAccBufB == nullptr) {
         throw std::runtime_error("clCreateBuffer failed for generateRiverPaths flowAccBufB");
     }
-    // Step 1: Compute flow directions
-    {
-        clSetKernelArg(gRiverFlowDirKernel, 0, sizeof(cl_mem), &elevationBuf);
-        clSetKernelArg(gRiverFlowDirKernel, 1, sizeof(cl_mem), &waterTableBuf);
-        clSetKernelArg(gRiverFlowDirKernel, 2, sizeof(cl_mem), &flowDirBuf);
-        clSetKernelArg(gRiverFlowDirKernel, 3, sizeof(int), &latitudeResolution);
-        clSetKernelArg(gRiverFlowDirKernel, 4, sizeof(int), &longitudeResolution);
-        size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
-        err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowDirKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) {
-            printf("river_flow_dir kernel enqueue failed: %d\n", err);
-        }
-    }
-    // Step 2: Initialize flow accumulation (now slope-aware)
-    {
-        // slopeScale controls how much flatter cells increase initial flow (>0 increases width on flats)
-        float slopeScale = 2.0f;
-        // slopeNorm is the normalization value for the local max drop; adjust based on elevation range
-        float slopeNorm = 0.02f;
 
-        clSetKernelArg(gRiverFlowInitKernel, 0, sizeof(cl_mem), &elevationBuf);
-        clSetKernelArg(gRiverFlowInitKernel, 1, sizeof(cl_mem), &waterTableBuf);
-        clSetKernelArg(gRiverFlowInitKernel, 2, sizeof(int), &latitudeResolution);
-        clSetKernelArg(gRiverFlowInitKernel, 3, sizeof(int), &longitudeResolution);
-        clSetKernelArg(gRiverFlowInitKernel, 4, sizeof(cl_mem), &flowAccBufA);
-        clSetKernelArg(gRiverFlowInitKernel, 5, sizeof(float), &slopeScale);
-        clSetKernelArg(gRiverFlowInitKernel, 6, sizeof(float), &slopeNorm);
+    // Step 1: create Flow Sources
+    {
+        float minHeight = 0.6f;
+        float maxHeight = .61f;
+        float chance = 0.00000001f;
+        clSetKernelArg(gRiverFlowSourceKernel, 0, sizeof(cl_mem), &elevationBuf);
+        clSetKernelArg(gRiverFlowSourceKernel, 1, sizeof(cl_mem), &waterTableBuf);
+        clSetKernelArg(gRiverFlowSourceKernel, 2, sizeof(int), &latitudeResolution);
+        clSetKernelArg(gRiverFlowSourceKernel, 3, sizeof(int), &longitudeResolution);
+        clSetKernelArg(gRiverFlowSourceKernel, 4, sizeof(cl_mem), &flowSourceBuf);
+        clSetKernelArg(gRiverFlowSourceKernel, 5, sizeof(float), &minHeight);
+        clSetKernelArg(gRiverFlowSourceKernel, 6, sizeof(float), &maxHeight);
+        clSetKernelArg(gRiverFlowSourceKernel, 7, sizeof(float), &chance);
 
         size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
-        err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowInitKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowSourceKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
-            printf("river_flow_init kernel enqueue failed: %d\n", err);
+            printf("river_flow_source kernel enqueue failed: %d\n", err);
         }
     }
     // Step 3: Iteratively accumulate flow
     const int flowIterations = maxSteps;
     for (int iter = 0; iter < flowIterations; ++iter) {
-        clSetKernelArg(gRiverFlowAccumulateKernel, 0, sizeof(cl_mem), &flowDirBuf);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 1, sizeof(int), &latitudeResolution);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 2, sizeof(int), &longitudeResolution);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 3, sizeof(cl_mem), &flowAccBufA);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 4, sizeof(cl_mem), &flowAccBufB);
+
+        clSetKernelArg(gRiverFlowAccumulateKernel, 0, sizeof(cl_mem), &elevationBuf);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 1, sizeof(cl_mem), &waterTableBuf);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 2, sizeof(cl_mem), &flowSourceBuf);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 3, sizeof(int), &latitudeResolution);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 4, sizeof(int), &longitudeResolution);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 5, sizeof(cl_mem), &flowAccBufA);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 6, sizeof(cl_mem), &flowAccBufB);
         size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
         err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowAccumulateKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
@@ -161,43 +146,8 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
         // Swap buffers
         std::swap(flowAccBufA, flowAccBufB);
     }
-    // Step 4: Compute river volume based on accumulated flow
-    // Determine an adaptive threshold using the top percentile of accumulated flow values.
-    float flowThreshold = 1.0f;
-    float flowMax = 1.0f;
-    const float percentile = 0.999f; // tune if needed
-    {
-        std::vector<float> hostFlows(voxels);
-        err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), flowAccBufA, CL_TRUE, 0, voxels * sizeof(float), hostFlows.data(), 0, nullptr, nullptr);
-        if (err == CL_SUCCESS && voxels > 0) {
-            size_t idx = (size_t)std::floor((voxels - 1) * percentile);
-            std::nth_element(hostFlows.begin(), hostFlows.begin() + idx, hostFlows.end());
-            float pval = hostFlows[idx];
-            float maxv = *std::max_element(hostFlows.begin(), hostFlows.end());
-            flowThreshold = std::max(1.0f, pval); // allow smaller thresholds (not forced to 100)
-            flowMax = std::max(flowThreshold * 1.001f, maxv); // ensure flowMax > threshold
-            printf("river flow threshold set to %f (percentile %.3f), max flow %f\n", flowThreshold, percentile, flowMax);
-        } else {
-            printf("Warning: failed to read flow buffer to compute threshold: %d\n", err);
-        }
-    }
-    {
-        clSetKernelArg(gRiverVolumeKernel, 0, sizeof(cl_mem), &flowAccBufA);
-        clSetKernelArg(gRiverVolumeKernel, 1, sizeof(int), &latitudeResolution);
-        clSetKernelArg(gRiverVolumeKernel, 2, sizeof(int), &longitudeResolution);
-        clSetKernelArg(gRiverVolumeKernel, 3, sizeof(cl_mem), &riverVolumeBuf);
-        float widthScale = 1.0f; // try ~0.5..1.5 and adjust visually
-        clSetKernelArg(gRiverVolumeKernel, 4, sizeof(float), &flowThreshold);
-        clSetKernelArg(gRiverVolumeKernel, 5, sizeof(float), &widthScale);
-        clSetKernelArg(gRiverVolumeKernel, 6, sizeof(float), &flowMax);
-        size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
-        err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverVolumeKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) {
-            printf("river_volume kernel enqueue failed: %d\n", err);
-        }
-    }
-    // Cleanup
-    OpenCLContext::get().releaseMem(flowDirBuf);
+    // set the riverBuffer to the final accumulated flow buffer NO COPY
+    OpenCLContext::get().releaseMem(flowSourceBuf);
     OpenCLContext::get().releaseMem(flowAccBufA);
-    OpenCLContext::get().releaseMem(flowAccBufB);
+    riverBuf = flowAccBufB;
 }

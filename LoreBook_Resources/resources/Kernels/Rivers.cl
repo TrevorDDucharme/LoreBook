@@ -1,3 +1,5 @@
+#include "Util.cl"
+
 inline void atomic_add_float(__global float* addr, float val) {
     __global volatile uint* iptr = (__global volatile uint*)addr;
     uint old = *iptr;
@@ -12,105 +14,88 @@ inline void atomic_add_float(__global float* addr, float val) {
     }
 }
 
-__kernel void river_flow_dir(
+inline float2 river_flow_dir(
+    int x,
+    int y,
     __global const float* elevation,
     __global const float* water,
-    __global int* flow_dir,
-    int width,
-    int height
+    int longitude,
+    int latitude
 )
 {
-    int x = get_global_id(0);
-    int y = get_global_id(1);
 
-    if (x <= 0 || y <= 0 || x >= width-1 || y >= height-1)
+    if (x <= 0 || y <= 0 || x >= longitude-1 || y >= latitude-1)
     {
-        int idx = x + y * width;
-        flow_dir[idx] = -1;
-        return;
+        return (float2)(0.0f, 0.0f);
     }
 
-    int idx = x + y * width;
+    int idx = x + y * longitude;
 
     // underwater → no river source
     if (water[idx] > 0.0f)
     {
-        flow_dir[idx] = -1;
-        return;
+        return (float2)(0.0f, 0.0f);
     }
 
+    /*
+        [-1,-1] [0,-1] [1,-1]
+        [-1, 0] [0, 0] [1, 0]
+        [-1, 1] [0, 1] [1, 1]
+        multiplyd by elevation difference to get gradient
+    */
+    float2 dir = (float2)(0.0f, 0.0f);
     float h0 = elevation[idx];
-    float bestDrop = 0.0f;
-    int best = -1;
-    int d = 0;
-
-    for (int dy = -1; dy <= 1; dy++)
-    for (int dx = -1; dx <= 1; dx++, d++)
-    {
-        if (dx == 0 && dy == 0) continue;
-
-        int ni = (x+dx) + (y+dy) * width;
-
-        float drop = h0 - elevation[ni];
-        if (drop > bestDrop)
-        {
-            bestDrop = drop;
-            best = d;
-        }
-    }
-
-    flow_dir[idx] = best;
-}
-
-__kernel void river_flow_init(
-    __global const float* elevation,
-    __global const float* water,
-    int width,
-    int height,
-    __global float* flow,
-    float slopeScale,
-    float slopeNorm
-)
-{
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = x + y * width;
-
-    // if underwater, no flow source
-    if (water[idx] > 0.0f) {
-        flow[idx] = 0.0f;
-        return;
-    }
-
-    float h0 = elevation[idx];
-    // compute maximum downhill drop to neighbors as a simple slope metric
-    float maxDrop = 0.0f;
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
             int nx = x + dx;
             int ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-            int ni = nx + ny * width;
-            float drop = h0 - elevation[ni];
-            if (drop > maxDrop) maxDrop = drop;
+            int ni = nx + ny * longitude;
+            float dh = h0 - elevation[ni];
+            dir += (float2)(dx, dy) * dh;
         }
     }
+    return dir;
+}
 
-    // slopeWeight: larger for flatter cells (small maxDrop), baseline 1.0
-    float t = clamp(maxDrop / slopeNorm, 0.0f, 1.0f);
-    float slopeWeight = 1.0f + slopeScale * (1.0f - t);
-    flow[idx] = slopeWeight;
+__kernel void river_flow_source(
+    __global const float* elevation,
+    __global const float* water,
+    int latitude,
+    int longitude,
+    __global float* flow,
+    float minHeight,
+    float maxHeight,
+    float chance
+)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+
+    if (x >= longitude || y >= latitude)
+        return;
+
+    int idx = x + y * longitude;
+
+    float h0 = elevation[idx];
+
+    // if underwater, no flow source
+    if (water[idx] > 0.0f ||
+     elevation[idx] <= minHeight ||
+     elevation[idx] >= maxHeight) {
+        flow[idx] = 0.0f;
+        return;
+    }
+
+    flow[idx] = rand_chance(12345, x, y, 0.01f) ? 1.0f : 0.0f;
 }
 
 __kernel void river_flow_accumulate(
-    __global const int* flow_dir,
-    int width,
-    int height,
+    __global const float* elevation,
+    __global const float* water,
+    __global const float* flow_sources,
+    int latitude,
+    int longitude,
     __global const float* flow_in,
     __global float* flow_out
 )
@@ -118,55 +103,48 @@ __kernel void river_flow_accumulate(
     int x = get_global_id(0);
     int y = get_global_id(1);
 
-    if (x >= width || y >= height)
+    if (x >= longitude || y >= latitude)
         return;
 
-    int idx = x + y * width;
-    flow_out[idx] = flow_in[idx];
-
-    int d = flow_dir[idx];
-    if (d < 0) return;
-
-    int dy = (d / 3) % 3 - 1;
-    int dx = d % 3 - 1;
-
-    int ni = (x+dx) + (y+dy) * width;
-
-    atomic_add_float(&flow_out[ni], flow_in[idx]);
-}
-
-__kernel void river_volume(
-    __global const float* flow,
-    int width,
-    int height,
-    __global float* river,
-    float flowThreshold,
-    float widthScale,
-    float flowMax
-)
-{
-    int x = get_global_id(0);
-    int y = get_global_id(1);
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = x + y * width;
-
-    float f = flow[idx];
-    if (f <= 0.0f || f < flowThreshold || flowMax <= flowThreshold)
+    int idx = x + y * longitude;
+    
+    float2 flow_vec = river_flow_dir(x, y, elevation, water, longitude, latitude);
+    float mag = length(flow_vec);
+    float2 dir = normalize(flow_vec);
+    /*
+        create a matrix of the 3x3 neighborhood using the direction vector and the magnitude
+        to distribute flow to the neighboring cells a higher magnitude means less spread
+    */
+    if (mag <= 0.0f)
     {
-        river[idx] = 0.0f;
+        flow_out[idx] = flow_in[idx] + flow_sources[idx];
         return;
     }
-
-    // log-space normalization between threshold and max to avoid saturation
-    float l = log(f);
-    float lmin = log(flowThreshold);
-    float lmax = log(flowMax);
-    float rel = (lmax > lmin) ? clamp((l - lmin) / (lmax - lmin), 0.0f, 1.0f) : 1.0f;
-
-    float w = clamp(rel * widthScale, 0.0f, 1.0f);
-
-    river[idx] = w;
+    float total_weight = 0.0f;
+    float weights[3][3];
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float2 offset = (float2)(dx, dy);
+            float proj = dot(normalize(offset), dir);
+            float weight = fmax(proj, 0.0f);
+            weight *= weight; // square to sharpen
+            weights[dy+1][dx+1] = weight;
+            total_weight += weight;
+        }
+    }
+    // distribute flow to neighbors
+    float in_flow = flow_in[idx] + flow_sources[idx];
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float weight = weights[dy+1][dx+1];
+            if (weight <= 0.0f) continue;
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= longitude || ny >= latitude)
+                continue;
+            int nidx = nx + ny * longitude;
+            float distributed_flow = in_flow * (weight / total_weight);
+            atomic_add_float(&flow_out[nidx], distributed_flow);
+        }
+    }
 }
