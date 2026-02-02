@@ -20,7 +20,7 @@ private:
                             int latitudeResolution,
                             int longitudeResolution,
                             int colorCount,
-                            const std::vector<std::array<uint8_t, 4>> &paletteColors,
+                            const std::vector<cl_float4> &paletteColors,
                             const std::vector<float> &weights);
 
     cl_mem watertableBuffer = nullptr;

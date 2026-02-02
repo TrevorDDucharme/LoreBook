@@ -335,7 +335,7 @@ static void scalarToColor(cl_mem& output,
                             int latitudeResolution,
                             int longitudeResolution,
                             int colorCount,
-                            const std::vector<std::array<unsigned char, 4>> &paletteColors)
+                            const std::vector<cl_float4> &paletteColors)
 {
     ZoneScopedN("ScalarToColor");
     if (!OpenCLContext::get().isReady())
@@ -359,19 +359,7 @@ static void scalarToColor(cl_mem& output,
     }
 
     // create palette buffer
-    std::vector<cl_float4> paletteFloats;
-    paletteFloats.reserve((size_t)colorCount);
-    for (int i = 0; i < colorCount; ++i)
-    {
-        auto &c = paletteColors[i % paletteColors.size()];
-        cl_float4 col;
-        col.s[0] = static_cast<float>(c[0]) / 255.0f;
-        col.s[1] = static_cast<float>(c[1]) / 255.0f;
-        col.s[2] = static_cast<float>(c[2]) / 255.0f;
-        col.s[3] = static_cast<float>(c[3]) / 255.0f;
-        paletteFloats.push_back(col);
-    }
-    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err, "scalarToColor paletteBuf");
+    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteColors.size(), (void*)paletteColors.data(), &err, "scalarToColor paletteBuf");
     if (err != CL_SUCCESS || paletteBuf == nullptr)
     {
         throw std::runtime_error("clCreateBuffer failed for scalarToColor paletteBuf");
@@ -428,7 +416,7 @@ static void weightedScalarToColor(cl_mem& output,
                             int latitudeResolution,
                             int longitudeResolution,
                             int colorCount,
-                            const std::vector<std::array<unsigned char, 4>> &paletteColors,
+                            const std::vector<cl_float4> &paletteColors,
                             const std::vector<float> &weights)
 {
     ZoneScopedN("WeightedScalarToColor");
@@ -450,19 +438,7 @@ static void weightedScalarToColor(cl_mem& output,
         return;
     }
     // create palette buffer
-    std::vector<cl_float4> paletteFloats;
-    paletteFloats.reserve((size_t)colorCount);
-    for (int i = 0; i < colorCount; ++i)
-    {
-        auto &c = paletteColors[i % paletteColors.size()];
-        cl_float4 col;
-        col.s[0] = static_cast<float>(c[0]) / 255.0f;
-        col.s[1] = static_cast<float>(c[1]) / 255.0f;
-        col.s[2] = static_cast<float>(c[2]) / 255.0f;
-        col.s[3] = static_cast<float>(c[3]) / 255.0f;
-        paletteFloats.push_back(col);
-    }
-    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteFloats.size(), paletteFloats.data(), &err, "weightedScalarToColor paletteBuf");
+    cl_mem paletteBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(cl_float4) * paletteColors.size(), (void*)paletteColors.data(), &err, "weightedScalarToColor paletteBuf");
     if (err != CL_SUCCESS || paletteBuf == nullptr)
     {
         throw std::runtime_error("clCreateBuffer failed for weightedScalarToColor paletteBuf");

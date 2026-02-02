@@ -195,13 +195,14 @@ void MercatorProjection::mercatorProject(
         }
     }
 
+    float centerLonDeg = centerLon * 180.0f / static_cast<float>(M_PI);
     clSetKernelArg(mercatorKernel, 0, sizeof(cl_mem), &sphereTex);
     clSetKernelArg(mercatorKernel, 1, sizeof(int), &latitudeResolution);
     clSetKernelArg(mercatorKernel, 2, sizeof(int), &longitudeResolution);
     clSetKernelArg(mercatorKernel, 3, sizeof(cl_mem), &output);
     clSetKernelArg(mercatorKernel, 4, sizeof(int), &outW);
     clSetKernelArg(mercatorKernel, 5, sizeof(int), &outH);
-    clSetKernelArg(mercatorKernel, 6, sizeof(float), &centerLon);
+    clSetKernelArg(mercatorKernel, 6, sizeof(float), &centerLonDeg);
     clSetKernelArg(mercatorKernel, 7, sizeof(float), &centerMercY);
     clSetKernelArg(mercatorKernel, 8, sizeof(float), &zoom);
 

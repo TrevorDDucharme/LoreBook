@@ -23,12 +23,12 @@ public:
     virtual cl_mem getColor() = 0;
     virtual void parseParameters(const std::string &params) {}
 
-    static std::array<uint8_t, 4> rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    static cl_float4 rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         return {r, g, b, a};
     }
 
-    static std::array<uint8_t, 4> hsva(float h, float s, float v, float a)
+    static cl_float4 hsva(float h, float s, float v, float a)
     {
         float r, g, b;
 
@@ -79,18 +79,18 @@ public:
                 static_cast<uint8_t>(b * 255.0f), static_cast<uint8_t>(a * 255.0f)};
     }
 
-    static std::array<uint8_t, 4> rgb(float r, float g, float b)
+    static cl_float4 rgb(float r, float g, float b)
     {
         return {static_cast<uint8_t>(r * 255.0f), static_cast<uint8_t>(g * 255.0f),
                 static_cast<uint8_t>(b * 255.0f), 255};
     }
 
-    static std::array<uint8_t, 4> hsv(float h, float s, float v)
+    static cl_float4 hsv(float h, float s, float v)
     {
         return hsva(h, s, v, 1.0f);
     }
 
-    static std::array<uint8_t, 4> colorRamp(float value, const std::vector<std::array<uint8_t, 4>> &colors)
+    static cl_float4 colorRamp(float value, const std::vector<cl_float4> &colors)
     {
         if (colors.empty())
             return {0, 0, 0, 255};
@@ -103,10 +103,10 @@ public:
         float t = scaledValue - index;
         const auto &c1 = colors[index];
         const auto &c2 = colors[index + 1];
-        std::array<uint8_t, 4> result;
+        cl_float4 result;
         for (size_t i = 0; i < 4; ++i)
         {
-            result[i] = static_cast<uint8_t>(c1[i] * (1.0f - t) + c2[i] * t);
+            result.s[i] = c1.s[i] * (1.0f - t) + c2.s[i] * t;
         }
         return result;
     }

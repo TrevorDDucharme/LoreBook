@@ -31,7 +31,7 @@ cl_mem TemperatureLayer::getColor()
     cl_mem temperatureBuffer = getTemperatureBuffer();
     cl_int err = CL_SUCCESS;
     // Convert temperature scalar values to grayscale RGBA colors
-    static std::vector<std::array<uint8_t, 4>> grayRamp = {
+    static std::vector<cl_float4> grayRamp = {
         MapLayer::rgba(0, 0, 255, 255/3),
         MapLayer::rgba(255, 0, 0, 255/3)};
     if (coloredBuffer == nullptr)

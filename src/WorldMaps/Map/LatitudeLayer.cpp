@@ -25,7 +25,7 @@ cl_mem LatitudeLayer::getColor()
     cl_mem latitudeBuffer = getLatitudeBuffer();
     cl_int err = CL_SUCCESS;
     // Convert latitude scalar values to grayscale RGBA colors
-    static std::vector<std::array<uint8_t, 4>> grayRamp = {
+    static std::vector<cl_float4> grayRamp = {
         MapLayer::rgba(0, 0, 0, 255),
         MapLayer::rgba(255, 255, 255, 255)};
     if (coloredBuffer == nullptr)
