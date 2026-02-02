@@ -4,7 +4,8 @@ TODO:
 -[ ] Implement Floor plan.
 -[ ] Implement Floor.
 -[ ] Implement Room.
--[ ] Implement Furniture.
+-[ ] Implement Interactable Object with lua scripting in WorldMaps.
+-[ ] Implement Furniture. 
 -[ ] Implement Wall.
 -[ ] Implement Door.
 -[ ] Implement Window.
