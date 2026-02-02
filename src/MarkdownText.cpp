@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <stack>
+#include <chrono>
 #include <Fonts.hpp>
 #include <plog/Log.h>
 #include "Vault.hpp"
@@ -590,15 +591,45 @@ namespace ImGui
                             std::transform(projection.begin(), projection.end(), projection.begin(), ::tolower);
                             PLOGV << "md:world src='" << src << "' world='" << worldName << "' config='" << config << "' projection='" << projection << "'";
                             ImVec2 size = GetContentRegionAvail();
+                            struct CachedWorld {
+                                World world;
+                                std::string config;
+                                std::chrono::steady_clock::time_point last_used;
+                                CachedWorld(const std::string &cfg) : world(cfg), config(cfg), last_used(std::chrono::steady_clock::now()) {}
+                            };
+                            static std::unordered_map<std::string, CachedWorld> worldCache;
+                            auto now = std::chrono::steady_clock::now();
+                            // cleanup stale entries not used in last 5 seconds
+                            constexpr auto kWorldCacheLifetime = std::chrono::seconds(5);
+                            for (auto itc = worldCache.begin(); itc != worldCache.end();) {
+                                if (now - itc->second.last_used > kWorldCacheLifetime) {
+                                    PLOGV << "md:world evicting '" << itc->first << "' from cache";
+                                    itc = worldCache.erase(itc);
+                                } else {
+                                    ++itc;
+                                }
+                            }
+                            auto it = worldCache.try_emplace(worldName, config).first;
+                            CachedWorld &cw = it->second;
+                            // If stored config differs from requested config, re-parse on existing world
+                            if (cw.config != config) {
+                                PLOGV << "md:world config changed for '" << worldName << "' - re-parsing config";
+                                try {
+                                    cw.world.parseConfig(config);
+                                    cw.config = config;
+                                } catch (const std::exception &e) {
+                                    PLOGW << "md:world parseConfig failed for '" << worldName << "': " << e.what();
+                                }
+                            }
+                            cw.last_used = now;
+                            World &map = cw.world;
                             if(projection=="mercator"){
                                 size.y= size.x * 0.5f;
-                                World map(config);
                                 mercatorMap(worldPath.c_str(),size,map);
                                 return 0;
                             }
                             else if(projection=="globe"){
                                 size.y= size.x;
-                                World map(config);
                                 globeMap(worldPath.c_str(),size,map);
                                 return 0;
                             }

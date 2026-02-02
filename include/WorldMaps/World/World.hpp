@@ -23,7 +23,8 @@ public:
     {
         parseConfig(config);
     }
-    ~World() = default;
+    
+    virtual ~World() = default;
     cl_mem sample(const std::string &layerName = "") const
     {
         auto it = layers.find(layerName);
@@ -91,10 +92,6 @@ public:
     int getWorldLatitudeResolution() const { return worldLatitudeResolution; }
     int getWorldLongitudeResolution() const { return worldLongitudeResolution; }
 
-private:
-
-    int worldLatitudeResolution=4096;
-    int worldLongitudeResolution=4096;
 
     //Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature
     void parseConfig(const std::string &config)
@@ -144,10 +141,11 @@ private:
             }
             // Add more layers as needed
         }     
-        
-
-
     }
+private:
+
+    int worldLatitudeResolution=4096;
+    int worldLongitudeResolution=4096;
 
     std::unordered_map<std::string, std::unique_ptr<MapLayer>> layers;
     //    std::unordered_map<std::pair<int,int>, Chunk> chunks;
