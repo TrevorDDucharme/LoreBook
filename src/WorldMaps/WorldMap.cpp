@@ -100,7 +100,7 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
 
     if (worldMapTexture != 0)
     {
-        ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture), texSize, ImVec2(0, 0), ImVec2(1, 1));
+        ImGui::Image((ImTextureID)(intptr_t)(worldMapTexture), texSize, ImVec2(1, 0), ImVec2(0, 1));
     }
     else
     {
@@ -129,8 +129,8 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
     if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
     {
         ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-        float dx = drag.x;
-        float dy = drag.y;
+        float dx = -drag.x;
+        float dy = -drag.y;
         // Convert current center lon/lat to projected u/v
         float u_center = (mapCenterLon + 180.0f) / 360.0f;
         float lat_rad = mapCenterLat * static_cast<float>(M_PI) / 180.0f;
@@ -160,6 +160,28 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
 
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
     }
+
+    // Overlay UI (translucent box at bottom-left of the Mercator preview)
+    ImGui::BeginGroup();
+    ImGui::SetCursorPos(ImVec2(cursorPos.x + 8, cursorPos.y + texSize.y - 56));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.3f));
+    ImGui::BeginChild("MercatorOverlay", ImVec2(texSize.x - 16, 56), false, ImGuiWindowFlags_NoDecoration);
+    ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", mapCenterLon, mapCenterLat, mapZoom);
+    ImGui::SameLine();
+    ImGui::PushItemWidth(110);
+    ImGui::DragFloat("##MercatorZoom", &mapZoom, 0.1f, 1.0f, 128.0f, "Zoom: %.2f");
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (ImGui::Button("Reset Camera"))
+    {
+        mapCenterLon = 0.0f;
+        mapCenterLat = 0.0f;
+        mapZoom = 1.0f;
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndGroup();
+
     ImGui::EndGroup();
 
     // persist state back to maps
