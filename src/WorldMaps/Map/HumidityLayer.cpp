@@ -37,6 +37,13 @@ cl_mem HumidityLayer::getColor()
 
 cl_mem HumidityLayer::getHumidityBuffer()
 {
+    cl_mem landtype= parentWorld->getLayer("landtype")->getColor();
+    cl_mem elevation= parentWorld->getLayer("elevation")->getColor();
+    cl_mem watertable= parentWorld->getLayer("watertable")->getColor();
+    cl_mem river = parentWorld->getLayer("rivers")->getColor();
+    cl_mem temp = parentWorld->getLayer("temperature")->getColor();
+
+
     if (humidityBuffer == nullptr)
     {
         perlin(humidityBuffer, parentWorld->getWorldLatitudeResolution(), parentWorld->getWorldLongitudeResolution(), .01f, 2.0f, 8, 0.5f, 12345u);

@@ -26,13 +26,12 @@ cl_mem WaterTableLayer::getColor()
     cl_int err = CL_SUCCESS;
     // Convert watertable scalar values to grayscale RGBA colors
     static std::vector<std::array<uint8_t, 4>> grayRamp = {
-        MapLayer::rgba(0, 0, 0, 255),
+        MapLayer::rgba(0, 0, 0, 0),
         MapLayer::rgba(0, 128, 128, 255),
         MapLayer::rgba(0, 0, 255, 255)};
-    static std::vector<float> weights = {0.0f, 0.0f, 0.0f, 1.0f}; // black background, fully opaque
+    static std::vector<float> weights = {0.0f, 0.0f, 0.0f, 0.0f}; // black background, fully opaque
     if (coloredBuffer == nullptr)
     {
-        // pass grayRamp.size() here (3), not 2
         waterTableWeightedScalarToColor(coloredBuffer, watertableBuffer,
             parentWorld->getWorldLatitudeResolution(),
             parentWorld->getWorldLongitudeResolution(),

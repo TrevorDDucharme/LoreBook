@@ -8,12 +8,10 @@ public:
  ColorLayer() = default;
     ~ColorLayer() override;
     cl_mem sample() override;
-
     cl_mem getColor() override;
 
 private:
     cl_mem getColorBuffer();
 
     cl_mem colorBuffer = nullptr;
-    cl_mem coloredBuffer = nullptr;
 };

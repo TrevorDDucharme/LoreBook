@@ -28,7 +28,7 @@ cl_mem RiverLayer::getColor()
     cl_int err = CL_SUCCESS;
     // Convert river scalar values to a blue ramp with transparency
     static std::vector<std::array<uint8_t, 4>> blueRamp = {
-        MapLayer::rgba(0, 0, 0, 255),       // black (no river)
+        MapLayer::rgba(0, 0, 0, 0),       // black (no river)
         MapLayer::rgba(0, 128, 255, 255)    // blue
     };
     static std::vector<float> weights = {1.0f, 1.0f};

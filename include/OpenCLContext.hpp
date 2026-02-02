@@ -518,3 +518,155 @@ static void weightedScalarToColor(cl_mem& output,
     OpenCLContext::get().releaseMem(weightsBuf);
 }
 
+static cl_program gAlphaBlendProgram = nullptr;
+
+static void alphaBlend(cl_mem& output,
+                       cl_mem input_one,
+                       cl_mem input_two,
+                       int width,
+                       int height)
+{
+    ZoneScopedN("AlphaBlend");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+    static cl_kernel gAlphaBlendKernel = nullptr;
+
+    try{
+        OpenCLContext::get().createProgram(gAlphaBlendProgram,"Kernels/AlphaBlend.cl");
+        OpenCLContext::get().createKernelFromProgram(gAlphaBlendKernel,gAlphaBlendProgram,"AlphaBlend");
+    }
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing AlphaBlend OpenCL: %s\n", e.what());
+        return;
+    }
+
+    {
+        ZoneScopedN("AlphaBlend Buffer Alloc");
+        size_t total = (size_t)width * (size_t)height * sizeof(cl_float4);
+        size_t buffer_size;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(buffer_size),
+                                            &buffer_size,
+                                            NULL);
+            if (err != CL_SUCCESS) {
+                throw std::runtime_error("clGetMemObjectInfo failed for alphaBlend output buffer size");
+            }
+            if(buffer_size < total){
+                TracyMessageL("Reallocating alphaBlend output buffer required");
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+
+        if(output == nullptr){
+            TracyMessageL("Allocating alphaBlend output buffer");
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "alphaBlend output");
+            if (err != CL_SUCCESS || output == nullptr)
+            {
+                throw std::runtime_error("clCreateBuffer failed for alphaBlend output");
+            }
+        }   
+    }
+
+    clSetKernelArg(gAlphaBlendKernel, 0, sizeof(cl_mem), &input_one);
+    clSetKernelArg(gAlphaBlendKernel, 1, sizeof(cl_mem), &input_two);
+    clSetKernelArg(gAlphaBlendKernel, 2, sizeof(cl_mem), &output);
+    clSetKernelArg(gAlphaBlendKernel, 3, sizeof(int), &width);
+    clSetKernelArg(gAlphaBlendKernel, 4, sizeof(int), &height);
+
+    size_t global[2] = {(size_t)width, (size_t)height};
+    {
+        ZoneScopedN("AlphaBlend Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gAlphaBlendKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for alphaBlend");
+        }
+    }
+}
+
+static cl_program gMultiplyProgram = nullptr;
+
+static void multiplyColor(cl_mem& output,
+                          cl_mem input_one,
+                          cl_mem input_two,
+                          int width,
+                          int height)
+{
+    ZoneScopedN("MultiplyColor");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_context ctx = OpenCLContext::get().getContext();
+    cl_device_id device = OpenCLContext::get().getDevice();
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+    static cl_kernel gMultiplyKernel = nullptr;
+
+    try{
+        OpenCLContext::get().createProgram(gMultiplyProgram,"Kernels/Multiply.cl");
+        OpenCLContext::get().createKernelFromProgram(gMultiplyKernel,gMultiplyProgram,"multiplyColor");
+    }
+    catch (const std::runtime_error &e)
+    {
+        printf("Error initializing MultiplyColor OpenCL: %s\n", e.what());
+        return;
+    }
+
+    {
+        ZoneScopedN("MultiplyColor Buffer Alloc");
+        size_t total = (size_t)width * (size_t)height * sizeof(cl_float4);
+        size_t buffer_size;
+        if(output != nullptr){
+            cl_int err = clGetMemObjectInfo(output,
+                                            CL_MEM_SIZE,
+                                            sizeof(buffer_size),
+                                            &buffer_size,
+                                            NULL);
+            if (err != CL_SUCCESS) {
+                throw std::runtime_error("clGetMemObjectInfo failed for multiplyColor output buffer size");
+            }
+            if(buffer_size < total){
+                TracyMessageL("Reallocating multiplyColor output buffer required");
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+
+        if(output == nullptr){
+            TracyMessageL("Allocating multiplyColor output buffer");
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total, nullptr, &err, "multiplyColor output");
+            if (err != CL_SUCCESS || output == nullptr)
+            {
+                throw std::runtime_error("clCreateBuffer failed for multiplyColor output");
+            }
+        }   
+    }
+
+    clSetKernelArg(gMultiplyKernel, 0, sizeof(cl_mem), &input_one);
+    clSetKernelArg(gMultiplyKernel, 1, sizeof(cl_mem), &input_two);
+    clSetKernelArg(gMultiplyKernel, 2, sizeof(cl_mem), &output);
+    clSetKernelArg(gMultiplyKernel, 3, sizeof(int), &width);
+    clSetKernelArg(gMultiplyKernel, 4, sizeof(int), &height);
+
+    size_t global[2] = {(size_t)width, (size_t)height};
+    {
+        ZoneScopedN("MultiplyColor Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gMultiplyKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+        {
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for multiplyColor");
+        }
+    }
+}
+
