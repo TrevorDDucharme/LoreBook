@@ -14,6 +14,43 @@ inline float3 sphere_to_cartesian_float3(
     );
 }
 
+
+
+// ------------------------------------------------------------
+// Hash & noise utilities (seeded)
+// ------------------------------------------------------------
+
+inline uint hash_u(uint x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352d;
+    x ^= x >> 15;
+    x *= 0x846ca68b;
+    x ^= x >> 16;
+    return x;
+}
+
+inline float hash3_seeded(int3 p, uint seed)
+{
+    uint h =
+        hash_u((uint)p.x + seed) ^
+        hash_u((uint)p.y + seed * 31u) ^
+        hash_u((uint)p.z + seed * 131u);
+
+    return (float)(h & 0x00FFFFFF) / (float)0x01000000;
+}
+
+inline float3 gradient(int3 p, uint seed)
+{
+    float h = hash3_seeded(p, seed) * 6.2831853f;
+    return (float3)(cos(h), sin(h), cos(h * 0.5f));
+}
+
+inline float3 fade(float3 t)
+{
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
 //random helpers
 inline int hash_int(int x)
 {

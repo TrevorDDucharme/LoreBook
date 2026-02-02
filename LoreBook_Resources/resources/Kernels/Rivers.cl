@@ -102,9 +102,12 @@ __kernel void river_flow_accumulate(
     int longitudeResolution,
     __global const float* flow_in,
     __global float* flow_out,
+    __global const float2* momentum_in,
+    __global float2* momentum_out,
     const float river_threshold,
     const float slope_epsilon,
-    const float height_epsilon
+    const float height_epsilon,
+    const float momentum_strength
 ) {
     int latitude  = get_global_id(0);
     int longitude = get_global_id(1);
@@ -126,7 +129,8 @@ __kernel void river_flow_accumulate(
     // Start with incoming flow + local source
     float local_flow = flow_in[idx] + flow_sources[idx];
 
-    int2 d = compute_flow_direction(
+    // Get gravity-based flow direction (steepest descent)
+    int2 gravity_dir = compute_flow_direction(
         latitude,
         longitude,
         elevation,
@@ -134,6 +138,36 @@ __kernel void river_flow_accumulate(
         latitudeResolution,
         longitudeResolution
     );
+
+    // Compute gravity direction vector
+    float2 gravity_vec = (float2)(
+        (float)(gravity_dir.x - latitude),
+        (float)(gravity_dir.y - longitude)
+    );
+
+    // Get previous momentum
+    float2 prev_momentum = momentum_in[idx];
+
+    // Blend momentum with gravity (momentum gives rivers inertia)
+    float2 new_momentum = normalize(prev_momentum * momentum_strength + gravity_vec * (1.0f - momentum_strength));
+    
+    // Handle zero vector case
+    if (length(new_momentum) < 0.001f) {
+        new_momentum = gravity_vec;
+    }
+    
+    // Store updated momentum
+    momentum_out[idx] = new_momentum;
+
+    // Convert momentum back to discrete direction
+    int2 d = (int2)(
+        latitude + (int)round(new_momentum.x),
+        longitude + (int)round(new_momentum.y)
+    );
+
+    // Clamp to valid range
+    d.x = clamp(d.x, 0, latitudeResolution - 1);
+    d.y = clamp(d.y, 0, longitudeResolution - 1);
 
     int didx = d.y * latitudeResolution + d.x;
 

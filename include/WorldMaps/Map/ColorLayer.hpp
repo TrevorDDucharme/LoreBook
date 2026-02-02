@@ -14,4 +14,5 @@ private:
     cl_mem getColorBuffer();
 
     cl_mem colorBuffer = nullptr;
+    cl_mem tempColorBuffer = nullptr;
 };

@@ -110,6 +110,49 @@ public:
         }
         return result;
     }
+
+    static cl_float4 weightedColorRamp(
+    float t,
+    const std::vector<cl_float4>& palette,
+    const std::vector<float>& weights)
+    {
+        assert(palette.size() == weights.size());
+        size_t n = palette.size();
+        assert(n > 0);
+
+        // Clamp t
+        t = std::clamp(t, 0.0f, 1.0f);
+
+        // Compute cumulative weights
+        std::vector<float> cumulative(n);
+        cumulative[0] = weights[0];
+        for(size_t i = 1; i < n; ++i)
+            cumulative[i] = cumulative[i-1] + weights[i];
+
+        float totalWeight = cumulative.back();
+        float scaledT = t * totalWeight;
+
+        // Find which segment t falls into
+        size_t idx = 0;
+        while(idx < n && scaledT > cumulative[idx]) ++idx;
+
+        if(idx == 0) {
+            return palette[0]; // t is in the first segment
+        } else if(idx >= n) {
+            return palette[n-1]; // t is at the very end
+        } else {
+            // Lerp between palette[idx-1] and palette[idx]
+            float segmentStart = cumulative[idx-1];
+            float segmentWeight = weights[idx];
+            float localT = (scaledT - segmentStart) / segmentWeight;
+
+            cl_float4 result;
+            for(int c = 0; c < 4; ++c) {
+                result.s[c] = palette[idx-1].s[c] * (1.0f - localT) + palette[idx].s[c] * localT;
+            }
+            return result;
+        }
+    }
     
     void setParentWorld(World* world){
         parentWorld = world;

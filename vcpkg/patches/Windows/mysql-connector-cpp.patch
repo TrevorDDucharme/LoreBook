@@ -1,8 +1,0 @@
-diff --git a/include/mysqlx/common/value.h b/include/mysqlx/common/value.h
-index 123456..abcdef 100644
---- a/include/mysqlx/common/value.h
-+++ b/include/mysqlx/common/value.h
-@@ -34,6 +34,7 @@
- #include "error.h"
- #include "util.h"
-+#include <cstdint>

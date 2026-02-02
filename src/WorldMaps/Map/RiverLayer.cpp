@@ -107,6 +107,20 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
         throw std::runtime_error("clCreateBuffer failed for generateRiverPaths flowAccBufB");
     }
 
+    // Momentum buffers (store velocity as float2: dx, dy)
+    cl_mem momentumBufA = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, voxels * sizeof(cl_float2), nullptr, &err, "generateRiverPaths momentumBufA");
+    if (err != CL_SUCCESS || momentumBufA == nullptr) {
+        throw std::runtime_error("clCreateBuffer failed for generateRiverPaths momentumBufA");
+    }
+    cl_mem momentumBufB = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, voxels * sizeof(cl_float2), nullptr, &err, "generateRiverPaths momentumBufB");
+    if (err != CL_SUCCESS || momentumBufB == nullptr) {
+        throw std::runtime_error("clCreateBuffer failed for generateRiverPaths momentumBufB");
+    }
+    // Zero initialize momentum buffers
+    std::vector<cl_float2> zeroMomentum(voxels, {0.0f, 0.0f});
+    err = clEnqueueWriteBuffer(OpenCLContext::get().getQueue(), momentumBufA, CL_FALSE, 0, voxels * sizeof(cl_float2), zeroMomentum.data(), 0, nullptr, nullptr);
+    err = clEnqueueWriteBuffer(OpenCLContext::get().getQueue(), momentumBufB, CL_FALSE, 0, voxels * sizeof(cl_float2), zeroMomentum.data(), 0, nullptr, nullptr);
+
     // Step 1: create Flow Sources
     {
         float minHeight = 0.6f;
@@ -132,6 +146,7 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
     float river_threshold = 0.1f;
     float slope_epsilon = 0.0002f;
     float height_epsilon = 0.001f;
+    float momentum_strength = 0.7f;  // How much rivers maintain their direction (0=no momentum, 1=all momentum)
     for (int iter = 0; iter < flowIterations; ++iter) {
 
         clSetKernelArg(gRiverFlowAccumulateKernel, 0, sizeof(cl_mem), &elevationBuf);
@@ -141,9 +156,12 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
         clSetKernelArg(gRiverFlowAccumulateKernel, 4, sizeof(int), &longitudeResolution);
         clSetKernelArg(gRiverFlowAccumulateKernel, 5, sizeof(cl_mem), &flowAccBufA);
         clSetKernelArg(gRiverFlowAccumulateKernel, 6, sizeof(cl_mem), &flowAccBufB);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 7, sizeof(float), &river_threshold);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 8, sizeof(float), &slope_epsilon);
-        clSetKernelArg(gRiverFlowAccumulateKernel, 9, sizeof(float), &height_epsilon);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 7, sizeof(cl_mem), &momentumBufA);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 8, sizeof(cl_mem), &momentumBufB);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 9, sizeof(float), &river_threshold);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 10, sizeof(float), &slope_epsilon);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 11, sizeof(float), &height_epsilon);
+        clSetKernelArg(gRiverFlowAccumulateKernel, 12, sizeof(float), &momentum_strength);
         size_t global[2] = {(size_t)latitudeResolution, (size_t)longitudeResolution};
         err = clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), gRiverFlowAccumulateKernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
@@ -151,9 +169,12 @@ void RiverLayer::generateRiverPaths(cl_mem elevationBuf,
         }
         // Swap buffers
         std::swap(flowAccBufA, flowAccBufB);
+        std::swap(momentumBufA, momentumBufB);
     }
     // set the riverBuffer to the final accumulated flow buffer NO COPY
     OpenCLContext::get().releaseMem(flowSourceBuf);
     OpenCLContext::get().releaseMem(flowAccBufA);
+    OpenCLContext::get().releaseMem(momentumBufA);
+    OpenCLContext::get().releaseMem(momentumBufB);
     riverBuf = flowAccBufB;
 }

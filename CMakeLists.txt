@@ -89,14 +89,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CLI11::CLI11)
 find_package(Tracy CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE Tracy::TracyClient)
 
-find_package(OpenCL CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
+#check if redhat based linux for opencl linking
+if(EXISTS "/etc/redhat-release")
+    # Tell CMake where the OpenCL library is
+    set(OPENCL_LIB "/usr/lib64/libOpenCL.so")  # adjust path if different
+else()
+    find_package(OpenCL CONFIG REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
+endif()
 
-# #compile tim arg -lOpenCL
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -lOpenCL")
-# # Make sure the app can find the POCL runtime
-# target_link_options(${PROJECT_NAME} PRIVATE "-Wl,-rpath,/usr/local/lib64")
 
+# Add it to your target explicitly
+target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENCL_LIB})
 
 # find_package(unofficial-whereami CONFIG REQUIRED)
 # target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::whereami::whereami)

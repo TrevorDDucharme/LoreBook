@@ -1,42 +1,59 @@
 inline float4 scalar_to_rgba_float4_util(float val,
                                          int colorCount,
                                          __global const float4* palette){
-                                            
-    // map [0,1] to indices [0, colorCount-1]
-    float v = clamp(val, 0.0f, 1.0f);
-    int range = (colorCount > 1) ? (colorCount - 1) : 0;
-    float pos = v * (float)range;
-    int i0 = (int)floor(pos);
-    int i1 = i0 + 1;
-    i0 = clamp(i0, 0, colorCount - 1);
-    i1 = clamp(i1, 0, colorCount - 1);
-    float t = pos - (float)i0;
-    float4 col0 = palette[i0];
-    float4 col1 = palette[i1];
-    float4 col = col0 * (1.0f - t) + col1 * t;
-    return col;
+    if (colorCount <= 0) return (float4)(0.0f, 0.0f, 0.0f, 1.0f);
+    if (val <= 0.0f) return palette[0];
+    if (val >= 1.0f) return palette[colorCount - 1];
+    float scaledValue = val * (colorCount - 1);
+    int index = (int)scaledValue;
+    float t = scaledValue - (float)index;
+    float4 c1 = palette[index];
+    float4 c2 = palette[index + 1];
+    return (float4)(
+        c1.x * (1.0f - t) + c2.x * t,
+        c1.y * (1.0f - t) + c2.y * t,
+        c1.z * (1.0f - t) + c2.z * t,
+        c1.w * (1.0f - t) + c2.w * t
+    );
 }
 
 inline float4 weighed_scalar_to_rgba_float4_util(float val,
                                                   int colorCount,
                                                   __global const float4* palette,
                                                   __global const float* weights){
-                                                    
-    // map [0,1] to indices [0, colorCount-1]
-    float v = clamp(val, 0.0f, 1.0f);
-    int range = (colorCount > 1) ? (colorCount - 1) : 0;
-    float pos = v * (float)range;
-    int i0 = (int)floor(pos);
-    int i1 = i0 + 1;
-    i0 = clamp(i0, 0, colorCount - 1);
-    i1 = clamp(i1, 0, colorCount - 1);
-    float t = pos - (float)i0;
-    float weight0 = weights[i0];
-    float weight1 = weights[i1];
-    float4 col0 = palette[i0];
-    float4 col1 = palette[i1];
-    float4 col = (col0 * weight0 * (1.0f - t) + col1 * weight1 * t) / (weight0 * (1.0f - t) + weight1 * t);
-    return col;    
+    if (colorCount <= 0) return (float4)(0.0f, 0.0f, 0.0f, 1.0f);
+    // Compute cumulative weights
+    float totalWeight = 0.0f;
+    for(int i = 0; i < colorCount; ++i){
+        totalWeight += weights[i];
+    }
+    // Clamp val
+    val = fmax(0.0f, fmin(1.0f, val));
+    float scaledVal = val * totalWeight;
+    // Find which segment val falls into
+    int idx = 0;
+    float cumulative = 0.0f;
+    while(idx < colorCount && scaledVal > cumulative){
+        cumulative += weights[idx];
+        idx++;
+    }
+    if(idx == 0){
+        return palette[0];
+    } else if(idx >= colorCount){
+        return palette[colorCount - 1];
+    } else {
+        float segmentStart = cumulative - weights[idx - 1];
+        float segmentWeight = weights[idx - 1];
+        float localT = (scaledVal - segmentStart) / segmentWeight;
+        float4 c1 = palette[idx - 1];
+        float4 c2 = palette[idx];
+        return (float4)(
+            c1.x * (1.0f - localT) + c2.x * localT,
+            c1.y * (1.0f - localT) + c2.y * localT,
+            c1.z * (1.0f - localT) + c2.z * localT,
+            c1.w * (1.0f - localT) + c2.w * localT
+        );
+    }
 }
 
 __kernel void scalar_to_rgba_float4(__global const float* scalar,
