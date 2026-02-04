@@ -168,8 +168,12 @@ void FloorPlanEditor::renderToolbar()
     toolButton("A", FloorPlanTool::WallArc, "Draw Arc Wall (A) - 3 clicks");
     toolButton("B", FloorPlanTool::WallBezier, "Draw Quadratic Bezier (B) - 3 clicks");
     toolButton("C", FloorPlanTool::WallCubic, "Draw Cubic Bezier (C) - 4 clicks");
+    toolButton("L", FloorPlanTool::WallBSpline, "Draw B-Spline (L) - approximating curve, does NOT pass through points");
+    toolButton("Z", FloorPlanTool::WallBezierSpline, "Draw Bezier Spline (Z) - interpolating curve, passes through points");
     ImGui::Separator();
     toolButton("R", FloorPlanTool::Room, "Draw Room (R)");
+    toolButton("E", FloorPlanTool::RoomFromWalls, "Room from Walls (E) - click inside enclosed walls");
+    toolButton("K", FloorPlanTool::RoomCurvedEdge, "Curve Room Edge (K) - select room, then click edge");
     toolButton("D", FloorPlanTool::Door, "Place Door (D)");
     toolButton("N", FloorPlanTool::Window, "Place Window (N)");
     toolButton("F", FloorPlanTool::Furniture, "Place Furniture (F)");
@@ -217,6 +221,12 @@ void FloorPlanEditor::renderFloorSelector()
         bldg->addFloor();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Floor Above");
+    
+    ImGui::SameLine();
+    if (ImGui::Button("B##AddBasement")) {
+        bldg->addBasement();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Basement Below");
     
     ImGui::SameLine();
     if (ImGui::Button("-##RemoveFloor")) {
@@ -380,11 +390,32 @@ void FloorPlanEditor::renderRooms(ImDrawList* drawList)
     for (const Room& room : floor->plan.rooms) {
         if (room.vertices.size() < 3) continue;
         
+        // Get boundary points - use wall geometry if available, otherwise room's own curves
+        std::vector<ImVec2> worldBoundary;
+        if (!room.wallIds.empty()) {
+            worldBoundary = floor->plan.getRoomBoundaryWithWalls(room, m_curveSegments);
+        } else if (room.hasCurvedEdges()) {
+            worldBoundary = room.getSampledBoundary(m_curveSegments);
+        }
+        
         // Convert to screen coords
         std::vector<ImVec2> screenVerts;
-        for (const auto& v : room.vertices) {
-            screenVerts.push_back(worldToScreen(v));
+        if (!worldBoundary.empty()) {
+            for (const auto& v : worldBoundary) {
+                screenVerts.push_back(worldToScreen(v));
+            }
+            // Remove duplicate closing point for polygon fill
+            if (screenVerts.size() > 1) {
+                screenVerts.pop_back();
+            }
+        } else {
+            // Fallback to straight vertices
+            for (const auto& v : room.vertices) {
+                screenVerts.push_back(worldToScreen(v));
+            }
         }
+        
+        if (screenVerts.size() < 3) continue;
         
         // Highlight if selected
         ImU32 fillColor = room.fillColor;
@@ -394,8 +425,19 @@ void FloorPlanEditor::renderRooms(ImDrawList* drawList)
             outlineColor = IM_COL32(100, 150, 255, 255);
         }
         
-        // Fill
-        drawList->AddConvexPolyFilled(screenVerts.data(), static_cast<int>(screenVerts.size()), fillColor);
+        // Fill - use PathFillConvex for simple shapes, triangulation for complex
+        // For rooms with curved edges, we need to use AddConcavePolyFilled or triangulate
+        if (screenVerts.size() <= 64 && !room.hasCurvedEdges() && room.wallIds.empty()) {
+            // Simple convex polygon
+            drawList->AddConvexPolyFilled(screenVerts.data(), static_cast<int>(screenVerts.size()), fillColor);
+        } else {
+            // For complex/curved rooms, draw as a series of triangles from centroid
+            ImVec2 center = worldToScreen(room.centroid());
+            for (size_t i = 0; i < screenVerts.size(); i++) {
+                size_t j = (i + 1) % screenVerts.size();
+                drawList->AddTriangleFilled(center, screenVerts[i], screenVerts[j], fillColor);
+            }
+        }
         
         // Outline
         for (size_t i = 0; i < screenVerts.size(); i++) {
@@ -421,31 +463,30 @@ void FloorPlanEditor::renderDoors(ImDrawList* drawList)
         Wall* wall = floor->plan.findWall(door.wallId);
         if (!wall) continue;
         
-        // Calculate door position on wall
-        ImVec2 wallDir = ImVec2(wall->end.x - wall->start.x, wall->end.y - wall->start.y);
-        ImVec2 doorPos = ImVec2(
-            wall->start.x + wallDir.x * door.positionOnWall,
-            wall->start.y + wallDir.y * door.positionOnWall
-        );
+        // Calculate door position on wall using parametric evaluation
+        ImVec2 doorPos = wall->pointAt(door.positionOnWall);
+        ImVec2 tangent = wall->tangentAt(door.positionOnWall);
         
         ImVec2 screenPos = worldToScreen(doorPos);
         float doorWidth = worldToScreenScale(door.width);
         
-        // Draw door opening (gap in wall)
-        float angle = wall->angle();
-        ImVec2 perpOffset = ImVec2(-sinf(angle) * doorWidth * 0.5f, cosf(angle) * doorWidth * 0.5f);
+        // Get wall angle from tangent for proper orientation
+        // Note: tangent.y is in world coords (Y up), but screen has Y down, so negate Y
+        float wallAngle = atan2f(-tangent.y, tangent.x);
         
         ImU32 color = door.color;
         if (m_selectionType == SelectionType::Door && m_selectedId == door.id) {
             color = IM_COL32(100, 150, 255, 255);
         }
         
+        // Draw door using tangent direction (in screen space)
+        ImVec2 dir = ImVec2(cosf(wallAngle), sinf(wallAngle));
+        ImVec2 p1 = ImVec2(screenPos.x - dir.x * doorWidth * 0.5f, screenPos.y - dir.y * doorWidth * 0.5f);
+        ImVec2 p2 = ImVec2(screenPos.x + dir.x * doorWidth * 0.5f, screenPos.y + dir.y * doorWidth * 0.5f);
+        
         // Door arc (swing indicator)
         drawList->AddCircle(screenPos, doorWidth * 0.5f, color, 16, 2.0f);
-        drawList->AddRectFilled(
-            ImVec2(screenPos.x - doorWidth * 0.5f, screenPos.y - 3),
-            ImVec2(screenPos.x + doorWidth * 0.5f, screenPos.y + 3),
-            color);
+        drawList->AddLine(p1, p2, color, 4.0f);
     }
 }
 
@@ -459,22 +500,21 @@ void FloorPlanEditor::renderWindows(ImDrawList* drawList)
         Wall* wall = floor->plan.findWall(window.wallId);
         if (!wall) continue;
         
-        ImVec2 wallDir = ImVec2(wall->end.x - wall->start.x, wall->end.y - wall->start.y);
-        ImVec2 winPos = ImVec2(
-            wall->start.x + wallDir.x * window.positionOnWall,
-            wall->start.y + wallDir.y * window.positionOnWall
-        );
+        // Calculate window position using parametric evaluation
+        ImVec2 winPos = wall->pointAt(window.positionOnWall);
+        ImVec2 tangent = wall->tangentAt(window.positionOnWall);
         
         ImVec2 screenPos = worldToScreen(winPos);
         float winWidth = worldToScreenScale(window.width);
-        float wallAngle = wall->angle();
+        // Note: tangent.y is in world coords (Y up), but screen has Y down, so negate Y
+        float wallAngle = atan2f(-tangent.y, tangent.x);
         
         ImU32 color = window.color;
         if (m_selectionType == SelectionType::Window && m_selectedId == window.id) {
             color = IM_COL32(100, 150, 255, 200);
         }
         
-        // Draw window as a line with breaks
+        // Draw window as a line along the wall tangent (in screen space)
         ImVec2 dir = ImVec2(cosf(wallAngle), sinf(wallAngle));
         ImVec2 p1 = ImVec2(screenPos.x - dir.x * winWidth * 0.5f, screenPos.y - dir.y * winWidth * 0.5f);
         ImVec2 p2 = ImVec2(screenPos.x + dir.x * winWidth * 0.5f, screenPos.y + dir.y * winWidth * 0.5f);
@@ -490,24 +530,36 @@ void FloorPlanEditor::renderFurniture(ImDrawList* drawList)
     if (!floor) return;
     
     for (const Furniture& furn : floor->plan.furniture) {
-        ImVec2 screenPos = worldToScreen(furn.position);
-        ImVec2 screenSize = ImVec2(worldToScreenScale(furn.size.x), worldToScreenScale(furn.size.y));
-        
         ImU32 color = furn.color;
         if (m_selectionType == SelectionType::Furniture && m_selectedId == furn.id) {
             color = IM_COL32(100, 150, 255, 255);
         }
         
-        // Simple rectangle for now
-        ImVec2 halfSize = ImVec2(screenSize.x * 0.5f, screenSize.y * 0.5f);
-        drawList->AddRectFilled(
-            ImVec2(screenPos.x - halfSize.x, screenPos.y - halfSize.y),
-            ImVec2(screenPos.x + halfSize.x, screenPos.y + halfSize.y),
+        // Get rotated corners in world space, then convert to screen
+        ImVec2 worldCorners[4];
+        furn.getCorners(worldCorners);
+        ImVec2 screenCorners[4];
+        for (int i = 0; i < 4; i++) {
+            screenCorners[i] = worldToScreen(worldCorners[i]);
+        }
+        
+        // Draw filled quad
+        drawList->AddQuadFilled(
+            screenCorners[0], screenCorners[1], screenCorners[2], screenCorners[3],
             color);
-        drawList->AddRect(
-            ImVec2(screenPos.x - halfSize.x, screenPos.y - halfSize.y),
-            ImVec2(screenPos.x + halfSize.x, screenPos.y + halfSize.y),
-            IM_COL32(255, 255, 255, 100), 0, 0, 1.0f);
+        // Draw outline
+        drawList->AddQuad(
+            screenCorners[0], screenCorners[1], screenCorners[2], screenCorners[3],
+            IM_COL32(255, 255, 255, 100), 1.0f);
+        
+        // Draw rotation indicator (small line from center towards "front")
+        ImVec2 screenPos = worldToScreen(furn.position);
+        float indicatorLen = worldToScreenScale(furn.size.y * 0.4f);
+        float c = cosf(furn.rotation);
+        float s = sinf(furn.rotation);
+        // Note: negative s for screen Y-flip
+        ImVec2 front = ImVec2(screenPos.x + s * indicatorLen, screenPos.y - c * indicatorLen);
+        drawList->AddLine(screenPos, front, IM_COL32(255, 255, 255, 200), 2.0f);
     }
 }
 
@@ -518,38 +570,133 @@ void FloorPlanEditor::renderStaircases(ImDrawList* drawList)
     if (!floor) return;
     
     for (const Staircase& stair : floor->plan.staircases) {
-        ImVec2 screenPos = worldToScreen(stair.position);
-        ImVec2 screenSize = ImVec2(worldToScreenScale(stair.size.x), worldToScreenScale(stair.size.y));
-        
         ImU32 color = stair.color;
         if (m_selectionType == SelectionType::Staircase && m_selectedId == stair.id) {
             color = IM_COL32(100, 150, 255, 255);
         }
         
-        ImVec2 halfSize = ImVec2(screenSize.x * 0.5f, screenSize.y * 0.5f);
-        
-        // Staircase outline
-        drawList->AddRectFilled(
-            ImVec2(screenPos.x - halfSize.x, screenPos.y - halfSize.y),
-            ImVec2(screenPos.x + halfSize.x, screenPos.y + halfSize.y),
-            color);
-        
-        // Draw steps
-        float stepHeight = screenSize.y / stair.numSteps;
-        for (int i = 0; i < stair.numSteps; i++) {
-            float y = screenPos.y - halfSize.y + i * stepHeight;
-            drawList->AddLine(
-                ImVec2(screenPos.x - halfSize.x, y),
-                ImVec2(screenPos.x + halfSize.x, y),
-                IM_COL32(0, 0, 0, 100), 1.0f);
+        if (stair.isCurved()) {
+            // Curved staircase following a wall
+            const Wall* wall = nullptr;
+            for (const Wall& w : floor->plan.walls) {
+                if (w.id == stair.wallId) {
+                    wall = &w;
+                    break;
+                }
+            }
+            if (!wall) continue;
+            
+            // Sample points along the wall from startOnWall to endOnWall
+            float width = stair.size.x;
+            int numSegments = stair.numSteps;
+            std::vector<ImVec2> centerPts;
+            std::vector<ImVec2> leftPts;
+            std::vector<ImVec2> rightPts;
+            
+            for (int i = 0; i <= numSegments; i++) {
+                float t = stair.startOnWall + (stair.endOnWall - stair.startOnWall) * i / numSegments;
+                ImVec2 pos = wall->pointAt(t);
+                ImVec2 tangent = wall->tangentAt(t);
+                // Normal perpendicular to tangent (tangentAt already normalized)
+                ImVec2 normal(-tangent.y, tangent.x);
+                
+                centerPts.push_back(pos);
+                leftPts.push_back(ImVec2(pos.x - normal.x * width * 0.5f, pos.y - normal.y * width * 0.5f));
+                rightPts.push_back(ImVec2(pos.x + normal.x * width * 0.5f, pos.y + normal.y * width * 0.5f));
+            }
+            
+            // Draw stair segments
+            for (int i = 0; i < numSegments; i++) {
+                ImVec2 tl = worldToScreen(leftPts[i]);
+                ImVec2 tr = worldToScreen(rightPts[i]);
+                ImVec2 br = worldToScreen(rightPts[i + 1]);
+                ImVec2 bl = worldToScreen(leftPts[i + 1]);
+                
+                drawList->AddQuadFilled(tl, tr, br, bl, color);
+                drawList->AddLine(tl, tr, IM_COL32(0, 0, 0, 100), 1.0f);
+            }
+            // Draw outer edges
+            for (int i = 0; i < numSegments; i++) {
+                ImVec2 l1 = worldToScreen(leftPts[i]);
+                ImVec2 l2 = worldToScreen(leftPts[i + 1]);
+                ImVec2 r1 = worldToScreen(rightPts[i]);
+                ImVec2 r2 = worldToScreen(rightPts[i + 1]);
+                drawList->AddLine(l1, l2, IM_COL32(0, 0, 0, 150), 1.0f);
+                drawList->AddLine(r1, r2, IM_COL32(0, 0, 0, 150), 1.0f);
+            }
+            
+            // Draw direction arrow at start
+            if (!centerPts.empty()) {
+                ImVec2 arrowPos = worldToScreen(centerPts[0]);
+                ImVec2 tangent = centerPts.size() > 1 ? 
+                    ImVec2(centerPts[1].x - centerPts[0].x, centerPts[1].y - centerPts[0].y) : 
+                    ImVec2(0, 1);
+                float len = sqrtf(tangent.x * tangent.x + tangent.y * tangent.y);
+                if (len > 0.0001f) {
+                    tangent.x /= len;
+                    tangent.y /= len;
+                }
+                ImVec2 normal(-tangent.y, tangent.x);
+                // Screen space arrow (Y flipped)
+                float arrowSize = 8.0f;
+                ImVec2 tip = ImVec2(arrowPos.x + tangent.x * arrowSize, arrowPos.y - tangent.y * arrowSize);
+                ImVec2 left = ImVec2(arrowPos.x - normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
+                                     arrowPos.y + normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
+                ImVec2 right = ImVec2(arrowPos.x + normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
+                                      arrowPos.y - normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
+                drawList->AddTriangleFilled(tip, left, right, IM_COL32(255, 255, 255, 150));
+            }
+        } else {
+            // Straight staircase with rotation
+            ImVec2 worldCorners[4];
+            stair.getCorners(worldCorners);
+            ImVec2 screenCorners[4];
+            for (int i = 0; i < 4; i++) {
+                screenCorners[i] = worldToScreen(worldCorners[i]);
+            }
+            
+            // Draw filled quad
+            drawList->AddQuadFilled(
+                screenCorners[0], screenCorners[1], screenCorners[2], screenCorners[3],
+                color);
+            
+            // Draw steps along the length of the staircase
+            float c = cosf(stair.rotation);
+            float s = sinf(stair.rotation);
+            float hw = stair.size.x * 0.5f;
+            float hl = stair.size.y * 0.5f;
+            float stepLen = stair.size.y / stair.numSteps;
+            
+            for (int i = 1; i < stair.numSteps; i++) {
+                float localY = -hl + i * stepLen;
+                // Left and right points at this step in local coords
+                ImVec2 localLeft(-hw, localY);
+                ImVec2 localRight(hw, localY);
+                // Rotate and translate to world
+                ImVec2 worldLeft(
+                    stair.position.x + localLeft.x * c - localLeft.y * s,
+                    stair.position.y + localLeft.x * s + localLeft.y * c
+                );
+                ImVec2 worldRight(
+                    stair.position.x + localRight.x * c - localRight.y * s,
+                    stair.position.y + localRight.x * s + localRight.y * c
+                );
+                ImVec2 screenLeft = worldToScreen(worldLeft);
+                ImVec2 screenRight = worldToScreen(worldRight);
+                drawList->AddLine(screenLeft, screenRight, IM_COL32(0, 0, 0, 100), 1.0f);
+            }
+            
+            // Arrow indicating direction (at start of staircase)
+            ImVec2 screenPos = worldToScreen(stair.position);
+            // Direction is "up" in local space (+Y), rotated
+            float arrowLen = worldToScreenScale(stair.size.y * 0.3f);
+            // In screen space: Y is flipped, so rotation needs adjustment
+            ImVec2 arrowTip(screenPos.x + s * arrowLen, screenPos.y - c * arrowLen);
+            // Draw small triangle
+            ImVec2 arrowLeft(arrowTip.x - c * 8 - s * 4, arrowTip.y - s * 8 + c * 4);
+            ImVec2 arrowRight(arrowTip.x + c * 8 - s * 4, arrowTip.y + s * 8 + c * 4);
+            drawList->AddTriangleFilled(arrowTip, arrowLeft, arrowRight, IM_COL32(255, 255, 255, 150));
         }
-        
-        // Arrow indicating direction
-        drawList->AddTriangleFilled(
-            ImVec2(screenPos.x, screenPos.y - halfSize.y + 10),
-            ImVec2(screenPos.x - 8, screenPos.y - halfSize.y + 25),
-            ImVec2(screenPos.x + 8, screenPos.y - halfSize.y + 25),
-            IM_COL32(255, 255, 255, 150));
     }
 }
 
@@ -643,6 +790,86 @@ void FloorPlanEditor::renderCurrentDrawing(ImDrawList* drawList)
         ImVec2 hintPos = ImVec2(m_canvasPos.x + 10, m_canvasPos.y + m_canvasSize.y - 25);
         drawList->AddText(hintPos, IM_COL32(255, 255, 255, 200), hint);
     }
+    else if (m_currentTool == FloorPlanTool::WallBSpline ||
+             m_currentTool == FloorPlanTool::WallBezierSpline) {
+        // Draw spline preview
+        float thickness = worldToScreenScale(m_wallThickness);
+        ImU32 previewColor = IM_COL32(100, 200, 100, 200);
+        ImU32 controlColor = IM_COL32(255, 200, 100, 255);
+        ImU32 lineColor = IM_COL32(255, 200, 100, 100);
+        ImU32 closeHintColor = IM_COL32(100, 255, 100, 150);
+        
+        // Collect all points: start + control points + current mouse position
+        std::vector<ImVec2> pts;
+        pts.push_back(m_drawStart);
+        for (const auto& cp : m_curveControlPts) {
+            pts.push_back(cp);
+        }
+        pts.push_back(m_drawCurrent);
+        
+        // Draw control polygon lines
+        for (size_t i = 0; i < pts.size() - 1; i++) {
+            ImVec2 sp1 = worldToScreen(pts[i]);
+            ImVec2 sp2 = worldToScreen(pts[i + 1]);
+            drawList->AddLine(sp1, sp2, lineColor, 1.0f);
+        }
+        
+        // Draw potential close line (to start)
+        if (pts.size() >= 3) {
+            ImVec2 lastScreen = worldToScreen(pts.back());
+            ImVec2 startScreen = worldToScreen(m_drawStart);
+            drawList->AddLine(lastScreen, startScreen, closeHintColor, 1.0f);
+        }
+        
+        // Draw curve preview
+        std::vector<ImVec2> samples;
+        if (pts.size() >= 2) {
+            if (m_currentTool == FloorPlanTool::WallBSpline) {
+                samples = BSplineUtil::sampleBSpline(pts, m_curveSegments / 2, false);
+            } else {
+                samples = BSplineUtil::sampleBezierSpline(pts, m_curveSegments, false);
+            }
+        }
+        
+        // Draw the sampled curve
+        if (samples.size() >= 2) {
+            for (size_t i = 1; i < samples.size(); i++) {
+                ImVec2 sp1 = worldToScreen(samples[i - 1]);
+                ImVec2 sp2 = worldToScreen(samples[i]);
+                drawList->AddLine(sp1, sp2, previewColor, thickness);
+            }
+        }
+        
+        // Draw control points
+        for (size_t i = 0; i < pts.size(); i++) {
+            ImVec2 sp = worldToScreen(pts[i]);
+            ImU32 ptColor = (i == 0) ? IM_COL32(100, 200, 255, 255) : controlColor;
+            drawList->AddCircleFilled(sp, CONTROL_POINT_RADIUS, ptColor);
+            drawList->AddCircle(sp, CONTROL_POINT_RADIUS, IM_COL32(255, 255, 255, 255), 12, 1.5f);
+        }
+        
+        // Check if mouse is near start point (for close hint)
+        float dx = m_drawCurrent.x - m_drawStart.x;
+        float dy = m_drawCurrent.y - m_drawStart.y;
+        float closeThreshold = m_gridSize * 0.75f;
+        bool canClose = (m_curveControlPts.size() >= 2 && sqrtf(dx * dx + dy * dy) < closeThreshold);
+        
+        // Show hint text
+        char hint[64];
+        if (canClose) {
+            snprintf(hint, sizeof(hint), "%zu pts - Click to CLOSE", pts.size());
+        } else {
+            snprintf(hint, sizeof(hint), "%zu pts - Right-click to finish", pts.size());
+        }
+        ImVec2 hintPos = ImVec2(m_canvasPos.x + 10, m_canvasPos.y + m_canvasSize.y - 25);
+        drawList->AddText(hintPos, IM_COL32(255, 255, 255, 200), hint);
+        
+        // Highlight start point if can close
+        if (canClose) {
+            ImVec2 startScreen = worldToScreen(m_drawStart);
+            drawList->AddCircle(startScreen, CONTROL_POINT_RADIUS + 4, closeHintColor, 16, 2.0f);
+        }
+    }
     else if (m_currentTool == FloorPlanTool::Room) {
         // Draw existing vertices
         std::vector<ImVec2> screenVerts;
@@ -666,6 +893,86 @@ void FloorPlanEditor::renderCurrentDrawing(ImDrawList* drawList)
         // Draw vertices
         for (const auto& sv : screenVerts) {
             drawList->AddCircleFilled(sv, 5.0f, IM_COL32(100, 200, 100, 255));
+        }
+    }
+    else if (m_currentTool == FloorPlanTool::RoomCurvedEdge && m_isDrawing && m_selectedRoomEdge >= 0) {
+        // Preview curved edge on selected room
+        Building* bldg = m_building ? m_building : &m_tempBuilding;
+        Floor* floor = bldg->getCurrentFloor();
+        if (floor) {
+            Room* room = floor->plan.findRoom(m_selectedId);
+            if (room && static_cast<size_t>(m_selectedRoomEdge) < room->vertices.size()) {
+                // Get edge endpoints
+                const ImVec2& v1 = room->vertices[m_selectedRoomEdge];
+                const ImVec2& v2 = room->vertices[(m_selectedRoomEdge + 1) % room->vertices.size()];
+                
+                ImU32 edgeColor = IM_COL32(255, 150, 100, 255);
+                ImU32 controlColor = IM_COL32(255, 200, 100, 255);
+                ImU32 previewColor = IM_COL32(100, 255, 150, 200);
+                
+                // Highlight the selected edge
+                ImVec2 sv1 = worldToScreen(v1);
+                ImVec2 sv2 = worldToScreen(v2);
+                drawList->AddLine(sv1, sv2, edgeColor, 3.0f);
+                
+                // Draw control points and current mouse position
+                std::vector<ImVec2> pts;
+                pts.push_back(v1);
+                for (const auto& cp : m_curveControlPts) {
+                    pts.push_back(cp);
+                }
+                pts.push_back(m_drawCurrent);
+                pts.push_back(v2);
+                
+                // Draw control polygon
+                for (size_t i = 0; i < pts.size() - 1; i++) {
+                    ImVec2 sp1 = worldToScreen(pts[i]);
+                    ImVec2 sp2 = worldToScreen(pts[i + 1]);
+                    drawList->AddLine(sp1, sp2, IM_COL32(255, 200, 100, 100), 1.0f);
+                }
+                
+                // Preview the curve
+                std::vector<ImVec2> curvePts;
+                if (m_curveControlPts.empty()) {
+                    // Preview as arc through current mouse
+                    ImVec2 center;
+                    float radius, startAngle, endAngle;
+                    if (ArcUtil::arcFrom3Points(v1, m_drawCurrent, v2, center, radius, startAngle, endAngle)) {
+                        curvePts = ArcUtil::sampleArc(center, radius, startAngle, endAngle, m_curveSegments);
+                    }
+                } else if (m_curveControlPts.size() == 1) {
+                    // Quadratic bezier
+                    curvePts = BezierUtil::sampleQuadratic(v1, m_curveControlPts[0], v2, m_curveSegments);
+                } else {
+                    // Cubic bezier
+                    curvePts = BezierUtil::sampleCubic(v1, m_curveControlPts[0], m_curveControlPts[1], v2, m_curveSegments);
+                }
+                
+                // Draw curve preview
+                for (size_t i = 1; i < curvePts.size(); i++) {
+                    ImVec2 sp1 = worldToScreen(curvePts[i - 1]);
+                    ImVec2 sp2 = worldToScreen(curvePts[i]);
+                    drawList->AddLine(sp1, sp2, previewColor, 2.0f);
+                }
+                
+                // Draw control points
+                for (const auto& cp : m_curveControlPts) {
+                    ImVec2 scp = worldToScreen(cp);
+                    drawList->AddCircleFilled(scp, CONTROL_POINT_RADIUS, controlColor);
+                    drawList->AddCircle(scp, CONTROL_POINT_RADIUS, IM_COL32(255, 255, 255, 255), 12, 1.5f);
+                }
+                
+                // Draw current position
+                ImVec2 scurrent = worldToScreen(m_drawCurrent);
+                drawList->AddCircleFilled(scurrent, CONTROL_POINT_RADIUS, previewColor);
+                drawList->AddCircle(scurrent, CONTROL_POINT_RADIUS, IM_COL32(255, 255, 255, 255), 12, 1.5f);
+                
+                // Hint text
+                char hint[64];
+                snprintf(hint, sizeof(hint), "Click to add control points, right-click to finish");
+                ImVec2 hintPos = ImVec2(m_canvasPos.x + 10, m_canvasPos.y + m_canvasSize.y - 25);
+                drawList->AddText(hintPos, IM_COL32(255, 255, 255, 200), hint);
+            }
         }
     }
 }
@@ -835,7 +1142,11 @@ void FloorPlanEditor::handleCanvasInput()
         if (ImGui::IsKeyPressed(ImGuiKey_A)) m_currentTool = FloorPlanTool::WallArc;
         if (ImGui::IsKeyPressed(ImGuiKey_B)) m_currentTool = FloorPlanTool::WallBezier;
         if (ImGui::IsKeyPressed(ImGuiKey_C)) m_currentTool = FloorPlanTool::WallCubic;
+        if (ImGui::IsKeyPressed(ImGuiKey_L)) m_currentTool = FloorPlanTool::WallBSpline;
+        if (ImGui::IsKeyPressed(ImGuiKey_Z)) m_currentTool = FloorPlanTool::WallBezierSpline;
         if (ImGui::IsKeyPressed(ImGuiKey_R)) m_currentTool = FloorPlanTool::Room;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) m_currentTool = FloorPlanTool::RoomFromWalls;
+        if (ImGui::IsKeyPressed(ImGuiKey_K)) m_currentTool = FloorPlanTool::RoomCurvedEdge;
         if (ImGui::IsKeyPressed(ImGuiKey_D)) m_currentTool = FloorPlanTool::Door;
         if (ImGui::IsKeyPressed(ImGuiKey_N)) m_currentTool = FloorPlanTool::Window;
         if (ImGui::IsKeyPressed(ImGuiKey_F)) m_currentTool = FloorPlanTool::Furniture;
@@ -899,6 +1210,37 @@ void FloorPlanEditor::handleToolInput()
             m_drawCurrent = worldPos;
         }
         break;
+    
+    case FloorPlanTool::WallBSpline:
+    case FloorPlanTool::WallBezierSpline:
+        if (clicked) {
+            if (!m_isDrawing) {
+                startSplineDrawing(worldPos);
+            } else {
+                // Check if clicking near start point to close the spline
+                float dx = worldPos.x - m_drawStart.x;
+                float dy = worldPos.y - m_drawStart.y;
+                float closeThreshold = m_gridSize * 0.75f;
+                if (m_curveControlPts.size() >= 2 && sqrtf(dx * dx + dy * dy) < closeThreshold) {
+                    // Close the spline
+                    finishSplineDrawing(true);
+                } else {
+                    addSplineControlPoint(worldPos);
+                }
+            }
+        }
+        if (rightClicked && m_isDrawing) {
+            // Right-click finishes the spline (open)
+            if (m_curveControlPts.size() >= 1) {
+                finishSplineDrawing(false);
+            } else {
+                cancelDrawing();
+            }
+        }
+        if (m_isDrawing) {
+            m_drawCurrent = worldPos;
+        }
+        break;
         
     case FloorPlanTool::Room:
         if (clicked) {
@@ -910,6 +1252,28 @@ void FloorPlanEditor::handleToolInput()
         }
         if (rightClicked && m_isDrawing) {
             finishRoomDrawing();
+        }
+        if (m_isDrawing) {
+            m_drawCurrent = worldPos;
+        }
+        break;
+    
+    case FloorPlanTool::RoomFromWalls:
+        if (clicked) {
+            createRoomFromWallsAt(worldPos);
+        }
+        break;
+    
+    case FloorPlanTool::RoomCurvedEdge:
+        if (clicked) {
+            if (!m_isDrawing) {
+                startRoomEdgeCurve(worldPos);
+            } else {
+                addRoomEdgeControlPoint(worldPos);
+            }
+        }
+        if (rightClicked && m_isDrawing) {
+            finishRoomEdgeCurve();
         }
         if (m_isDrawing) {
             m_drawCurrent = worldPos;
@@ -1060,6 +1424,57 @@ void FloorPlanEditor::finishCurvedWallDrawing()
     m_curveClickCount = 0;
 }
 
+void FloorPlanEditor::startSplineDrawing(ImVec2 worldPos)
+{
+    m_isDrawing = true;
+    m_drawStart = worldPos;
+    m_drawCurrent = worldPos;
+    m_curveControlPts.clear();
+    m_curveClickCount = 1;
+}
+
+void FloorPlanEditor::addSplineControlPoint(ImVec2 worldPos)
+{
+    m_curveControlPts.push_back(worldPos);
+    m_curveClickCount++;
+}
+
+void FloorPlanEditor::finishSplineDrawing(bool closed)
+{
+    Building* bldg = m_building ? m_building : &m_tempBuilding;
+    Floor* floor = bldg->getCurrentFloor();
+    if (!floor) return;
+    
+    // Need at least start + 1 control point for a meaningful spline
+    if (m_curveControlPts.empty()) {
+        cancelDrawing();
+        return;
+    }
+    
+    // Create the wall
+    Wall wall;
+    wall.id = floor->plan.nextWallId++;
+    wall.start = m_drawStart;
+    wall.end = closed ? m_drawStart : m_drawCurrent;  // For closed splines, end == start
+    wall.thickness = m_wallThickness;
+    wall.curveSegments = m_curveSegments;
+    wall.isClosed = closed;
+    
+    // Set spline type and control points
+    if (m_currentTool == FloorPlanTool::WallBSpline) {
+        wall.setBSpline(m_curveControlPts, closed);
+    } else {
+        wall.setBezierSpline(m_curveControlPts, closed);
+    }
+    
+    floor->plan.walls.push_back(wall);
+    
+    // Reset drawing state
+    m_isDrawing = false;
+    m_curveControlPts.clear();
+    m_curveClickCount = 0;
+}
+
 void FloorPlanEditor::startRoomDrawing(ImVec2 worldPos)
 {
     m_isDrawing = true;
@@ -1098,6 +1513,139 @@ void FloorPlanEditor::finishRoomDrawing()
     m_roomVertices.clear();
 }
 
+void FloorPlanEditor::createRoomFromWallsAt(ImVec2 worldPos)
+{
+    Building* bldg = m_building ? m_building : &m_tempBuilding;
+    Floor* floor = bldg->getCurrentFloor();
+    if (!floor) return;
+    
+    int roomId = floor->plan.createRoomFromWallsAt(worldPos, "Room");
+    if (roomId > 0) {
+        // Select the newly created room
+        m_selectionType = SelectionType::Room;
+        m_selectedId = roomId;
+    }
+}
+
+void FloorPlanEditor::startRoomEdgeCurve(ImVec2 worldPos)
+{
+    Building* bldg = m_building ? m_building : &m_tempBuilding;
+    Floor* floor = bldg->getCurrentFloor();
+    if (!floor) return;
+    
+    // Find the room containing or near this point
+    Room* room = floor->plan.findRoomAt(worldPos);
+    
+    // If no room at point, find nearest room edge
+    if (!room) {
+        float minDist = 1e10f;
+        int bestRoomId = -1;
+        int bestEdge = -1;
+        
+        for (auto& r : floor->plan.rooms) {
+            for (size_t i = 0; i < r.vertices.size(); i++) {
+                const ImVec2& v1 = r.vertices[i];
+                const ImVec2& v2 = r.vertices[(i + 1) % r.vertices.size()];
+                
+                // Distance to edge (simplified as distance to line segment)
+                ImVec2 v = ImVec2(v2.x - v1.x, v2.y - v1.y);
+                ImVec2 w = ImVec2(worldPos.x - v1.x, worldPos.y - v1.y);
+                float c1 = v.x * w.x + v.y * w.y;
+                float c2 = v.x * v.x + v.y * v.y;
+                if (c2 > 0) {
+                    float t = std::max(0.0f, std::min(1.0f, c1 / c2));
+                    ImVec2 proj = ImVec2(v1.x + t * v.x, v1.y + t * v.y);
+                    float dx = worldPos.x - proj.x;
+                    float dy = worldPos.y - proj.y;
+                    float dist = sqrtf(dx * dx + dy * dy);
+                    if (dist < minDist && dist < m_gridSize * 2.0f) {
+                        minDist = dist;
+                        bestRoomId = r.id;
+                        bestEdge = static_cast<int>(i);
+                    }
+                }
+            }
+        }
+        
+        if (bestRoomId > 0) {
+            m_selectionType = SelectionType::Room;
+            m_selectedId = bestRoomId;
+            m_selectedRoomEdge = bestEdge;
+            m_isDrawing = true;
+            m_drawStart = worldPos;
+            m_drawCurrent = worldPos;
+            m_curveControlPts.clear();
+            return;
+        }
+    } else {
+        // Found room, find nearest edge
+        float minDist = 1e10f;
+        int bestEdge = -1;
+        
+        for (size_t i = 0; i < room->vertices.size(); i++) {
+            const ImVec2& v1 = room->vertices[i];
+            const ImVec2& v2 = room->vertices[(i + 1) % room->vertices.size()];
+            
+            ImVec2 v = ImVec2(v2.x - v1.x, v2.y - v1.y);
+            ImVec2 w = ImVec2(worldPos.x - v1.x, worldPos.y - v1.y);
+            float c1 = v.x * w.x + v.y * w.y;
+            float c2 = v.x * v.x + v.y * v.y;
+            if (c2 > 0) {
+                float t = std::max(0.0f, std::min(1.0f, c1 / c2));
+                ImVec2 proj = ImVec2(v1.x + t * v.x, v1.y + t * v.y);
+                float dx = worldPos.x - proj.x;
+                float dy = worldPos.y - proj.y;
+                float dist = sqrtf(dx * dx + dy * dy);
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestEdge = static_cast<int>(i);
+                }
+            }
+        }
+        
+        if (bestEdge >= 0) {
+            m_selectionType = SelectionType::Room;
+            m_selectedId = room->id;
+            m_selectedRoomEdge = bestEdge;
+            m_isDrawing = true;
+            m_drawStart = worldPos;
+            m_drawCurrent = worldPos;
+            m_curveControlPts.clear();
+        }
+    }
+}
+
+void FloorPlanEditor::addRoomEdgeControlPoint(ImVec2 worldPos)
+{
+    m_curveControlPts.push_back(worldPos);
+}
+
+void FloorPlanEditor::finishRoomEdgeCurve()
+{
+    Building* bldg = m_building ? m_building : &m_tempBuilding;
+    Floor* floor = bldg->getCurrentFloor();
+    if (!floor) return;
+    
+    Room* room = floor->plan.findRoom(m_selectedId);
+    if (!room || m_selectedRoomEdge < 0) {
+        cancelDrawing();
+        return;
+    }
+    
+    // Apply curve to the selected edge
+    if (m_curveControlPts.size() == 1) {
+        // Single control point -> quadratic bezier or arc
+        room->setEdgeArc(static_cast<size_t>(m_selectedRoomEdge), m_curveControlPts[0]);
+    } else if (m_curveControlPts.size() >= 2) {
+        // Two or more control points -> cubic bezier
+        room->setEdgeCubic(static_cast<size_t>(m_selectedRoomEdge), m_curveControlPts[0], m_curveControlPts[1]);
+    }
+    
+    m_isDrawing = false;
+    m_curveControlPts.clear();
+    m_selectedRoomEdge = -1;
+}
+
 void FloorPlanEditor::placeDoor(ImVec2 worldPos)
 {
     Building* bldg = m_building ? m_building : &m_tempBuilding;
@@ -1108,16 +1656,9 @@ void FloorPlanEditor::placeDoor(ImVec2 worldPos)
     Wall* wall = floor->plan.findWallAt(worldPos, 0.3f);
     if (!wall) return;
     
-    // Calculate position on wall (0-1)
-    float wallLen = wall->length();
-    if (wallLen < 0.01f) return;
-    
-    float dx = worldPos.x - wall->start.x;
-    float dy = worldPos.y - wall->start.y;
-    float wallDx = wall->end.x - wall->start.x;
-    float wallDy = wall->end.y - wall->start.y;
-    float t = (dx * wallDx + dy * wallDy) / (wallLen * wallLen);
-    t = std::clamp(t, 0.0f, 1.0f);
+    // Calculate position on wall using closestPointTo (works for curves)
+    float distance;
+    float t = wall->closestPointTo(worldPos, &distance);
     
     Door door;
     door.id = floor->plan.nextDoorId++;
@@ -1136,15 +1677,9 @@ void FloorPlanEditor::placeWindow(ImVec2 worldPos)
     Wall* wall = floor->plan.findWallAt(worldPos, 0.3f);
     if (!wall) return;
     
-    float wallLen = wall->length();
-    if (wallLen < 0.01f) return;
-    
-    float dx = worldPos.x - wall->start.x;
-    float dy = worldPos.y - wall->start.y;
-    float wallDx = wall->end.x - wall->start.x;
-    float wallDy = wall->end.y - wall->start.y;
-    float t = (dx * wallDx + dy * wallDy) / (wallLen * wallLen);
-    t = std::clamp(t, 0.0f, 1.0f);
+    // Calculate position on wall using closestPointTo (works for curves)
+    float distance;
+    float t = wall->closestPointTo(worldPos, &distance);
     
     Window window;
     window.id = floor->plan.nextWindowId++;
@@ -1283,6 +1818,7 @@ void FloorPlanEditor::clearSelection()
 {
     m_selectionType = SelectionType::None;
     m_selectedId = -1;
+    m_selectedRoomEdge = -1;
 }
 
 // ============================================================
@@ -1319,7 +1855,19 @@ void FloorPlanEditor::renderPropertiesPanel()
         }
         
         ImGui::DragFloat("Height", &floor->height, 0.1f, 2.0f, 10.0f, "%.1f m");
-        ImGui::Text("Level: %d", floor->level);
+        
+        // Editable floor level
+        int level = floor->level;
+        if (ImGui::DragInt("Level", &level, 0.1f, -10, 100)) {
+            floor->level = level;
+            floor->elevation = level * 3.0f;  // Update elevation to match
+            // Re-sort floors in building
+            auto& floors = bldg->getFloors();
+            std::sort(floors.begin(), floors.end(), 
+                [](const Floor& a, const Floor& b) { return a.level < b.level; });
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=Ground, -1=Basement, 1+=Upper floors");
+        
         ImGui::Spacing();
         
         // Stats
@@ -1357,13 +1905,23 @@ void FloorPlanEditor::renderPropertiesPanel()
                 ImGui::Text("Length: %.2f m", w->length());
                 ImGui::DragFloat("Thickness##Wall", &w->thickness, 0.01f, 0.05f, 0.5f, "%.2f m");
                 
-                // Curve type info
-                const char* typeNames[] = { "Straight", "Quadratic Bezier", "Cubic Bezier", "Arc" };
+                // Curve type info (updated for splines)
+                const char* typeNames[] = { "Straight", "Quadratic Bezier", "Cubic Bezier", "Arc", "B-Spline (approx)", "Bezier Spline (interp)" };
                 ImGui::Text("Type: %s", typeNames[static_cast<int>(w->type)]);
                 
                 if (w->isCurved()) {
                     ImGui::Checkbox("Show Control Points", &m_showControlPoints);
                     ImGui::SliderInt("Curve Segments", &w->curveSegments, 5, 50);
+                    
+                    // Closed toggle for spline types
+                    if (w->type == WallType::BSpline || w->type == WallType::BezierSpline) {
+                        if (ImGui::Checkbox("Closed Loop", &w->isClosed)) {
+                            // Update end point if closing/opening
+                            if (w->isClosed) {
+                                w->end = w->start;
+                            }
+                        }
+                    }
                     
                     ImGui::Text("Control Points: %zu", w->controlPoints.size());
                     
@@ -1383,13 +1941,11 @@ void FloorPlanEditor::renderPropertiesPanel()
                     ImGui::Separator();
                     ImGui::Text("Convert to:");
                     if (ImGui::Button("Quadratic Bezier")) {
-                        // Add control point at midpoint
                         ImVec2 mid = w->midpoint();
                         w->setQuadraticBezier(mid);
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Cubic Bezier")) {
-                        // Add two control points at 1/3 and 2/3
                         ImVec2 p1 = ImVec2(
                             w->start.x + (w->end.x - w->start.x) * 0.33f,
                             w->start.y + (w->end.y - w->start.y) * 0.33f
@@ -1401,13 +1957,36 @@ void FloorPlanEditor::renderPropertiesPanel()
                         w->setCubicBezier(p1, p2);
                     }
                     if (ImGui::Button("Arc")) {
-                        // Add control point perpendicular to midpoint
                         ImVec2 mid = w->midpoint();
                         ImVec2 normal = w->normal();
                         float offset = w->length() * 0.25f;
                         ImVec2 through = ImVec2(mid.x + normal.x * offset, mid.y + normal.y * offset);
                         w->setArc(through);
                     }
+                    
+                    // Spline conversions
+                    ImGui::Separator();
+                    ImGui::Text("Splines:");
+                    if (ImGui::Button("B-Spline##approx")) {
+                        // Create intermediate control points
+                        std::vector<ImVec2> pts;
+                        for (int i = 1; i < 4; i++) {
+                            float t = (float)i / 4.0f;
+                            pts.push_back(ImVec2(
+                                w->start.x + (w->end.x - w->start.x) * t,
+                                w->start.y + (w->end.y - w->start.y) * t
+                            ));
+                        }
+                        w->setBSpline(pts, false);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Approximating spline - curve does NOT pass through control points");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Bezier Spline##interp")) {
+                        std::vector<ImVec2> pts;
+                        pts.push_back(w->midpoint());
+                        w->setBezierSpline(pts, false);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interpolating spline - curve passes through control points");
                 }
             }
             break;
@@ -1419,6 +1998,137 @@ void FloorPlanEditor::renderPropertiesPanel()
                     r->name = roomNameBuf;
                 }
                 ImGui::Text("Area: %.2f m²", r->area());
+            }
+            break;
+        case SelectionType::Furniture:
+            for (auto& f : floor->plan.furniture) {
+                if (f.id == m_selectedId) {
+                    ImGui::Text("Furniture #%d", f.id);
+                    
+                    static char furnNameBuf[128];
+                    strncpy(furnNameBuf, f.name.c_str(), sizeof(furnNameBuf) - 1);
+                    if (ImGui::InputText("Name##Furn", furnNameBuf, sizeof(furnNameBuf))) {
+                        f.name = furnNameBuf;
+                    }
+                    
+                    static char furnTypeBuf[64];
+                    strncpy(furnTypeBuf, f.type.c_str(), sizeof(furnTypeBuf) - 1);
+                    if (ImGui::InputText("Type##Furn", furnTypeBuf, sizeof(furnTypeBuf))) {
+                        f.type = furnTypeBuf;
+                    }
+                    
+                    ImGui::DragFloat2("Position##Furn", &f.position.x, 0.1f);
+                    ImGui::DragFloat2("Size (W x D)##Furn", &f.size.x, 0.1f, 0.1f, 10.0f, "%.2f m");
+                    
+                    // Rotation in degrees for easier editing
+                    float rotDeg = f.rotation * 180.0f / 3.14159265f;
+                    if (ImGui::DragFloat("Rotation##Furn", &rotDeg, 1.0f, -180.0f, 180.0f, "%.1f°")) {
+                        f.rotation = rotDeg * 3.14159265f / 180.0f;
+                    }
+                    // Quick rotation buttons
+                    if (ImGui::Button("0°##Furn")) f.rotation = 0.0f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("90°##Furn")) f.rotation = 3.14159265f / 2.0f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("180°##Furn")) f.rotation = 3.14159265f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("-90°##Furn")) f.rotation = -3.14159265f / 2.0f;
+                    
+                    static char textureBuf[256];
+                    strncpy(textureBuf, f.texture.c_str(), sizeof(textureBuf) - 1);
+                    if (ImGui::InputText("Texture##Furn", textureBuf, sizeof(textureBuf))) {
+                        f.texture = textureBuf;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Texture/icon name (leave empty for solid color)");
+                    
+                    float col[4];
+                    col[0] = ((f.color >> 0) & 0xFF) / 255.0f;
+                    col[1] = ((f.color >> 8) & 0xFF) / 255.0f;
+                    col[2] = ((f.color >> 16) & 0xFF) / 255.0f;
+                    col[3] = ((f.color >> 24) & 0xFF) / 255.0f;
+                    if (ImGui::ColorEdit4("Color##Furn", col)) {
+                        f.color = IM_COL32(
+                            (int)(col[0] * 255), (int)(col[1] * 255),
+                            (int)(col[2] * 255), (int)(col[3] * 255));
+                    }
+                    break;
+                }
+            }
+            break;
+        case SelectionType::Staircase:
+            for (auto& s : floor->plan.staircases) {
+                if (s.id == m_selectedId) {
+                    ImGui::Text("Staircase #%d", s.id);
+                    
+                    ImGui::DragFloat2("Position##Stair", &s.position.x, 0.1f);
+                    ImGui::DragFloat2("Size (W x L)##Stair", &s.size.x, 0.1f, 0.1f, 10.0f, "%.2f m");
+                    
+                    // Rotation in degrees
+                    float rotDeg = s.rotation * 180.0f / 3.14159265f;
+                    if (ImGui::DragFloat("Rotation##Stair", &rotDeg, 1.0f, -180.0f, 180.0f, "%.1f°")) {
+                        s.rotation = rotDeg * 3.14159265f / 180.0f;
+                    }
+                    // Quick rotation buttons
+                    if (ImGui::Button("0°##Stair")) s.rotation = 0.0f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("90°##Stair")) s.rotation = 3.14159265f / 2.0f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("180°##Stair")) s.rotation = 3.14159265f;
+                    ImGui::SameLine();
+                    if (ImGui::Button("-90°##Stair")) s.rotation = -3.14159265f / 2.0f;
+                    
+                    ImGui::DragInt("Steps##Stair", &s.numSteps, 1.0f, 3, 30);
+                    ImGui::DragInt("Connects to Floor##Stair", &s.connectsToFloor, 1.0f, -5, 20);
+                    
+                    // Curved staircase settings
+                    ImGui::Separator();
+                    ImGui::Text("Curved Staircase:");
+                    
+                    // Build list of wall IDs for dropdown
+                    std::vector<const char*> wallOptions;
+                    std::vector<int> wallIds;
+                    wallOptions.push_back("None (Straight)");
+                    wallIds.push_back(-1);
+                    for (const auto& w : floor->plan.walls) {
+                        if (w.isCurved()) {
+                            static std::vector<std::string> wallLabels; // Persist labels
+                            wallLabels.push_back("Wall #" + std::to_string(w.id));
+                            wallOptions.push_back(wallLabels.back().c_str());
+                            wallIds.push_back(w.id);
+                        }
+                    }
+                    
+                    int currentWallIdx = 0;
+                    for (size_t i = 0; i < wallIds.size(); i++) {
+                        if (wallIds[i] == s.wallId) {
+                            currentWallIdx = (int)i;
+                            break;
+                        }
+                    }
+                    
+                    if (ImGui::Combo("Follow Wall##Stair", &currentWallIdx, wallOptions.data(), (int)wallOptions.size())) {
+                        s.wallId = wallIds[currentWallIdx];
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Select a curved wall to create a curved staircase");
+                    
+                    if (s.isCurved()) {
+                        ImGui::DragFloat("Start Position##Stair", &s.startOnWall, 0.01f, 0.0f, 1.0f, "%.2f");
+                        ImGui::DragFloat("End Position##Stair", &s.endOnWall, 0.01f, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Position along the wall (0 = start, 1 = end)");
+                    }
+                    
+                    float col[4];
+                    col[0] = ((s.color >> 0) & 0xFF) / 255.0f;
+                    col[1] = ((s.color >> 8) & 0xFF) / 255.0f;
+                    col[2] = ((s.color >> 16) & 0xFF) / 255.0f;
+                    col[3] = ((s.color >> 24) & 0xFF) / 255.0f;
+                    if (ImGui::ColorEdit4("Color##Stair", col)) {
+                        s.color = IM_COL32(
+                            (int)(col[0] * 255), (int)(col[1] * 255),
+                            (int)(col[2] * 255), (int)(col[3] * 255));
+                    }
+                    break;
+                }
             }
             break;
         default:

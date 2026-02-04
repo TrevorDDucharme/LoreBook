@@ -85,7 +85,7 @@ int main(int argc, char** argv)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "LoreBook - ImGui Docking Demo", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "LoreBook - The Complete Fantasy Creation System", nullptr, nullptr);
     if (window == nullptr)
         return 1;
     glfwMakeContextCurrent(window);
@@ -201,6 +201,7 @@ int main(int argc, char** argv)
 
     // Vault state
     static bool firstDock = true;
+    static bool worldMapOpen = true;
     std::unique_ptr<Vault> vault;
 
     // Graph view (and chat)
@@ -336,6 +337,8 @@ int main(int argc, char** argv)
             // Dock both Graph and Chat into the right node so they appear as tabs together
             ImGui::DockBuilderDockWindow("Vault Graph", dock_id_right);
             ImGui::DockBuilderDockWindow("Vault Chat", dock_id_right);
+            ImGui::DockBuilderDockWindow("World Map", dock_main_id);
+            ImGui::DockBuilderDockWindow("Floor Plan Editor", dock_main_id);
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }
@@ -382,6 +385,9 @@ int main(int argc, char** argv)
                     showChatWindow = !showChatWindow;
                 }
                 ImGui::Separator();
+                if(ImGui::MenuItem("World Map", nullptr, worldMapOpen)){
+                    worldMapOpen = !worldMapOpen;
+                }
                 if(ImGui::MenuItem("Floor Plan Editor", nullptr, floorPlanEditor.isOpen())){
                     floorPlanEditor.toggleOpen();
                 }
@@ -1197,7 +1203,7 @@ int main(int argc, char** argv)
             ImGui::End();
         }
 
-        worldMap();
+        worldMap(worldMapOpen);
 
         // Floor Plan Editor
         floorPlanEditor.render();

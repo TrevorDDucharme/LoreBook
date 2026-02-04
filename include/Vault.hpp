@@ -33,6 +33,15 @@ struct VaultConfig
     bool createIfMissing = true; // if true attempt to create DB/tables when opening remote
 };
 
+// Floor plan template info (used by Vault template API)
+struct FloorPlanTemplateInfo {
+    int64_t id = 0;
+    std::string name;
+    std::string category;
+    std::string tags;
+    int64_t createdAt = 0;
+};
+
 class Vault
 {
     // forward declaration for chat render helper
@@ -256,6 +265,15 @@ public:
     bool isItemVisibleToUser(int64_t itemID, int64_t userID) const;
     bool isItemEditableByUser(int64_t itemID, int64_t userID) const;
     std::vector<std::pair<int64_t, std::string>> getAllItemsForUser(int64_t userID);
+
+    // Floor Plan Template API
+    int64_t saveFloorPlanTemplate(const std::string& name, const std::string& category, 
+                                  const std::string& templateJSON, const std::string& tags = "");
+    std::vector<FloorPlanTemplateInfo> listFloorPlanTemplates(const std::string& category = "");
+    std::string loadFloorPlanTemplate(int64_t templateID);
+    bool deleteFloorPlanTemplate(int64_t templateID);
+    bool updateFloorPlanTemplate(int64_t templateID, const std::string& name, 
+                                 const std::string& category, const std::string& tags);
 
     // Tag filter API (used by GraphView to filter tree)
     void setTagFilter(const std::vector<std::string> &tags, bool modeAll)
@@ -849,6 +867,34 @@ public:
                         if (aErr)
                             sqlite3_free(aErr);
                     }
+                }
+            }
+
+            // Ensure FloorPlanTemplates table exists for floor plan/building templates
+            {
+                const char *createTemplatesSQL = "CREATE TABLE IF NOT EXISTS FloorPlanTemplates ("
+                                                  "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                                  "Name TEXT NOT NULL, "
+                                                  "Category TEXT, "
+                                                  "TemplateJSON TEXT NOT NULL, "
+                                                  "ThumbnailData BLOB, "
+                                                  "Tags TEXT, "
+                                                  "CreatedAt INTEGER DEFAULT (strftime('%s','now'))"
+                                                  ");";
+                char *tErr = nullptr;
+                if (sqlite3_exec(dbConnection, createTemplatesSQL, nullptr, nullptr, &tErr) != SQLITE_OK)
+                {
+                    if (tErr)
+                        sqlite3_free(tErr);
+                }
+                
+                // Create index on Category for quick filtering
+                const char *idxTemplateSQL = "CREATE INDEX IF NOT EXISTS idx_FloorPlanTemplates_Category ON FloorPlanTemplates(Category);";
+                tErr = nullptr;
+                if (sqlite3_exec(dbConnection, idxTemplateSQL, nullptr, nullptr, &tErr) != SQLITE_OK)
+                {
+                    if (tErr)
+                        sqlite3_free(tErr);
                 }
             }
 
@@ -6768,4 +6814,130 @@ inline std::vector<std::pair<int64_t, std::string>> Vault::getAllItemsForUser(in
             out.push_back(p);
     }
     return out;
+}
+
+// ============================================================
+// Floor Plan Template CRUD Operations
+// ============================================================
+
+inline int64_t Vault::saveFloorPlanTemplate(const std::string& name, const std::string& category, 
+                                            const std::string& templateJSON, const std::string& tags)
+{
+    if (!dbConnection) return -1;
+    
+    const char* sql = "INSERT INTO FloorPlanTemplates (Name, Category, TemplateJSON, Tags) VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return -1;
+    }
+    
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, templateJSON.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, tags.c_str(), -1, SQLITE_TRANSIENT);
+    
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) return -1;
+    return sqlite3_last_insert_rowid(dbConnection);
+}
+
+inline std::vector<FloorPlanTemplateInfo> Vault::listFloorPlanTemplates(const std::string& category)
+{
+    std::vector<FloorPlanTemplateInfo> result;
+    if (!dbConnection) return result;
+    
+    std::string sql;
+    if (category.empty()) {
+        sql = "SELECT ID, Name, Category, Tags, CreatedAt FROM FloorPlanTemplates ORDER BY Name;";
+    } else {
+        sql = "SELECT ID, Name, Category, Tags, CreatedAt FROM FloorPlanTemplates WHERE Category = ? ORDER BY Name;";
+    }
+    
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return result;
+    }
+    
+    if (!category.empty()) {
+        sqlite3_bind_text(stmt, 1, category.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        FloorPlanTemplateInfo info;
+        info.id = sqlite3_column_int64(stmt, 0);
+        const unsigned char* n = sqlite3_column_text(stmt, 1);
+        if (n) info.name = reinterpret_cast<const char*>(n);
+        const unsigned char* c = sqlite3_column_text(stmt, 2);
+        if (c) info.category = reinterpret_cast<const char*>(c);
+        const unsigned char* t = sqlite3_column_text(stmt, 3);
+        if (t) info.tags = reinterpret_cast<const char*>(t);
+        info.createdAt = sqlite3_column_int64(stmt, 4);
+        result.push_back(info);
+    }
+    
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+inline std::string Vault::loadFloorPlanTemplate(int64_t templateID)
+{
+    if (!dbConnection) return "";
+    
+    const char* sql = "SELECT TemplateJSON FROM FloorPlanTemplates WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return "";
+    }
+    
+    sqlite3_bind_int64(stmt, 1, templateID);
+    
+    std::string result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* j = sqlite3_column_text(stmt, 0);
+        if (j) result = reinterpret_cast<const char*>(j);
+    }
+    
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+inline bool Vault::deleteFloorPlanTemplate(int64_t templateID)
+{
+    if (!dbConnection) return false;
+    
+    const char* sql = "DELETE FROM FloorPlanTemplates WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    
+    sqlite3_bind_int64(stmt, 1, templateID);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    return rc == SQLITE_DONE;
+}
+
+inline bool Vault::updateFloorPlanTemplate(int64_t templateID, const std::string& name, 
+                                           const std::string& category, const std::string& tags)
+{
+    if (!dbConnection) return false;
+    
+    const char* sql = "UPDATE FloorPlanTemplates SET Name = ?, Category = ?, Tags = ? WHERE ID = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    
+    sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, tags.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 4, templateID);
+    
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    return rc == SQLITE_DONE;
 }

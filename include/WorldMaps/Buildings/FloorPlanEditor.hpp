@@ -13,7 +13,11 @@ enum class FloorPlanTool {
     WallArc,        // Arc wall (3-point curve)
     WallBezier,     // Quadratic bezier wall
     WallCubic,      // Cubic bezier wall
+    WallBSpline,    // B-spline wall (4+ control points)
+    WallBezierSpline, // Connected Bezier spline (2+ control points)
     Room,
+    RoomFromWalls,  // Click inside enclosed walls to create room
+    RoomCurvedEdge, // Add curved edge to existing room
     Door,
     Window,
     Furniture,
@@ -89,9 +93,22 @@ private:
     void addCurveControlPoint(ImVec2 worldPos);
     void finishCurvedWallDrawing();
     
+    // Tool actions - spline walls (multi-point)
+    void startSplineDrawing(ImVec2 worldPos);
+    void addSplineControlPoint(ImVec2 worldPos);
+    void finishSplineDrawing(bool closed);
+    
     void startRoomDrawing(ImVec2 worldPos);
     void addRoomVertex(ImVec2 worldPos);
     void finishRoomDrawing();
+    
+    // Tool actions - room from walls
+    void createRoomFromWallsAt(ImVec2 worldPos);
+    
+    // Tool actions - room curved edges
+    void startRoomEdgeCurve(ImVec2 worldPos);  // Click near room edge to start
+    void addRoomEdgeControlPoint(ImVec2 worldPos);
+    void finishRoomEdgeCurve();
     
     void placeDoor(ImVec2 worldPos);
     void placeWindow(ImVec2 worldPos);
@@ -112,6 +129,7 @@ private:
     int m_selectedId = -1;
     int m_draggedControlPoint = -1;  // -1=none, 0=start, 1+=control points, N=end
     bool m_isDraggingControlPoint = false;
+    int m_selectedRoomEdge = -1;     // For room edge curve editing
     
     void clearSelection();
     

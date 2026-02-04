@@ -8,4 +8,4 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world);
 
 void globeMap(const char *label, ImVec2 texSize, World &world);
 
-void worldMap();
+void worldMap(bool& m_isOpen);

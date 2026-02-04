@@ -452,10 +452,10 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     ImGui::PopItemWidth();
 }
 
-void worldMap()
+void worldMap(bool& m_isOpen)
 {
     // Worldmap window
-    if (ImGui::Begin("World Map"))
+    if (ImGui::Begin("World Map", &m_isOpen, ImGuiWindowFlags_MenuBar))
     {
         static World world;
         static bool worldInitialized = false;
