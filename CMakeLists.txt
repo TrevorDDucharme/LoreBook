@@ -93,17 +93,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Tracy::TracyClient)
 if(EXISTS "/etc/redhat-release")
     # Tell CMake where the OpenCL library is
     set(OPENCL_LIB "/usr/lib64/libOpenCL.so")  # adjust path if different
+    # Add it to your target explicitly
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENCL_LIB})
 else()
     find_package(OpenCL CONFIG REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 endif()
 
-
-# Add it to your target explicitly
-target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENCL_LIB})
-
-# find_package(unofficial-whereami CONFIG REQUIRED)
-# target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::whereami::whereami)
 
 #ffmpeg
 find_package(PkgConfig REQUIRED)

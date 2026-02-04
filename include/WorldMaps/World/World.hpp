@@ -10,6 +10,7 @@
 #include <WorldMaps/Map/LandTypeLayer.hpp>
 #include <WorldMaps/Map/RiverLayer.hpp>
 #include <WorldMaps/Map/LatitudeLayer.hpp>
+#include <WorldMaps/Map/TectonicsLayer.hpp>
 #include <memory>
 #include <stack>
 #include <stringUtils.hpp>
@@ -136,6 +137,12 @@ public:
             else if (layerName == "river")
             {
                 auto layer = std::make_unique<RiverLayer>();
+                layer->parseParameters(layerParams);
+                addLayer(layerName, std::move(layer));
+            }
+            else if (layerName == "tectonics")
+            {
+                auto layer = std::make_unique<TectonicsLayer>();
                 layer->parseParameters(layerParams);
                 addLayer(layerName, std::move(layer));
             }

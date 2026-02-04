@@ -1,5 +1,4 @@
 TODO:
--[ ] Update Humidity.cl to improve ocean humidity model based on temperature.
 -[ ] Implement Building.
 -[ ] Implement Floor plan.
 -[ ] Implement Floor.
@@ -11,4 +10,8 @@ TODO:
 -[ ] Implement Window.
 -[ ] Implement Roof.
 -[ ] Implement Staircase.
+
+
+
+-[ ] Update Humidity.cl to improve ocean humidity model based on temperature.
 -[ ] fix sampling to sample dynamically instead of fixed latitude and longitude resolution.

@@ -469,6 +469,7 @@ void worldMap()
             world.addLayer("latitude", std::make_unique<LatitudeLayer>());
             world.addLayer("watertable", std::make_unique<WaterTableLayer>());
             world.addLayer("rivers", std::make_unique<RiverLayer>());
+            world.addLayer("tectonics", std::make_unique<TectonicsLayer>());
             worldInitialized = true;
         }
         static ImVec2 texSize(512, 512);

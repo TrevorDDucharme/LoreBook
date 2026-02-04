@@ -42,13 +42,13 @@ void MercatorProjection::project(World &world, int width, int height, GLuint &te
         }
         catch (const std::exception &ex)
         {
-            PLOGE << "mercatorProject() failed: " << ex.what();
+            //PLOGE << "mercatorProject() failed: " << ex.what();
             return;
         }
     }
     else
     {
-        PLOGE << "fieldBuffer is null; skipping mercatorProject";
+        //PLOGE << "fieldBuffer is null; skipping mercatorProject";
         return;
     }
 

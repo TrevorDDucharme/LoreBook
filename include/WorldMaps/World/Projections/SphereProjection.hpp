@@ -101,7 +101,7 @@ public:
         }
         else
         {
-            PLOGE << "fieldBuffer is null; skipping spherePerspectiveSample";
+            //PLOGE << "fieldBuffer is null; skipping spherePerspectiveSample";
             return;
         }
         // Recreate texture if needed or channels changed

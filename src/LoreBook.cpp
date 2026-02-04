@@ -30,6 +30,7 @@
 #include <plog/Appenders/ConsoleAppender.h>
 #include <plog/Formatters/TxtFormatter.h>
 #include <WorldMaps/WorldMap.hpp>
+#include <WorldMaps/Buildings/FloorPlanEditor.hpp>
 #include <future>
 
 static void glfw_error_callback(int error, const char* description)
@@ -40,6 +41,20 @@ static void glfw_error_callback(int error, const char* description)
 static void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     glViewport(0, 0, width, height);
+}
+
+// Center the next popup on the main viewport and set viewport so it stays attached when viewports are enabled.
+static inline void CenterNextPopupOnMainViewport()
+{
+    ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+    if (main_viewport)
+    {
+        ImVec2 center(main_viewport->WorkPos.x + main_viewport->WorkSize.x * 0.5f,
+                       main_viewport->WorkPos.y + main_viewport->WorkSize.y * 0.5f);
+        ImGui::SetNextWindowViewport(main_viewport->ID);
+        // Use Always so popups get re-centered even if they've already been opened on a previous frame
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    }
 }
 
 int main(int argc, char** argv)
@@ -192,6 +207,8 @@ int main(int argc, char** argv)
     static bool showGraphWindow = true;
     static bool showChatWindow = true; // chat will dock/tab with the graph
     static GraphView graphView;
+    // Floor Plan Editor
+    static FloorPlanEditor floorPlanEditor;
     // Create Vault modal state
     static bool showCreateVaultModal = false;
     static char createVaultDirBuf[1024];
@@ -363,6 +380,10 @@ int main(int argc, char** argv)
                 }
                 if(ImGui::MenuItem("Vault Chat", nullptr, showChatWindow, canViewVault)){
                     showChatWindow = !showChatWindow;
+                }
+                ImGui::Separator();
+                if(ImGui::MenuItem("Floor Plan Editor", nullptr, floorPlanEditor.isOpen())){
+                    floorPlanEditor.toggleOpen();
                 }
                 ImGui::EndMenu();
             }
@@ -704,6 +725,7 @@ int main(int argc, char** argv)
         }
 
         // Browse Directory modal (select a directory)
+        CenterNextPopupOnMainViewport();
         if(ImGui::BeginPopupModal("Browse Directory", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Select directory:");
             ImGui::Separator();
@@ -766,6 +788,7 @@ int main(int argc, char** argv)
         }
 
         // Select Vault File modal (choose a file in the directory)
+        CenterNextPopupOnMainViewport();
         if(ImGui::BeginPopupModal("Select Vault File", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Select file:");
             ImGui::Separator();
@@ -912,6 +935,7 @@ int main(int argc, char** argv)
         }
 
         if (showLoginModal && vault) { ImGui::OpenPopup("Login"); showLoginModal = false; authErrorBuf[0] = '\0'; }
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Login", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Please login to open the vault");
             ImGui::Separator();
@@ -1174,6 +1198,9 @@ int main(int argc, char** argv)
         }
 
         worldMap();
+
+        // Floor Plan Editor
+        floorPlanEditor.render();
 
         // Rendering
         ImGui::Render();
