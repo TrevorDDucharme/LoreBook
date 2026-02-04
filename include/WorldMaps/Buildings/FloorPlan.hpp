@@ -1042,43 +1042,275 @@ struct Furniture {
 };
 
 // ============================================================
+// Staircase curve type
+// ============================================================
+enum class StaircaseType {
+    Straight = 0,
+    QuadraticBezier,
+    CubicBezier,
+    Arc,
+    BSpline,
+    BezierSpline
+};
+
+// ============================================================
 // Staircase - Connects floors
 // ============================================================
 struct Staircase {
     int id = 0;
-    ImVec2 position{0, 0};
-    ImVec2 size{1, 3};         // width x length
-    float rotation = 0;        // radians
+    ImVec2 start{0, 0};        // Start point of staircase centerline
+    ImVec2 end{0, 3};          // End point of staircase centerline
+    float width = 1.0f;        // Width of staircase
     int connectsToFloor = -1;  // Floor index this connects to
     int numSteps = 12;
     ImU32 color = IM_COL32(105, 105, 105, 255);  // dim gray
     
-    // For curved staircases following a wall
-    int wallId = -1;           // Wall to follow (-1 = straight staircase)
-    float startOnWall = 0.0f;  // Start position on wall (0-1)
-    float endOnWall = 1.0f;    // End position on wall (0-1)
-    
-    // Get rotated corner points (for rendering straight stairs)
-    void getCorners(ImVec2 outCorners[4]) const {
-        float c = cosf(rotation);
-        float s = sinf(rotation);
-        float hw = size.x * 0.5f;
-        float hl = size.y * 0.5f;
-        // Local corners: TL, TR, BR, BL
-        ImVec2 local[4] = {
-            ImVec2(-hw, -hl), ImVec2(hw, -hl),
-            ImVec2(hw, hl), ImVec2(-hw, hl)
-        };
-        for (int i = 0; i < 4; i++) {
-            outCorners[i] = ImVec2(
-                position.x + local[i].x * c - local[i].y * s,
-                position.y + local[i].x * s + local[i].y * c
-            );
-        }
-    }
+    // Curve definition (like walls)
+    StaircaseType curveType = StaircaseType::Straight;
+    std::vector<ImVec2> controlPoints;  // Control points for curved stairs
+    int curveSegments = 20;    // Sampling resolution
+    bool isClosed = false;     // For spiral staircases (rare)
     
     // Check if this is a curved staircase
-    bool isCurved() const { return wallId >= 0; }
+    bool isCurved() const { return curveType != StaircaseType::Straight; }
+    
+    // Get center position (for selection/UI)
+    ImVec2 center() const {
+        if (!isCurved()) {
+            return ImVec2((start.x + end.x) * 0.5f, (start.y + end.y) * 0.5f);
+        }
+        // For curves, return point at t=0.5
+        return pointAt(0.5f);
+    }
+    
+    // Get sampled points along the staircase centerline
+    std::vector<ImVec2> getSampledPoints() const {
+        std::vector<ImVec2> points;
+        switch (curveType) {
+            case StaircaseType::Straight:
+                points.push_back(start);
+                points.push_back(end);
+                break;
+            case StaircaseType::QuadraticBezier:
+                if (controlPoints.size() >= 1) {
+                    points = BezierUtil::sampleQuadratic(start, controlPoints[0], end, curveSegments);
+                } else {
+                    points.push_back(start);
+                    points.push_back(end);
+                }
+                break;
+            case StaircaseType::CubicBezier:
+                if (controlPoints.size() >= 2) {
+                    points = BezierUtil::sampleCubic(start, controlPoints[0], controlPoints[1], end, curveSegments);
+                } else if (controlPoints.size() == 1) {
+                    points = BezierUtil::sampleQuadratic(start, controlPoints[0], end, curveSegments);
+                } else {
+                    points.push_back(start);
+                    points.push_back(end);
+                }
+                break;
+            case StaircaseType::Arc:
+                if (controlPoints.size() >= 1) {
+                    ImVec2 center;
+                    float radius, startAngle, endAngle;
+                    if (ArcUtil::arcFrom3Points(start, controlPoints[0], end, center, radius, startAngle, endAngle)) {
+                        points = ArcUtil::sampleArc(center, radius, startAngle, endAngle, curveSegments);
+                    } else {
+                        points.push_back(start);
+                        points.push_back(end);
+                    }
+                } else {
+                    points.push_back(start);
+                    points.push_back(end);
+                }
+                break;
+            case StaircaseType::BSpline:
+                if (controlPoints.size() >= 2) {
+                    std::vector<ImVec2> allPts;
+                    allPts.push_back(start);
+                    for (const auto& cp : controlPoints) allPts.push_back(cp);
+                    if (!isClosed) allPts.push_back(end);
+                    points = BSplineUtil::sampleBSpline(allPts, curveSegments / 2, isClosed);
+                } else {
+                    points.push_back(start);
+                    for (const auto& cp : controlPoints) points.push_back(cp);
+                    points.push_back(end);
+                }
+                break;
+            case StaircaseType::BezierSpline:
+                {
+                    std::vector<ImVec2> allPts;
+                    allPts.push_back(start);
+                    for (const auto& cp : controlPoints) allPts.push_back(cp);
+                    if (!isClosed) allPts.push_back(end);
+                    points = BSplineUtil::sampleBezierSpline(allPts, curveSegments, isClosed);
+                }
+                break;
+        }
+        return points;
+    }
+    
+    // Get point at parameter t (0 to 1)
+    ImVec2 pointAt(float t) const {
+        switch (curveType) {
+            case StaircaseType::Straight:
+                return ImVec2(start.x + t * (end.x - start.x), start.y + t * (end.y - start.y));
+            case StaircaseType::QuadraticBezier:
+                if (controlPoints.size() >= 1) {
+                    return BezierUtil::evalQuadratic(start, controlPoints[0], end, t);
+                }
+                break;
+            case StaircaseType::CubicBezier:
+                if (controlPoints.size() >= 2) {
+                    return BezierUtil::evalCubic(start, controlPoints[0], controlPoints[1], end, t);
+                }
+                break;
+            case StaircaseType::Arc:
+                if (controlPoints.size() >= 1) {
+                    ImVec2 ctr;
+                    float radius, startAngle, endAngle;
+                    if (ArcUtil::arcFrom3Points(start, controlPoints[0], end, ctr, radius, startAngle, endAngle)) {
+                        float angle = startAngle + t * (endAngle - startAngle);
+                        return ImVec2(ctr.x + radius * cosf(angle), ctr.y + radius * sinf(angle));
+                    }
+                }
+                break;
+            case StaircaseType::BSpline:
+            case StaircaseType::BezierSpline:
+                {
+                    auto samples = getSampledPoints();
+                    if (samples.empty()) break;
+                    if (samples.size() == 1) return samples[0];
+                    float totalLen = BezierUtil::curveLength(samples);
+                    float targetLen = t * totalLen;
+                    float accum = 0.0f;
+                    for (size_t i = 1; i < samples.size(); i++) {
+                        float dx = samples[i].x - samples[i-1].x;
+                        float dy = samples[i].y - samples[i-1].y;
+                        float segLen = sqrtf(dx * dx + dy * dy);
+                        if (accum + segLen >= targetLen && segLen > 0) {
+                            float frac = (targetLen - accum) / segLen;
+                            return ImVec2(samples[i-1].x + frac * dx, samples[i-1].y + frac * dy);
+                        }
+                        accum += segLen;
+                    }
+                    return samples.back();
+                }
+        }
+        return ImVec2(start.x + t * (end.x - start.x), start.y + t * (end.y - start.y));
+    }
+    
+    // Get tangent at parameter t (0 to 1)
+    ImVec2 tangentAt(float t) const {
+        switch (curveType) {
+            case StaircaseType::Straight: {
+                float dx = end.x - start.x;
+                float dy = end.y - start.y;
+                float len = sqrtf(dx * dx + dy * dy);
+                return len > 0 ? ImVec2(dx / len, dy / len) : ImVec2(1, 0);
+            }
+            case StaircaseType::QuadraticBezier:
+                if (controlPoints.size() >= 1) {
+                    return BezierUtil::tangentQuadratic(start, controlPoints[0], end, t);
+                }
+                break;
+            case StaircaseType::CubicBezier:
+                if (controlPoints.size() >= 2) {
+                    return BezierUtil::tangentCubic(start, controlPoints[0], controlPoints[1], end, t);
+                }
+                break;
+            case StaircaseType::Arc:
+                if (controlPoints.size() >= 1) {
+                    ImVec2 ctr;
+                    float radius, startAngle, endAngle;
+                    if (ArcUtil::arcFrom3Points(start, controlPoints[0], end, ctr, radius, startAngle, endAngle)) {
+                        float angle = startAngle + t * (endAngle - startAngle);
+                        return ImVec2(-sinf(angle), cosf(angle));
+                    }
+                }
+                break;
+            case StaircaseType::BSpline:
+            case StaircaseType::BezierSpline:
+                {
+                    auto samples = getSampledPoints();
+                    if (samples.size() < 2) break;
+                    float totalLen = BezierUtil::curveLength(samples);
+                    float targetLen = t * totalLen;
+                    float accum = 0.0f;
+                    for (size_t i = 1; i < samples.size(); i++) {
+                        float dx = samples[i].x - samples[i-1].x;
+                        float dy = samples[i].y - samples[i-1].y;
+                        float segLen = sqrtf(dx * dx + dy * dy);
+                        if (accum + segLen >= targetLen || i == samples.size() - 1) {
+                            float len = sqrtf(dx * dx + dy * dy);
+                            if (len > 0) return ImVec2(dx / len, dy / len);
+                            break;
+                        }
+                        accum += segLen;
+                    }
+                }
+                break;
+        }
+        float dx = end.x - start.x;
+        float dy = end.y - start.y;
+        float len = sqrtf(dx * dx + dy * dy);
+        return len > 0 ? ImVec2(dx / len, dy / len) : ImVec2(1, 0);
+    }
+    
+    // Get normal at parameter t
+    ImVec2 normalAt(float t) const {
+        ImVec2 tan = tangentAt(t);
+        return ImVec2(-tan.y, tan.x);
+    }
+    
+    // Get approximate length
+    float length() const {
+        if (curveType == StaircaseType::Straight) {
+            float dx = end.x - start.x;
+            float dy = end.y - start.y;
+            return sqrtf(dx * dx + dy * dy);
+        }
+        return BezierUtil::curveLength(getSampledPoints());
+    }
+    
+    // Setters for curve types (similar to Wall)
+    void setStraight() {
+        curveType = StaircaseType::Straight;
+        controlPoints.clear();
+    }
+    
+    void setQuadraticBezier(const ImVec2& controlPt) {
+        curveType = StaircaseType::QuadraticBezier;
+        controlPoints.clear();
+        controlPoints.push_back(controlPt);
+    }
+    
+    void setCubicBezier(const ImVec2& cp1, const ImVec2& cp2) {
+        curveType = StaircaseType::CubicBezier;
+        controlPoints.clear();
+        controlPoints.push_back(cp1);
+        controlPoints.push_back(cp2);
+    }
+    
+    void setArc(const ImVec2& throughPt) {
+        curveType = StaircaseType::Arc;
+        controlPoints.clear();
+        controlPoints.push_back(throughPt);
+    }
+    
+    void setBSpline(const std::vector<ImVec2>& pts, bool closed = false) {
+        curveType = StaircaseType::BSpline;
+        controlPoints = pts;
+        isClosed = closed;
+        if (closed) end = start;
+    }
+    
+    void setBezierSpline(const std::vector<ImVec2>& pts, bool closed = false) {
+        curveType = StaircaseType::BezierSpline;
+        controlPoints = pts;
+        isClosed = closed;
+        if (closed) end = start;
+    }
 };
 
 // ============================================================
@@ -1670,30 +1902,52 @@ namespace FloorPlanJSON {
     inline json toJson(const Staircase& s) {
         json j;
         j["id"] = s.id;
-        j["position"] = toJson(s.position);
-        j["size"] = toJson(s.size);
-        j["rotation"] = s.rotation;
+        j["start"] = toJson(s.start);
+        j["end"] = toJson(s.end);
+        j["width"] = s.width;
         j["connectsToFloor"] = s.connectsToFloor;
         j["numSteps"] = s.numSteps;
         j["color"] = s.color;
-        j["wallId"] = s.wallId;
-        j["startOnWall"] = s.startOnWall;
-        j["endOnWall"] = s.endOnWall;
+        j["curveType"] = static_cast<int>(s.curveType);
+        j["curveSegments"] = s.curveSegments;
+        j["isClosed"] = s.isClosed;
+        json cps = json::array();
+        for (const auto& cp : s.controlPoints) cps.push_back(toJson(cp));
+        j["controlPoints"] = cps;
         return j;
     }
     
     inline Staircase staircaseFromJson(const json& j) {
         Staircase s;
         s.id = j.value("id", 0);
-        s.position = vec2FromJson(j["position"]);
-        s.size = j.contains("size") ? vec2FromJson(j["size"]) : ImVec2(1, 3);
-        s.rotation = j.value("rotation", 0.0f);
+        // Support legacy format with position/size/rotation
+        if (j.contains("position")) {
+            ImVec2 pos = vec2FromJson(j["position"]);
+            ImVec2 size = j.contains("size") ? vec2FromJson(j["size"]) : ImVec2(1, 3);
+            float rotation = j.value("rotation", 0.0f);
+            // Convert to start/end based on position, size, rotation
+            float c = cosf(rotation);
+            float sn = sinf(rotation);
+            float hl = size.y * 0.5f;
+            s.start = ImVec2(pos.x - sn * hl, pos.y - c * hl);
+            s.end = ImVec2(pos.x + sn * hl, pos.y + c * hl);
+            s.width = size.x;
+        } else {
+            s.start = vec2FromJson(j["start"]);
+            s.end = vec2FromJson(j["end"]);
+            s.width = j.value("width", 1.0f);
+        }
         s.connectsToFloor = j.value("connectsToFloor", -1);
         s.numSteps = j.value("numSteps", 12);
         s.color = j.value("color", IM_COL32(105, 105, 105, 255));
-        s.wallId = j.value("wallId", -1);
-        s.startOnWall = j.value("startOnWall", 0.0f);
-        s.endOnWall = j.value("endOnWall", 1.0f);
+        s.curveType = static_cast<StaircaseType>(j.value("curveType", 0));
+        s.curveSegments = j.value("curveSegments", 20);
+        s.isClosed = j.value("isClosed", false);
+        if (j.contains("controlPoints")) {
+            for (const auto& cp : j["controlPoints"]) {
+                s.controlPoints.push_back(vec2FromJson(cp));
+            }
+        }
         return s;
     }
     

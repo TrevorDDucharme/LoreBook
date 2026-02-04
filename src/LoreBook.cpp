@@ -32,6 +32,8 @@
 #include <WorldMaps/WorldMap.hpp>
 #include <WorldMaps/Buildings/FloorPlanEditor.hpp>
 #include <future>
+#include <CharacterEditor/ModelLoader.hpp>
+#include <CharacterEditor/CharacterEditorUI.hpp>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -210,6 +212,8 @@ int main(int argc, char** argv)
     static GraphView graphView;
     // Floor Plan Editor
     static FloorPlanEditor floorPlanEditor;
+    // Character Editor
+    static CharacterEditor::CharacterEditorUI characterEditor;
     // Create Vault modal state
     static bool showCreateVaultModal = false;
     static char createVaultDirBuf[1024];
@@ -294,6 +298,14 @@ int main(int argc, char** argv)
     createVaultDirBuf[sizeof(createVaultDirBuf)-1] = '\0';
     strncpy(openVaultDirBuf, std::filesystem::current_path().string().c_str(), sizeof(openVaultDirBuf));
     openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
+
+    // Auto-load a test model into the Character Editor if present (for development)
+    if (std::filesystem::exists("./Ursine.fbx")) {
+        characterEditor.setOpen(true);
+        if (characterEditor.loadModel("./Ursine.fbx")) {
+            PLOGI << "Auto-loaded test model into Character Editor";
+        }
+    }
 
 
     // Main loop
@@ -390,6 +402,10 @@ int main(int argc, char** argv)
                 }
                 if(ImGui::MenuItem("Floor Plan Editor", nullptr, floorPlanEditor.isOpen())){
                     floorPlanEditor.toggleOpen();
+                }
+                ImGui::Separator();
+                if(ImGui::MenuItem("Character Editor", nullptr, characterEditor.isOpen())){
+                    characterEditor.toggleOpen();
                 }
                 ImGui::EndMenu();
             }
@@ -1207,6 +1223,9 @@ int main(int argc, char** argv)
 
         // Floor Plan Editor
         floorPlanEditor.render();
+
+        // Character Editor
+        characterEditor.render();
 
         // Rendering
         ImGui::Render();

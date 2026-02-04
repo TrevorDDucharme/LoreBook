@@ -575,127 +575,75 @@ void FloorPlanEditor::renderStaircases(ImDrawList* drawList)
             color = IM_COL32(100, 150, 255, 255);
         }
         
-        if (stair.isCurved()) {
-            // Curved staircase following a wall
-            const Wall* wall = nullptr;
-            for (const Wall& w : floor->plan.walls) {
-                if (w.id == stair.wallId) {
-                    wall = &w;
-                    break;
-                }
+        // Sample points along the staircase centerline
+        float width = stair.width;
+        int numSegments = stair.numSteps;
+        std::vector<ImVec2> centerPts;
+        std::vector<ImVec2> leftPts;
+        std::vector<ImVec2> rightPts;
+        
+        for (int i = 0; i <= numSegments; i++) {
+            float t = (float)i / numSegments;
+            ImVec2 pos = stair.pointAt(t);
+            ImVec2 tangent = stair.tangentAt(t);
+            ImVec2 normal(-tangent.y, tangent.x);
+            
+            centerPts.push_back(pos);
+            leftPts.push_back(ImVec2(pos.x - normal.x * width * 0.5f, pos.y - normal.y * width * 0.5f));
+            rightPts.push_back(ImVec2(pos.x + normal.x * width * 0.5f, pos.y + normal.y * width * 0.5f));
+        }
+        
+        // Draw stair segments
+        for (int i = 0; i < numSegments; i++) {
+            ImVec2 tl = worldToScreen(leftPts[i]);
+            ImVec2 tr = worldToScreen(rightPts[i]);
+            ImVec2 br = worldToScreen(rightPts[i + 1]);
+            ImVec2 bl = worldToScreen(leftPts[i + 1]);
+            
+            drawList->AddQuadFilled(tl, tr, br, bl, color);
+            drawList->AddLine(tl, tr, IM_COL32(0, 0, 0, 100), 1.0f);
+        }
+        // Draw outer edges
+        for (int i = 0; i < numSegments; i++) {
+            ImVec2 l1 = worldToScreen(leftPts[i]);
+            ImVec2 l2 = worldToScreen(leftPts[i + 1]);
+            ImVec2 r1 = worldToScreen(rightPts[i]);
+            ImVec2 r2 = worldToScreen(rightPts[i + 1]);
+            drawList->AddLine(l1, l2, IM_COL32(0, 0, 0, 150), 1.0f);
+            drawList->AddLine(r1, r2, IM_COL32(0, 0, 0, 150), 1.0f);
+        }
+        
+        // Draw direction arrow at start
+        if (!centerPts.empty()) {
+            ImVec2 arrowPos = worldToScreen(centerPts[0]);
+            ImVec2 tangent = stair.tangentAt(0);
+            ImVec2 normal(-tangent.y, tangent.x);
+            // Screen space arrow (Y flipped)
+            float arrowSize = 8.0f;
+            ImVec2 tip = ImVec2(arrowPos.x + tangent.x * arrowSize, arrowPos.y - tangent.y * arrowSize);
+            ImVec2 left = ImVec2(arrowPos.x - normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
+                                 arrowPos.y + normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
+            ImVec2 right = ImVec2(arrowPos.x + normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
+                                  arrowPos.y - normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
+            drawList->AddTriangleFilled(tip, left, right, IM_COL32(255, 255, 255, 150));
+        }
+        
+        // Draw control points if selected and curved
+        if (m_selectionType == SelectionType::Staircase && m_selectedId == stair.id && 
+            stair.isCurved() && m_showControlPoints) {
+            // Start point
+            ImVec2 startScreen = worldToScreen(stair.start);
+            drawList->AddCircleFilled(startScreen, 6.0f, IM_COL32(0, 255, 0, 255));
+            // End point
+            ImVec2 endScreen = worldToScreen(stair.end);
+            drawList->AddCircleFilled(endScreen, 6.0f, IM_COL32(255, 0, 0, 255));
+            // Control points
+            for (const auto& cp : stair.controlPoints) {
+                ImVec2 cpScreen = worldToScreen(cp);
+                drawList->AddCircleFilled(cpScreen, 5.0f, IM_COL32(255, 200, 100, 255));
+                // Draw lines to adjacent points
+                drawList->AddLine(startScreen, cpScreen, IM_COL32(255, 200, 100, 100), 1.0f);
             }
-            if (!wall) continue;
-            
-            // Sample points along the wall from startOnWall to endOnWall
-            float width = stair.size.x;
-            int numSegments = stair.numSteps;
-            std::vector<ImVec2> centerPts;
-            std::vector<ImVec2> leftPts;
-            std::vector<ImVec2> rightPts;
-            
-            for (int i = 0; i <= numSegments; i++) {
-                float t = stair.startOnWall + (stair.endOnWall - stair.startOnWall) * i / numSegments;
-                ImVec2 pos = wall->pointAt(t);
-                ImVec2 tangent = wall->tangentAt(t);
-                // Normal perpendicular to tangent (tangentAt already normalized)
-                ImVec2 normal(-tangent.y, tangent.x);
-                
-                centerPts.push_back(pos);
-                leftPts.push_back(ImVec2(pos.x - normal.x * width * 0.5f, pos.y - normal.y * width * 0.5f));
-                rightPts.push_back(ImVec2(pos.x + normal.x * width * 0.5f, pos.y + normal.y * width * 0.5f));
-            }
-            
-            // Draw stair segments
-            for (int i = 0; i < numSegments; i++) {
-                ImVec2 tl = worldToScreen(leftPts[i]);
-                ImVec2 tr = worldToScreen(rightPts[i]);
-                ImVec2 br = worldToScreen(rightPts[i + 1]);
-                ImVec2 bl = worldToScreen(leftPts[i + 1]);
-                
-                drawList->AddQuadFilled(tl, tr, br, bl, color);
-                drawList->AddLine(tl, tr, IM_COL32(0, 0, 0, 100), 1.0f);
-            }
-            // Draw outer edges
-            for (int i = 0; i < numSegments; i++) {
-                ImVec2 l1 = worldToScreen(leftPts[i]);
-                ImVec2 l2 = worldToScreen(leftPts[i + 1]);
-                ImVec2 r1 = worldToScreen(rightPts[i]);
-                ImVec2 r2 = worldToScreen(rightPts[i + 1]);
-                drawList->AddLine(l1, l2, IM_COL32(0, 0, 0, 150), 1.0f);
-                drawList->AddLine(r1, r2, IM_COL32(0, 0, 0, 150), 1.0f);
-            }
-            
-            // Draw direction arrow at start
-            if (!centerPts.empty()) {
-                ImVec2 arrowPos = worldToScreen(centerPts[0]);
-                ImVec2 tangent = centerPts.size() > 1 ? 
-                    ImVec2(centerPts[1].x - centerPts[0].x, centerPts[1].y - centerPts[0].y) : 
-                    ImVec2(0, 1);
-                float len = sqrtf(tangent.x * tangent.x + tangent.y * tangent.y);
-                if (len > 0.0001f) {
-                    tangent.x /= len;
-                    tangent.y /= len;
-                }
-                ImVec2 normal(-tangent.y, tangent.x);
-                // Screen space arrow (Y flipped)
-                float arrowSize = 8.0f;
-                ImVec2 tip = ImVec2(arrowPos.x + tangent.x * arrowSize, arrowPos.y - tangent.y * arrowSize);
-                ImVec2 left = ImVec2(arrowPos.x - normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
-                                     arrowPos.y + normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
-                ImVec2 right = ImVec2(arrowPos.x + normal.x * arrowSize * 0.5f - tangent.x * arrowSize * 0.3f,
-                                      arrowPos.y - normal.y * arrowSize * 0.5f + tangent.y * arrowSize * 0.3f);
-                drawList->AddTriangleFilled(tip, left, right, IM_COL32(255, 255, 255, 150));
-            }
-        } else {
-            // Straight staircase with rotation
-            ImVec2 worldCorners[4];
-            stair.getCorners(worldCorners);
-            ImVec2 screenCorners[4];
-            for (int i = 0; i < 4; i++) {
-                screenCorners[i] = worldToScreen(worldCorners[i]);
-            }
-            
-            // Draw filled quad
-            drawList->AddQuadFilled(
-                screenCorners[0], screenCorners[1], screenCorners[2], screenCorners[3],
-                color);
-            
-            // Draw steps along the length of the staircase
-            float c = cosf(stair.rotation);
-            float s = sinf(stair.rotation);
-            float hw = stair.size.x * 0.5f;
-            float hl = stair.size.y * 0.5f;
-            float stepLen = stair.size.y / stair.numSteps;
-            
-            for (int i = 1; i < stair.numSteps; i++) {
-                float localY = -hl + i * stepLen;
-                // Left and right points at this step in local coords
-                ImVec2 localLeft(-hw, localY);
-                ImVec2 localRight(hw, localY);
-                // Rotate and translate to world
-                ImVec2 worldLeft(
-                    stair.position.x + localLeft.x * c - localLeft.y * s,
-                    stair.position.y + localLeft.x * s + localLeft.y * c
-                );
-                ImVec2 worldRight(
-                    stair.position.x + localRight.x * c - localRight.y * s,
-                    stair.position.y + localRight.x * s + localRight.y * c
-                );
-                ImVec2 screenLeft = worldToScreen(worldLeft);
-                ImVec2 screenRight = worldToScreen(worldRight);
-                drawList->AddLine(screenLeft, screenRight, IM_COL32(0, 0, 0, 100), 1.0f);
-            }
-            
-            // Arrow indicating direction (at start of staircase)
-            ImVec2 screenPos = worldToScreen(stair.position);
-            // Direction is "up" in local space (+Y), rotated
-            float arrowLen = worldToScreenScale(stair.size.y * 0.3f);
-            // In screen space: Y is flipped, so rotation needs adjustment
-            ImVec2 arrowTip(screenPos.x + s * arrowLen, screenPos.y - c * arrowLen);
-            // Draw small triangle
-            ImVec2 arrowLeft(arrowTip.x - c * 8 - s * 4, arrowTip.y - s * 8 + c * 4);
-            ImVec2 arrowRight(arrowTip.x + c * 8 - s * 4, arrowTip.y + s * 8 + c * 4);
-            drawList->AddTriangleFilled(arrowTip, arrowLeft, arrowRight, IM_COL32(255, 255, 255, 150));
         }
     }
 }
@@ -1712,8 +1660,10 @@ void FloorPlanEditor::placeStaircase(ImVec2 worldPos)
     
     Staircase stair;
     stair.id = floor->plan.nextStaircaseId++;
-    stair.position = worldPos;
-    stair.size = ImVec2(1.0f, 3.0f);
+    // Default staircase: 1m wide, 3m long, vertical orientation
+    stair.start = ImVec2(worldPos.x, worldPos.y - 1.5f);
+    stair.end = ImVec2(worldPos.x, worldPos.y + 1.5f);
+    stair.width = 1.0f;
     floor->plan.staircases.push_back(stair);
 }
 
@@ -1752,12 +1702,33 @@ void FloorPlanEditor::selectAt(ImVec2 worldPos)
     
     // Check staircases
     for (auto& stair : floor->plan.staircases) {
-        ImVec2 half = ImVec2(stair.size.x * 0.5f, stair.size.y * 0.5f);
-        if (worldPos.x >= stair.position.x - half.x && worldPos.x <= stair.position.x + half.x &&
-            worldPos.y >= stair.position.y - half.y && worldPos.y <= stair.position.y + half.y) {
-            m_selectionType = SelectionType::Staircase;
-            m_selectedId = stair.id;
-            return;
+        // Check distance from centerline of staircase
+        // Sample a few points and check if click is within width/2 of any segment
+        int numSamples = 10;
+        float halfWidth = stair.width * 0.5f;
+        for (int i = 0; i < numSamples; i++) {
+            float t0 = (float)i / numSamples;
+            float t1 = (float)(i + 1) / numSamples;
+            ImVec2 p0 = stair.pointAt(t0);
+            ImVec2 p1 = stair.pointAt(t1);
+            
+            // Point to segment distance
+            float dx = p1.x - p0.x;
+            float dy = p1.y - p0.y;
+            float segLenSq = dx * dx + dy * dy;
+            float t = 0.0f;
+            if (segLenSq > 0.0001f) {
+                t = ((worldPos.x - p0.x) * dx + (worldPos.y - p0.y) * dy) / segLenSq;
+                t = std::max(0.0f, std::min(1.0f, t));
+            }
+            ImVec2 closest(p0.x + t * dx, p0.y + t * dy);
+            float distSq = (worldPos.x - closest.x) * (worldPos.x - closest.x) + 
+                          (worldPos.y - closest.y) * (worldPos.y - closest.y);
+            if (distSq <= halfWidth * halfWidth) {
+                m_selectionType = SelectionType::Staircase;
+                m_selectedId = stair.id;
+                return;
+            }
         }
     }
 }
@@ -2059,64 +2030,122 @@ void FloorPlanEditor::renderPropertiesPanel()
             for (auto& s : floor->plan.staircases) {
                 if (s.id == m_selectedId) {
                     ImGui::Text("Staircase #%d", s.id);
+                    ImGui::Text("Length: %.2f m", s.length());
                     
-                    ImGui::DragFloat2("Position##Stair", &s.position.x, 0.1f);
-                    ImGui::DragFloat2("Size (W x L)##Stair", &s.size.x, 0.1f, 0.1f, 10.0f, "%.2f m");
+                    ImGui::DragFloat2("Start##Stair", &s.start.x, 0.1f);
+                    ImGui::DragFloat2("End##Stair", &s.end.x, 0.1f);
+                    ImGui::DragFloat("Width##Stair", &s.width, 0.1f, 0.3f, 5.0f, "%.2f m");
                     
-                    // Rotation in degrees
-                    float rotDeg = s.rotation * 180.0f / 3.14159265f;
-                    if (ImGui::DragFloat("Rotation##Stair", &rotDeg, 1.0f, -180.0f, 180.0f, "%.1f°")) {
-                        s.rotation = rotDeg * 3.14159265f / 180.0f;
-                    }
-                    // Quick rotation buttons
-                    if (ImGui::Button("0°##Stair")) s.rotation = 0.0f;
-                    ImGui::SameLine();
-                    if (ImGui::Button("90°##Stair")) s.rotation = 3.14159265f / 2.0f;
-                    ImGui::SameLine();
-                    if (ImGui::Button("180°##Stair")) s.rotation = 3.14159265f;
-                    ImGui::SameLine();
-                    if (ImGui::Button("-90°##Stair")) s.rotation = -3.14159265f / 2.0f;
-                    
-                    ImGui::DragInt("Steps##Stair", &s.numSteps, 1.0f, 3, 30);
+                    ImGui::DragInt("Steps##Stair", &s.numSteps, 1.0f, 3, 50);
                     ImGui::DragInt("Connects to Floor##Stair", &s.connectsToFloor, 1.0f, -5, 20);
                     
-                    // Curved staircase settings
-                    ImGui::Separator();
-                    ImGui::Text("Curved Staircase:");
-                    
-                    // Build list of wall IDs for dropdown
-                    std::vector<const char*> wallOptions;
-                    std::vector<int> wallIds;
-                    wallOptions.push_back("None (Straight)");
-                    wallIds.push_back(-1);
-                    for (const auto& w : floor->plan.walls) {
-                        if (w.isCurved()) {
-                            static std::vector<std::string> wallLabels; // Persist labels
-                            wallLabels.push_back("Wall #" + std::to_string(w.id));
-                            wallOptions.push_back(wallLabels.back().c_str());
-                            wallIds.push_back(w.id);
-                        }
-                    }
-                    
-                    int currentWallIdx = 0;
-                    for (size_t i = 0; i < wallIds.size(); i++) {
-                        if (wallIds[i] == s.wallId) {
-                            currentWallIdx = (int)i;
-                            break;
-                        }
-                    }
-                    
-                    if (ImGui::Combo("Follow Wall##Stair", &currentWallIdx, wallOptions.data(), (int)wallOptions.size())) {
-                        s.wallId = wallIds[currentWallIdx];
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Select a curved wall to create a curved staircase");
+                    // Curve type info
+                    const char* typeNames[] = { "Straight", "Quadratic Bezier", "Cubic Bezier", "Arc", "B-Spline (approx)", "Bezier Spline (interp)" };
+                    ImGui::Text("Type: %s", typeNames[static_cast<int>(s.curveType)]);
                     
                     if (s.isCurved()) {
-                        ImGui::DragFloat("Start Position##Stair", &s.startOnWall, 0.01f, 0.0f, 1.0f, "%.2f");
-                        ImGui::DragFloat("End Position##Stair", &s.endOnWall, 0.01f, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Position along the wall (0 = start, 1 = end)");
+                        ImGui::Checkbox("Show Control Points##Stair", &m_showControlPoints);
+                        ImGui::SliderInt("Curve Segments##Stair", &s.curveSegments, 5, 50);
+                        
+                        // Closed toggle for spline types
+                        if (s.curveType == StaircaseType::BSpline || s.curveType == StaircaseType::BezierSpline) {
+                            if (ImGui::Checkbox("Closed Loop##Stair", &s.isClosed)) {
+                                if (s.isClosed) s.end = s.start;
+                            }
+                        }
+                        
+                        ImGui::Text("Control Points: %zu", s.controlPoints.size());
+                        
+                        // Edit control points
+                        for (size_t i = 0; i < s.controlPoints.size(); i++) {
+                            char label[32];
+                            snprintf(label, sizeof(label), "CP %zu##Stair", i + 1);
+                            ImGui::DragFloat2(label, &s.controlPoints[i].x, 0.1f);
+                        }
+                        
+                        // Add/remove control points for splines
+                        if (s.curveType == StaircaseType::BSpline || s.curveType == StaircaseType::BezierSpline) {
+                            if (ImGui::Button("Add CP##Stair")) {
+                                // Add midpoint between last cp and end
+                                ImVec2 newPt;
+                                if (s.controlPoints.empty()) {
+                                    newPt = ImVec2((s.start.x + s.end.x) * 0.5f, (s.start.y + s.end.y) * 0.5f);
+                                } else {
+                                    ImVec2& last = s.controlPoints.back();
+                                    newPt = ImVec2((last.x + s.end.x) * 0.5f, (last.y + s.end.y) * 0.5f);
+                                }
+                                s.controlPoints.push_back(newPt);
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Remove CP##Stair") && !s.controlPoints.empty()) {
+                                s.controlPoints.pop_back();
+                            }
+                        }
+                        
+                        // Convert to straight
+                        if (ImGui::Button("Convert to Straight##Stair")) {
+                            s.setStraight();
+                        }
+                    } else {
+                        // Convert straight staircase to curve
+                        ImGui::Separator();
+                        ImGui::Text("Convert to:");
+                        if (ImGui::Button("Quadratic Bezier##Stair")) {
+                            ImVec2 mid((s.start.x + s.end.x) * 0.5f, (s.start.y + s.end.y) * 0.5f);
+                            // Offset perpendicular to direction
+                            float dx = s.end.x - s.start.x;
+                            float dy = s.end.y - s.start.y;
+                            float len = sqrtf(dx * dx + dy * dy);
+                            if (len > 0) {
+                                mid.x -= dy / len * len * 0.25f;
+                                mid.y += dx / len * len * 0.25f;
+                            }
+                            s.setQuadraticBezier(mid);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cubic Bezier##Stair")) {
+                            ImVec2 p1(s.start.x + (s.end.x - s.start.x) * 0.33f,
+                                     s.start.y + (s.end.y - s.start.y) * 0.33f);
+                            ImVec2 p2(s.start.x + (s.end.x - s.start.x) * 0.66f,
+                                     s.start.y + (s.end.y - s.start.y) * 0.66f);
+                            s.setCubicBezier(p1, p2);
+                        }
+                        if (ImGui::Button("Arc##Stair")) {
+                            ImVec2 mid((s.start.x + s.end.x) * 0.5f, (s.start.y + s.end.y) * 0.5f);
+                            float dx = s.end.x - s.start.x;
+                            float dy = s.end.y - s.start.y;
+                            float len = sqrtf(dx * dx + dy * dy);
+                            if (len > 0) {
+                                mid.x -= dy / len * len * 0.25f;
+                                mid.y += dx / len * len * 0.25f;
+                            }
+                            s.setArc(mid);
+                        }
+                        
+                        ImGui::Separator();
+                        ImGui::Text("Splines:");
+                        if (ImGui::Button("B-Spline##StairApprox")) {
+                            std::vector<ImVec2> pts;
+                            for (int i = 1; i < 4; i++) {
+                                float t = (float)i / 4.0f;
+                                pts.push_back(ImVec2(
+                                    s.start.x + (s.end.x - s.start.x) * t,
+                                    s.start.y + (s.end.y - s.start.y) * t
+                                ));
+                            }
+                            s.setBSpline(pts, false);
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Approximating spline - curve does NOT pass through control points");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Bezier Spline##StairInterp")) {
+                            std::vector<ImVec2> pts;
+                            pts.push_back(ImVec2((s.start.x + s.end.x) * 0.5f, (s.start.y + s.end.y) * 0.5f));
+                            s.setBezierSpline(pts, false);
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interpolating spline - curve passes through control points");
                     }
                     
+                    ImGui::Separator();
                     float col[4];
                     col[0] = ((s.color >> 0) & 0xFF) / 255.0f;
                     col[1] = ((s.color >> 8) & 0xFF) / 255.0f;
