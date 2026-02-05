@@ -366,7 +366,10 @@ void CharacterEditorUI::shutdown() {
     m_attachedPartModels.clear();
     
     // Release preview part GPU data
-    m_previewPartGPU.release();
+    for (auto &g : m_previewPartGPUs) {
+        g.release();
+    }
+    m_previewPartGPUs.clear();
     
     // Release line VAO/VBO
     if (m_lineVAO) glDeleteVertexArrays(1, &m_lineVAO);

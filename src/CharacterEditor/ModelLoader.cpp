@@ -849,7 +849,7 @@ std::optional<Part> ModelLoader::loadAsPart(const std::string& filePath,
     Part part;
     part.id = std::filesystem::path(filePath).stem().string();
     part.name = part.id;
-    part.mesh = std::move(loadResult.meshes[0]);
+    part.meshes.push_back(std::move(loadResult.meshes[0]));
     part.socketsOut = std::move(loadResult.extractedSockets);
     
     // Create attachment spec from sockets

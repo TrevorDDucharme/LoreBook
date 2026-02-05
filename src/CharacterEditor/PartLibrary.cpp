@@ -405,6 +405,7 @@ std::unique_ptr<Part> PartLibrary::deserializePart(const std::vector<uint8_t>& d
     } // End of meshes loop
     
     // Sockets
+    uint32_t socketCount = readUint32(ptr);
     part->socketsOut.resize(socketCount);
     for (uint32_t i = 0; i < socketCount && ptr < end; ++i) {
         auto& socket = part->socketsOut[i];
@@ -498,8 +499,16 @@ int64_t PartLibrary::savePart(const Part& part) {
         sqlite3_bind_text(stmt, 3, rootSocket.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, tagsStr.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 5, static_cast<int>(part.primaryRole));
-        sqlite3_bind_int(stmt, 6, static_cast<int>(part.mesh.vertices.size()));
-        sqlite3_bind_int(stmt, 7, static_cast<int>(part.mesh.skeleton.bones.size()));
+        {
+            int vertexCount = 0;
+            int boneCount = 0;
+            if (!part.meshes.empty()) {
+                vertexCount = static_cast<int>(part.meshes[0].vertices.size());
+                boneCount = static_cast<int>(part.meshes[0].skeleton.bones.size());
+            }
+            sqlite3_bind_int(stmt, 6, vertexCount);
+            sqlite3_bind_int(stmt, 7, boneCount);
+        }
         sqlite3_bind_int(stmt, 8, static_cast<int>(part.socketsOut.size()));
         sqlite3_bind_blob(stmt, 9, partData.data(), static_cast<int>(partData.size()), SQLITE_TRANSIENT);
         
@@ -532,8 +541,16 @@ int64_t PartLibrary::savePart(const Part& part) {
         sqlite3_bind_text(stmt, 4, rootSocket.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 5, tagsStr.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 6, static_cast<int>(part.primaryRole));
-        sqlite3_bind_int(stmt, 7, static_cast<int>(part.mesh.vertices.size()));
-        sqlite3_bind_int(stmt, 8, static_cast<int>(part.mesh.skeleton.bones.size()));
+        {
+            int vertexCount = 0;
+            int boneCount = 0;
+            if (!part.meshes.empty()) {
+                vertexCount = static_cast<int>(part.meshes[0].vertices.size());
+                boneCount = static_cast<int>(part.meshes[0].skeleton.bones.size());
+            }
+            sqlite3_bind_int(stmt, 7, vertexCount);
+            sqlite3_bind_int(stmt, 8, boneCount);
+        }
         sqlite3_bind_int(stmt, 9, static_cast<int>(part.socketsOut.size()));
         sqlite3_bind_blob(stmt, 10, partData.data(), static_cast<int>(partData.size()), SQLITE_TRANSIENT);
         
@@ -993,7 +1010,7 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
     if (part.hasSkeleton()) {
         const Skeleton* partSkeleton = part.getSkeleton();
         if (!partSkeleton) {
-            m_partImportError = "Part has skeleton flag but no skeleton found";
+            setError("Part has skeleton flag but no skeleton found");
             return AttachmentResult::Failure("Part has skeleton but no skeleton found");
         }
         

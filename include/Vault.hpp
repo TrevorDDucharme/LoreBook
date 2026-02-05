@@ -25,6 +25,7 @@
 #include "CryptoHelpers.hpp"
 #include "DBBackend.hpp"
 #include "VaultHistory.hpp"
+#include "LuaScriptManager.hpp"
 
 // Configuration for opening a vault with either local sqlite or remote MySQL
 struct VaultConfig
@@ -122,6 +123,9 @@ class Vault
     // Cached per-src inline model viewers (keyed by original src string)
     std::unordered_map<std::string, std::unique_ptr<ModelViewer>> modelViewerCache;
 
+    // Lua scripting manager (initialized when vault opens)
+    std::unique_ptr<class LuaScriptManager> scriptManager;
+
     // Pending reload requests from background fetches; entries are src keys (external URL or vault://attachment/<id>)
     std::vector<std::string> pendingViewerReloads;
 
@@ -137,6 +141,13 @@ class Vault
         std::string expr;
     };
     std::unordered_map<int64_t, ChildFilterSpec> nodeChildFilters;
+
+    // Last-uploaded assets (used to show the Asset Uploaded modal)
+    std::vector<std::string> lastUploadedExternalPaths;
+    // Track upload failures so we can show a clear error modal when something fails
+    std::vector<std::string> lastUploadFailures;
+    bool showAssetUploadedModal = false;
+    bool showAssetUploadErrors = false;
 
     // DB mutex for background fetch updates
     std::mutex dbMutex;
@@ -375,6 +386,17 @@ public:
         std::lock_guard<std::mutex> l(pendingTasksMutex);
         pendingMainThreadTasks.push_back(std::move(fn));
     }
+
+    // ------------------------------
+    // Scripting helpers (Lua scripts stored as attachments under vault://Scripts/)
+    // ------------------------------
+    // Declarations (implemented in src/VaultScripts.cpp to avoid depending on LuaScriptManager in this header)
+    LuaScriptManager* getScriptManager();
+    int64_t storeScript(const std::string &name, const std::string &code);
+    std::string getScript(const std::string &name);
+    std::vector<std::string> listScripts();
+    // Initialize the script manager (called from constructors)
+    void initScriptManager();
 
     // Minimal item data accessor for external sync tools
     struct ItemRecord
@@ -991,6 +1013,12 @@ public:
                     PLOGW << "VaultHistory: ensureSchema failed: " << histErr;
                 }
             }
+            // Initialize Lua script manager for this vault
+            try {
+                scriptManager = std::make_unique<LuaScriptManager>(this);
+            } catch (...) {
+                PLOGW << "Failed to create LuaScriptManager";
+            }
         }
     }
 
@@ -1006,6 +1034,12 @@ public:
         if (!history->ensureSchema(&histErr))
         {
             PLOGW << "VaultHistory: ensureSchema failed (remote): " << histErr;
+        }
+        // Initialize Lua script manager for this vault
+        try {
+            scriptManager = std::make_unique<LuaScriptManager>(this);
+        } catch (...) {
+            PLOGW << "Failed to create LuaScriptManager";
         }
     }
 
@@ -3424,6 +3458,7 @@ public:
             if (ImGui::Button("Upload"))
             {
                 lastUploadedExternalPaths.clear();
+                lastUploadFailures.clear();
                 for (auto &fname : importAssetSelectedFiles)
                 {
                     try
@@ -3444,9 +3479,18 @@ public:
                             if (!meta.externalPath.empty())
                                 lastUploadedExternalPaths.push_back(meta.externalPath);
                         }
-                        // if a conflict arose the modal will be shown and addAssetFromFile returned -1; stop further uploads to let the user decide
-                        if (showOverwriteConfirmModal)
+                        else if (showOverwriteConfirmModal)
+                        {
+                            // conflict: stop and wait for user decision
                             break;
+                        }
+                        else
+                        {
+                            // failed for other reasons: record it and show brief status
+                            lastUploadFailures.push_back(desired);
+                            statusMessage = std::string("Failed to add: ") + desired;
+                            statusTime = ImGui::GetTime();
+                        }
                     }
                     catch (...)
                     {
@@ -3467,6 +3511,21 @@ public:
                     {
                         // wait for overwrite decision; the asset modal will be opened after conflict resolution
                         showAssetUploadedModal = true;
+                    }
+                }
+                // If there were failures and no conflict blocking the flow, show the errors modal
+                if (!lastUploadFailures.empty())
+                {
+                    if (!showOverwriteConfirmModal)
+                    {
+                        ImGui::OpenPopup("Asset Upload Errors");
+                        showAssetUploadErrors = false; // already opened
+                        statusMessage = "Some assets failed to upload";
+                        statusTime = ImGui::GetTime();
+                    }
+                    else
+                    {
+                        showAssetUploadErrors = true; // defer until conflict resolved
                     }
                 }
                 // only close the import popup if we're not waiting for a user decision
@@ -3491,21 +3550,49 @@ public:
             ImGui::Separator();
             for (auto &ep : lastUploadedExternalPaths)
             {
-                std::string snippet = std::string("![](") + ep + ")";
-                ImGui::TextUnformatted(snippet.c_str());
+                std::string mdSnippet = std::string("![](") + ep + ")";
+                // Show the raw link and allow copying link or markdown separately
+                ImGui::TextUnformatted(ep.c_str());
                 ImGui::SameLine();
-                if (ImGui::Button((std::string("Copy##") + ep).c_str()))
+                if (ImGui::Button((std::string("Copy Link##") + ep).c_str()))
                 {
-                    ImGui::SetClipboardText(snippet.c_str());
-                    statusMessage = "Copied to clipboard";
+                    ImGui::SetClipboardText(ep.c_str());
+                    statusMessage = "Copied link to clipboard";
+                    statusTime = ImGui::GetTime();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button((std::string("Copy MD##") + ep).c_str()))
+                {
+                    ImGui::SetClipboardText(mdSnippet.c_str());
+                    statusMessage = "Copied markdown snippet to clipboard";
                     statusTime = ImGui::GetTime();
                 }
                 ImGui::SameLine();
                 if (ImGui::Button((std::string("Insert##") + ep).c_str()))
                 {
-                    currentContent += std::string("\n") + snippet + std::string("\n");
+                    currentContent += std::string("\n") + mdSnippet + std::string("\n");
                     contentDirty = true;
                 }
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Close"))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // Asset Upload Errors modal — show files that failed to upload
+        if (showAssetUploadErrors)
+        {
+            ImGui::OpenPopup("Asset Upload Errors");
+            showAssetUploadErrors = false;
+        }
+        if (ImGui::BeginPopupModal("Asset Upload Errors", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Failed to upload %d asset(s):", (int)lastUploadFailures.size());
+            ImGui::Separator();
+            for (auto &f : lastUploadFailures)
+            {
+                ImGui::TextUnformatted(f.c_str());
             }
             ImGui::Separator();
             if (ImGui::Button("Close"))
@@ -6225,7 +6312,17 @@ inline int64_t Vault::addAssetFromFile(const std::string &filepath, const std::s
     std::string ext = std::filesystem::path(finalComponent).extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    std::string candidate = std::string("vault://Assets/") + safeRel;
+    std::string candidate;
+    if (ext == ".lua")
+    {
+        // Script files go into the Scripts namespace; allow virtual paths in desiredName
+        std::string srel = sanitizeExternalPath(name);
+        candidate = std::string("vault://Scripts/") + srel;
+    }
+    else
+    {
+        candidate = std::string("vault://Assets/") + safeRel;
+    }
 
     // Exact-path collision check: if an attachment already exists at this exact virtual path, prompt the user
     int64_t existing = findAttachmentByExternalPath(candidate);
@@ -6244,6 +6341,8 @@ inline int64_t Vault::addAssetFromFile(const std::string &filepath, const std::s
     std::string mime = "application/octet-stream";
     if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif")
         mime = std::string("image/") + (ext.size() > 1 ? ext.substr(1) : "");
+    else if (ext == ".lua")
+        mime = "text/x-lua";
 
     int64_t aid = addAttachment(-1, std::filesystem::path(finalComponent).string(), mime, data, candidate);
     if (aid != -1)

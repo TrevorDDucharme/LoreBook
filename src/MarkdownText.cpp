@@ -11,6 +11,10 @@
 #include "Icons.hpp"
 #include <stringUtils.hpp>
 #include <WorldMaps/WorldMap.hpp>
+#include "LuaScriptManager.hpp"
+#include "LuaCanvasBindings.hpp"
+#include "LuaImGuiBindings.hpp"
+#include "LuaEngine.hpp"
 
 // Parse optional size suffixes appended with ::<width>x<height>
 // Examples: "vault://Assets/model.glb::800x600" or "https://.../model.glb::640x480"
@@ -640,6 +644,63 @@ namespace ImGui
                                 PLOGW << "md:world failed to render world map for src='" << src << "'";
                                 PLOGW << "  exception: " << e.what();
                             }
+
+                    // vault://Scripts/ namespace -> lua scripts
+                    const std::string scriptsPrefix = "vault://Scripts/";
+                    if (src.rfind(scriptsPrefix, 0) == 0)
+                    {
+                        // scriptPath is the path portion after the prefix (e.g., 'magic_circle.lua')
+                        std::string scriptName = src.substr(scriptsPrefix.size());
+                        std::string embedID = std::to_string(r->src_pos);
+                        auto mgr = v->getScriptManager();
+                        if (!mgr)
+                        {
+                            ImGui::TextColored(ImVec4(1,0,0,1), "[Script: no script manager]");
+                            return 0;
+                        }
+                        LuaEngine *eng = mgr->getOrCreateEngine(scriptName, embedID, v->getSelectedItemID());
+                        if (!eng)
+                        {
+                            ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script failed to load: %s", scriptName.c_str());
+                            return 0;
+                        }
+
+                        // If script has error state, show it
+                        if (!eng->lastError().empty())
+                        {
+                            ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script error: %s", eng->lastError().c_str());
+                            return 0;
+                        }
+
+                        ScriptConfig cfg = eng->callConfig();
+                        int width = (urlW > 0) ? urlW : cfg.width;
+                        int height = (urlH > 0) ? urlH : cfg.height;
+
+                        ImGui::PushID((void*)embedID.c_str());
+                        if (cfg.type == ScriptConfig::Type::Canvas)
+                        {
+                            ImGui::BeginChild("lua_canvas", ImVec2((float)width, (float)height), true);
+                            ImVec2 origin = ImGui::GetCursorScreenPos();
+                            // bind canvas helpers for this draw call
+                            registerLuaCanvasBindings(eng->L(), origin, width, height);
+                            float dt = ImGui::GetIO().DeltaTime;
+                            eng->callRender(dt);
+                            ImGui::EndChild();
+                        }
+                        else if (cfg.type == ScriptConfig::Type::UI)
+                        {
+                            ImGui::BeginChild("lua_ui", ImVec2((float)width, (float)height), true);
+                            // UI bindings already registered at engine creation
+                            eng->callUI();
+                            ImGui::EndChild();
+                        }
+                        else
+                        {
+                            ImGui::TextColored(ImVec4(1,0.5f,0,1), "[Script has no Config() or unknown type]");
+                        }
+                        ImGui::PopID();
+                        return 0;
+                    }
                         }
                     }
                     
