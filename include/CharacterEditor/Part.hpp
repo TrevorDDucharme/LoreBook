@@ -80,8 +80,8 @@ struct Part {
     std::string name;
     std::string category;
     
-    // Geometry
-    Mesh mesh;
+    // Geometry (parts can have multiple meshes)
+    std::vector<Mesh> meshes;
     
     // Transform relative to attachment socket
     Transform localTransform;
@@ -188,17 +188,33 @@ struct Part {
     }
     
     /**
-     * @brief Check if part has skeleton
+     * @brief Check if part has skeleton (any mesh)
      */
     bool hasSkeleton() const {
-        return mesh.hasSkeleton();
+        for (const auto& mesh : meshes) {
+            if (mesh.hasSkeleton()) return true;
+        }
+        return false;
     }
     
     /**
-     * @brief Check if part has shape keys
+     * @brief Get the skeleton from the first mesh that has one
+     */
+    const Skeleton* getSkeleton() const {
+        for (const auto& mesh : meshes) {
+            if (mesh.hasSkeleton()) return &mesh.skeleton;
+        }
+        return nullptr;
+    }
+    
+    /**
+     * @brief Check if part has shape keys (any mesh)
      */
     bool hasShapeKeys() const {
-        return mesh.hasShapeKeys();
+        for (const auto& mesh : meshes) {
+            if (mesh.hasShapeKeys()) return true;
+        }
+        return false;
     }
     
     /**

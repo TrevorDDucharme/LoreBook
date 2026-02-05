@@ -967,10 +967,13 @@ int main(int argc, char** argv)
         if (ImGui::BeginPopupModal("Login", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Please login to open the vault");
             ImGui::Separator();
-            ImGui::InputText("Username", loginUserBuf, sizeof(loginUserBuf));
-            ImGui::InputText("Password", loginPassBuf, sizeof(loginPassBuf), ImGuiInputTextFlags_Password);
+            bool usernameEnterPressed = ImGui::InputText("Username", loginUserBuf, sizeof(loginUserBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+            if(usernameEnterPressed){
+                ImGui::SetKeyboardFocusHere(); // Move focus to next field (password)
+            }
+            bool passwordEnterPressed = ImGui::InputText("Password", loginPassBuf, sizeof(loginPassBuf), ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
             if(authErrorBuf[0] != '\0') ImGui::TextColored(ImVec4(1,0.4f,0.4f,1.0f), "%s", authErrorBuf);
-            if(ImGui::Button("Login")){
+            if(ImGui::Button("Login") || passwordEnterPressed){
                 if(!vault){ strncpy(authErrorBuf, "No vault", sizeof(authErrorBuf)); }
                 else {
                     std::string u(loginUserBuf); std::string p(loginPassBuf);
@@ -1225,7 +1228,9 @@ int main(int argc, char** argv)
             ImGui::End();
         }
 
-        worldMap(worldMapOpen);
+        if(worldMapOpen){
+            worldMap(worldMapOpen);
+        }
 
         // Floor Plan Editor
         floorPlanEditor.render();

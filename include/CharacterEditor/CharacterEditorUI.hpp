@@ -313,6 +313,7 @@ private:
     
     // Loaded models
     std::vector<LoadedModel> m_models;
+    std::vector<LoadedModel> m_attachedPartModels;  // Parts attached to sockets
     int m_selectedModelIndex = -1;
     int m_selectedMeshIndex = -1;
     int m_selectedBoneIndex = -1;
@@ -350,6 +351,7 @@ private:
     std::string m_partsSelectedCategory;      // Empty = all categories
     int m_selectedPartSummaryIndex = -1;
     std::unique_ptr<Part> m_previewPart;      // Part being previewed
+    std::vector<MeshGPUData> m_previewPartGPUs;  // GPU data for preview part meshes
     std::string m_partImportError;
     
     // Part import file browser state

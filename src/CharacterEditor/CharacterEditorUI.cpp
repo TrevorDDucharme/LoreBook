@@ -263,7 +263,7 @@ glm::mat4 ViewportCamera::getProjectionMatrix(float aspectRatio) const {
 
 void ViewportCamera::orbit(float deltaYaw, float deltaPitch) {
     yaw += deltaYaw;
-    pitch = glm::clamp(pitch + deltaPitch, -89.0f, 89.0f);
+    pitch = glm::clamp(pitch - deltaPitch, -89.0f, 89.0f);
 }
 
 void ViewportCamera::pan(float deltaX, float deltaY) {
@@ -356,6 +356,17 @@ void CharacterEditorUI::shutdown() {
         }
     }
     m_models.clear();
+    
+    // Release attached parts GPU data
+    for (auto& model : m_attachedPartModels) {
+        for (auto& gpuData : model.meshGPUData) {
+            gpuData.release();
+        }
+    }
+    m_attachedPartModels.clear();
+    
+    // Release preview part GPU data
+    m_previewPartGPU.release();
     
     // Release line VAO/VBO
     if (m_lineVAO) glDeleteVertexArrays(1, &m_lineVAO);
@@ -560,6 +571,12 @@ bool CharacterEditorUI::loadModel(const std::string& filePath) {
     m_models.push_back(std::move(model));
     m_selectedModelIndex = static_cast<int>(m_models.size()) - 1;
     
+    // Initialize combined skeleton in part library with the base model's skeleton
+    if (m_partLibrary && !m_models.back().loadResult.skeleton.empty()) {
+        m_partLibrary->rebuildCombinedSkeleton(m_models.back().loadResult.skeleton);
+        PLOGI << "Initialized combined skeleton with " << m_models.back().loadResult.skeleton.bones.size() << " bones";
+    }
+    
     PLOGI << "Model loaded successfully with " << m_models.back().loadResult.meshes.size() << " meshes";
     return true;
 }
@@ -571,6 +588,21 @@ void CharacterEditorUI::clearModels() {
         }
     }
     m_models.clear();
+    
+    for (auto& model : m_attachedPartModels) {
+        for (auto& gpuData : model.meshGPUData) {
+            gpuData.release();
+        }
+    }
+    m_attachedPartModels.clear();
+    
+    // Clear preview part GPU data
+    for (auto& gpuData : m_previewPartGPUs) {
+        gpuData.release();
+    }
+    m_previewPartGPUs.clear();
+    m_previewPart.reset();
+    
     m_selectedModelIndex = -1;
     m_selectedBoneIndex = -1;
     m_selectedSocketIndex = -1;
@@ -841,28 +873,46 @@ void CharacterEditorUI::renderScene() {
     glUniform3f(glGetUniformLocation(m_meshShader, "uLightDir"), 0.3f, -1.0f, 0.5f);
     glUniform1i(glGetUniformLocation(m_meshShader, "uShadingMode"), static_cast<int>(m_shadingMode));
     
-    for (size_t mi = 0; mi < m_models.size(); ++mi) {
-        const auto& model = m_models[mi];
-        glm::mat4 modelMatrix = model.worldTransform.toMatrix();
+    // Render all models (base + attached parts)
+    auto renderModelList = [&](const std::vector<LoadedModel>& models, bool useBaseModel = true) {
+        for (size_t mi = 0; mi < models.size(); ++mi) {
+            const auto& model = models[mi];
+            glm::mat4 modelMatrix = model.worldTransform.toMatrix();
         
         // Determine which skeleton to use for skinning
-        // Priority: IK-solved > manually posed > original
-        const Skeleton& skeletonForSkinning = 
-            (m_ikEnabled && !m_solvedSkeleton.empty()) ? m_solvedSkeleton :
-            (!m_posedSkeleton.empty()) ? m_posedSkeleton :
-            model.loadResult.skeleton;
+        // For base model: use posed/solved skeleton if available, otherwise model skeleton
+        // For attached parts: ALWAYS use combined skeleton from part library if available
+        const Skeleton* skeletonForSkinning = nullptr;
+        
+        if (useBaseModel) {
+            // Base model - use posed or solved skeleton
+            if (m_ikEnabled && !m_solvedSkeleton.empty()) {
+                skeletonForSkinning = &m_solvedSkeleton;
+            } else if (!m_posedSkeleton.empty()) {
+                skeletonForSkinning = &m_posedSkeleton;
+            } else {
+                skeletonForSkinning = &model.loadResult.skeleton;
+            }
+        } else {
+            // Attached parts - use combined skeleton from part library
+            if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+                skeletonForSkinning = &m_partLibrary->getCombinedSkeleton().skeleton;
+            } else {
+                skeletonForSkinning = &model.loadResult.skeleton;
+            }
+        }
         
         // Compute and upload bone matrices for GPU skinning
-        bool enableSkinning = !skeletonForSkinning.empty();
+        bool enableSkinning = skeletonForSkinning && !skeletonForSkinning->empty();
         glUniform1i(glGetUniformLocation(m_meshShader, "uEnableSkinning"), enableSkinning ? 1 : 0);
         
         if (enableSkinning) {
-            std::vector<glm::mat4> boneMatrices(std::min(static_cast<size_t>(128), skeletonForSkinning.bones.size()));
+            std::vector<glm::mat4> boneMatrices(std::min(static_cast<size_t>(128), skeletonForSkinning->bones.size()));
             
             for (size_t bi = 0; bi < boneMatrices.size(); ++bi) {
-                const Bone& bone = skeletonForSkinning.bones[bi];
+                const Bone& bone = skeletonForSkinning->bones[bi];
                 // Skinning matrix = worldTransform * inverseBindMatrix
-                glm::mat4 worldMat = skeletonForSkinning.getWorldTransform(static_cast<uint32_t>(bi)).toMatrix();
+                glm::mat4 worldMat = skeletonForSkinning->getWorldTransform(static_cast<uint32_t>(bi)).toMatrix();
                 glm::mat4 invBindMat = bone.inverseBindMatrix.toMatrix();
                 boneMatrices[bi] = worldMat * invBindMat;
             }
@@ -881,6 +931,13 @@ void CharacterEditorUI::renderScene() {
             }
         }
     }
+    };
+    
+    // Render base models
+    renderModelList(m_models, true);
+    
+    // Render attached parts (using combined skeleton)
+    renderModelList(m_attachedPartModels, false);
     
     // Render wireframe overlay if enabled
     if (m_shadingMode == ShadingMode::Wireframe || hasFlag(m_debugViews, DebugView::Wireframe)) {
@@ -928,6 +985,25 @@ void CharacterEditorUI::renderScene() {
                 glEnable(GL_DEPTH_TEST);
                 glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
                 glLineWidth(1.0f);
+            }
+        }
+    }
+    
+    // Render preview part (offset to the side for visibility)
+    if (m_previewPart && !m_previewPartGPUs.empty()) {
+        glm::mat4 previewModel = glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 0.0f, 0.0f));
+        glUniformMatrix4fv(glGetUniformLocation(m_meshShader, "uModel"), 1, GL_FALSE, glm::value_ptr(previewModel));
+        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(previewModel)));
+        glUniformMatrix3fv(glGetUniformLocation(m_meshShader, "uNormalMatrix"), 1, GL_FALSE, glm::value_ptr(normalMatrix));
+        glUniform4f(glGetUniformLocation(m_meshShader, "uBaseColor"), 0.3f, 0.7f, 1.0f, 1.0f);
+        glUniform1i(glGetUniformLocation(m_meshShader, "uEnableSkinning"), 0);
+        
+        // Render all meshes in the preview part
+        for (const auto& gpuData : m_previewPartGPUs) {
+            if (gpuData.isValid) {
+                glBindVertexArray(gpuData.vao);
+                glDrawElements(GL_TRIANGLES, gpuData.indexCount, GL_UNSIGNED_INT, nullptr);
+                glBindVertexArray(0);
             }
         }
     }
@@ -2737,13 +2813,36 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
             flags |= ImGuiTreeNodeFlags_Selected;
         }
         
+        // Check compatibility with selected socket
+        bool isCompatible = false;
+        if (m_selectedModelIndex >= 0 && m_selectedModelIndex < static_cast<int>(m_models.size())) {
+            auto& model = m_models[m_selectedModelIndex];
+            if (m_selectedSocketIndex >= 0 && 
+                m_selectedSocketIndex < static_cast<int>(model.loadResult.extractedSockets.size())) {
+                auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
+                if (!summary.rootSocket.empty() && summary.rootSocket == socket.profile.profileID) {
+                    isCompatible = true;
+                }
+            }
+        }
+        
         // Display with category prefix if showing all
         std::string displayName = summary.name;
         if (m_partsSelectedCategory.empty() && !summary.category.empty()) {
             displayName = "[" + summary.category + "] " + summary.name;
         }
         
+        // Add compatibility indicator
+        if (isCompatible) {
+            displayName = "✓ " + displayName;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
+        }
+        
         ImGui::TreeNodeEx((void*)(intptr_t)summary.dbID, flags, "%s", displayName.c_str());
+        
+        if (isCompatible) {
+            ImGui::PopStyleColor();
+        }
         
         if (ImGui::IsItemClicked()) {
             m_selectedPartSummaryIndex = originalIndex;
@@ -2772,6 +2871,28 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
             if (!summary.tags.empty()) {
                 ImGui::Text("Tags: %s", summary.tags.c_str());
             }
+            
+            // Show compatibility with selected socket
+            if (m_selectedModelIndex >= 0 && m_selectedModelIndex < static_cast<int>(m_models.size())) {
+                auto& model = m_models[m_selectedModelIndex];
+                if (m_selectedSocketIndex >= 0 && 
+                    m_selectedSocketIndex < static_cast<int>(model.loadResult.extractedSockets.size())) {
+                    auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
+                    ImGui::Separator();
+                    if (isCompatible) {
+                        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), 
+                                         "✓ Compatible with selected socket '%s'", socket.name.c_str());
+                    } else if (!summary.rootSocket.empty()) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), 
+                                         "✗ Incompatible: needs '%s', socket is '%s'", 
+                                         summary.rootSocket.c_str(), socket.profile.profileID.c_str());
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), 
+                                         "✗ Part has no root socket defined");
+                    }
+                }
+            }
+            
             ImGui::EndTooltip();
         }
         
@@ -2779,7 +2900,27 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
             m_previewPart = m_partLibrary->loadPart(summary.dbID);
             if (m_previewPart) {
-                PLOGI << "Loaded part for preview: " << m_previewPart->name;
+                // Upload all meshes to GPU
+                m_previewPartGPUs.clear();
+                bool allUploaded = true;
+                for (const auto& mesh : m_previewPart->meshes) {
+                    MeshGPUData gpuData;
+                    if (uploadMeshToGPU(mesh, gpuData)) {
+                        m_previewPartGPUs.push_back(gpuData);
+                    } else {
+                        PLOGE << "Failed to upload preview part mesh to GPU: " << mesh.name;
+                        allUploaded = false;
+                        break;
+                    }
+                }
+                
+                if (allUploaded) {
+                    PLOGI << "Loaded part for preview: " << m_previewPart->name 
+                          << " (" << m_previewPartGPUs.size() << " meshes)";
+                } else {
+                    m_previewPart.reset();
+                    m_previewPartGPUs.clear();
+                }
             }
         }
     }
@@ -2793,35 +2934,160 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
         ImGui::Separator();
         ImGui::Text("Selected: %s", selected.name.c_str());
         
+        // Check compatibility with selected socket
+        bool canAttach = false;
+        std::string compatibilityInfo;
+        
+        if (m_selectedModelIndex >= 0 && m_selectedModelIndex < static_cast<int>(m_models.size())) {
+            auto& model = m_models[m_selectedModelIndex];
+            if (m_selectedSocketIndex >= 0 && 
+                m_selectedSocketIndex < static_cast<int>(model.loadResult.extractedSockets.size())) {
+                
+                auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
+                
+                // Check if the part's root socket matches the selected socket's profile
+                if (!selected.rootSocket.empty() && selected.rootSocket == socket.profile.profileID) {
+                    canAttach = true;
+                    compatibilityInfo = "Compatible with socket: " + socket.name;
+                } else if (selected.rootSocket.empty()) {
+                    compatibilityInfo = "Part has no root socket defined";
+                } else {
+                    compatibilityInfo = "Incompatible: needs '" + selected.rootSocket + 
+                                      "', socket is '" + socket.profile.profileID + "'";
+                }
+            }
+        }
+        
+        // Show compatibility status
+        if (!compatibilityInfo.empty()) {
+            if (canAttach) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%s", compatibilityInfo.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "%s", compatibilityInfo.c_str());
+            }
+        }
+        
         // Action buttons
         if (ImGui::Button("Load Preview", ImVec2(-1, 0))) {
             m_previewPart = m_partLibrary->loadPart(selected.dbID);
             if (m_previewPart) {
-                PLOGI << "Loaded preview part: " << m_previewPart->name;
+                // Upload all meshes to GPU
+                m_previewPartGPUs.clear();
+                bool allUploaded = true;
+                for (const auto& mesh : m_previewPart->meshes) {
+                    MeshGPUData gpuData;
+                    if (uploadMeshToGPU(mesh, gpuData)) {
+                        m_previewPartGPUs.push_back(gpuData);
+                    } else {
+                        PLOGE << "Failed to upload preview part mesh to GPU: " << mesh.name;
+                        m_partImportError = "Failed to upload preview part mesh: " + mesh.name;
+                        allUploaded = false;
+                        break;
+                    }
+                }
+                
+                if (allUploaded) {
+                    PLOGI << "Loaded preview part: " << m_previewPart->name 
+                          << " (" << m_previewPartGPUs.size() << " meshes)";
+                    m_partImportError.clear();
+                } else {
+                    m_previewPart.reset();
+                    m_previewPartGPUs.clear();
+                }
+            } else {
+                m_partImportError = "Failed to load part from database";
             }
         }
         
-        // Show available sockets
+        // Attach to socket button
         if (m_selectedModelIndex >= 0 && m_selectedModelIndex < static_cast<int>(m_models.size())) {
+            // Disable button if not compatible
+            if (!canAttach) {
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.5f);
+                ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+            }
+            
             if (ImGui::Button("Attach to Selected Socket", ImVec2(-1, 0))) {
-                if (m_selectedSocketIndex >= 0 && m_previewPart) {
+                if (m_selectedSocketIndex >= 0 && canAttach) {
                     auto& model = m_models[m_selectedModelIndex];
-                    if (!model.loadResult.extractedSockets.empty() && 
-                        m_selectedSocketIndex < static_cast<int>(model.loadResult.extractedSockets.size())) {
-                        
-                        auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
-                        auto result = m_partLibrary->attachPart(*m_previewPart, socket, model.loadResult.skeleton);
+                    auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
+                    
+                    // Load the part from database
+                    auto partToAttach = m_partLibrary->loadPart(selected.dbID);
+                    
+                    if (partToAttach) {
+                        auto result = m_partLibrary->attachPart(*partToAttach, socket, model.loadResult.skeleton);
                         
                         if (result.success) {
                             PLOGI << "Attached part to socket: " << socket.name;
+                            
+                            // Create a loaded model for the attached part
+                            // Use IDENTITY transform - skeleton handles positioning
+                            LoadedModel attachedModel;
+                            attachedModel.filePath = "Attached: " + partToAttach->name;
+                            attachedModel.loadResult.success = true;
+                            
+                            // Add ALL meshes from the part
+                            attachedModel.loadResult.meshes = partToAttach->meshes;
+                            
+                            // Get skeleton from part (first mesh that has one)
+                            const Skeleton* partSkel = partToAttach->getSkeleton();
+                            if (partSkel) {
+                                attachedModel.loadResult.skeleton = *partSkel;
+                            }
+                            
+                            attachedModel.worldTransform = Transform();  // Identity - skeleton positions it
+                            
+                            // Upload all meshes to GPU
+                            bool allUploaded = true;
+                            for (const auto& mesh : attachedModel.loadResult.meshes) {
+                                MeshGPUData gpuData;
+                                if (uploadMeshToGPU(mesh, gpuData)) {
+                                    attachedModel.meshGPUData.push_back(gpuData);
+                                } else {
+                                    PLOGE << "Failed to upload attached part mesh: " << mesh.name;
+                                    allUploaded = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (allUploaded) {
+                                m_attachedPartModels.push_back(attachedModel);
+                                PLOGI << "Added attached part to render list (" 
+                                      << attachedModel.meshGPUData.size() << " meshes)";
+                                
+                                // Update posed skeleton to use combined skeleton
+                                if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+                                    m_posedSkeleton = m_partLibrary->getCombinedSkeleton().skeleton;
+                                    PLOGI << "Updated posed skeleton with combined skeleton (" 
+                                          << m_posedSkeleton.bones.size() << " bones)";
+                                }
+                            } else {
+                                m_partImportError = "Failed to upload all meshes to GPU";
+                            }
+                            
+                            // Clear any existing preview
+                            m_previewPart.reset();
+                            for (auto& gpu : m_previewPartGPUs) {
+                                gpu.release();
+                            }
+                            m_previewPartGPUs.clear();
+                            m_partImportError.clear();
                         } else {
                             PLOGE << "Failed to attach part: " << result.error;
                             m_partImportError = result.error;
                         }
+                    } else {
+                        m_partImportError = "Failed to load part from database";
                     }
                 } else {
-                    m_partImportError = "Select a socket first";
+                    m_partImportError = "Select a compatible socket first";
                 }
+            }
+            
+            if (!canAttach) {
+                ImGui::PopItemFlag();
+                ImGui::PopStyleVar();
             }
         }
         
