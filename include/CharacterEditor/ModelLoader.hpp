@@ -27,7 +27,7 @@ struct ImportConfig {
     bool loadEmbeddedTextures = true;
     bool flipUVs = false;
     bool leftHandedToRightHanded = true;
-    bool convertZUpToYUp = true;  // Convert from Blender Z-up to OpenGL Y-up
+    bool convertZUpToYUp = false;  // GLB uses Y-up like OpenGL, no conversion needed
     
     // Socket detection prefix
     std::string socketBonePrefix = "socket_";

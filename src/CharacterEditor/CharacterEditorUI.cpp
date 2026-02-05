@@ -29,14 +29,40 @@ uniform mat4 uView;
 uniform mat4 uProjection;
 uniform mat3 uNormalMatrix;
 
+// Skeletal animation
+uniform bool uEnableSkinning;
+uniform mat4 uBoneMatrices[128];  // Max 128 bones
+
 out vec3 vWorldPos;
 out vec3 vNormal;
 out vec2 vTexCoord;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPosition, 1.0);
+    vec3 skinnedPos = aPosition;
+    vec3 skinnedNormal = aNormal;
+    
+    if (uEnableSkinning) {
+        // Apply skeletal animation
+        mat4 boneTransform = mat4(0.0);
+        float totalWeight = 0.0;
+        
+        for (int i = 0; i < 4; ++i) {
+            if (aBoneIDs[i] >= 0 && aBoneWeights[i] > 0.0) {
+                boneTransform += uBoneMatrices[aBoneIDs[i]] * aBoneWeights[i];
+                totalWeight += aBoneWeights[i];
+            }
+        }
+        
+        if (totalWeight > 0.0) {
+            boneTransform /= totalWeight;
+            skinnedPos = (boneTransform * vec4(aPosition, 1.0)).xyz;
+            skinnedNormal = mat3(boneTransform) * aNormal;
+        }
+    }
+    
+    vec4 worldPos = uModel * vec4(skinnedPos, 1.0);
     vWorldPos = worldPos.xyz;
-    vNormal = normalize(uNormalMatrix * aNormal);
+    vNormal = normalize(uNormalMatrix * skinnedNormal);
     vTexCoord = aTexCoord;
     gl_Position = uProjection * uView * worldPos;
 }
@@ -431,9 +457,12 @@ bool CharacterEditorUI::uploadMeshToGPU(const Mesh& mesh, MeshGPUData& gpuData) 
     
     glBindVertexArray(gpuData.vao);
     
-    // Upload vertex data
+    // Get vertices (with shape keys applied if any)
+    std::vector<Vertex> uploadVertices = mesh.getDeformedVertices();
+    
+    // Upload vertex data - use DYNAMIC_DRAW for shape key updates
     glBindBuffer(GL_ARRAY_BUFFER, gpuData.vbo);
-    glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(Vertex), mesh.vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, uploadVertices.size() * sizeof(Vertex), uploadVertices.data(), GL_DYNAMIC_DRAW);
     
     // Upload index data
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.ebo);
@@ -471,6 +500,18 @@ bool CharacterEditorUI::uploadMeshToGPU(const Mesh& mesh, MeshGPUData& gpuData) 
     gpuData.isValid = true;
     
     return true;
+}
+
+void CharacterEditorUI::updateMeshVertices(const Mesh& mesh, MeshGPUData& gpuData) {
+    if (!gpuData.isValid || gpuData.vbo == 0) return;
+    
+    // Get deformed vertices with shape keys applied
+    std::vector<Vertex> deformedVertices = mesh.getDeformedVertices();
+    
+    // Update the VBO with new vertex data
+    glBindBuffer(GL_ARRAY_BUFFER, gpuData.vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, deformedVertices.size() * sizeof(Vertex), deformedVertices.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 bool CharacterEditorUI::loadModel(const std::string& filePath) {
@@ -561,12 +602,35 @@ void CharacterEditorUI::render() {
     if (ImGui::Begin("Character Editor", &m_isOpen, windowFlags)) {
         renderMenuBar();
         
+        // Handle drag-drop (needs to be called early for proper cursor handling)
+        handlePartDragDrop();
+        
         // Main content area with panels
         float panelWidth = 250.0f;
         
-        // Left panel - Hierarchy
+        // Left panel - Hierarchy + Parts Library
         ImGui::BeginChild("LeftPanel", ImVec2(panelWidth, 0), true);
-        renderHierarchyPanel();
+        
+        if (ImGui::BeginTabBar("LeftTabs")) {
+            if (ImGui::BeginTabItem("Hierarchy")) {
+                renderHierarchyPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Parts")) {
+                renderPartsLibraryPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Prefabs")) {
+                renderPrefabsPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Characters")) {
+                renderCharactersPanel();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+        
         ImGui::EndChild();
         
         ImGui::SameLine();
@@ -781,6 +845,33 @@ void CharacterEditorUI::renderScene() {
         const auto& model = m_models[mi];
         glm::mat4 modelMatrix = model.worldTransform.toMatrix();
         
+        // Determine which skeleton to use for skinning
+        // Priority: IK-solved > manually posed > original
+        const Skeleton& skeletonForSkinning = 
+            (m_ikEnabled && !m_solvedSkeleton.empty()) ? m_solvedSkeleton :
+            (!m_posedSkeleton.empty()) ? m_posedSkeleton :
+            model.loadResult.skeleton;
+        
+        // Compute and upload bone matrices for GPU skinning
+        bool enableSkinning = !skeletonForSkinning.empty();
+        glUniform1i(glGetUniformLocation(m_meshShader, "uEnableSkinning"), enableSkinning ? 1 : 0);
+        
+        if (enableSkinning) {
+            std::vector<glm::mat4> boneMatrices(std::min(static_cast<size_t>(128), skeletonForSkinning.bones.size()));
+            
+            for (size_t bi = 0; bi < boneMatrices.size(); ++bi) {
+                const Bone& bone = skeletonForSkinning.bones[bi];
+                // Skinning matrix = worldTransform * inverseBindMatrix
+                glm::mat4 worldMat = skeletonForSkinning.getWorldTransform(static_cast<uint32_t>(bi)).toMatrix();
+                glm::mat4 invBindMat = bone.inverseBindMatrix.toMatrix();
+                boneMatrices[bi] = worldMat * invBindMat;
+            }
+            
+            GLint loc = glGetUniformLocation(m_meshShader, "uBoneMatrices");
+            glUniformMatrix4fv(loc, static_cast<GLsizei>(boneMatrices.size()), GL_FALSE, 
+                               glm::value_ptr(boneMatrices[0]));
+        }
+        
         for (size_t i = 0; i < model.meshGPUData.size() && i < model.loadResult.meshes.size(); ++i) {
             const auto& gpuData = model.meshGPUData[i];
             const auto& mesh = model.loadResult.meshes[i];
@@ -811,6 +902,34 @@ void CharacterEditorUI::renderScene() {
         
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glEnable(GL_CULL_FACE);
+    }
+    
+    // Highlight selected mesh with wireframe outline
+    if (m_selectedMeshIndex >= 0 && m_selectedModelIndex >= 0 && 
+        m_selectedModelIndex < static_cast<int>(m_models.size())) {
+        const auto& model = m_models[m_selectedModelIndex];
+        if (m_selectedMeshIndex < static_cast<int>(model.meshGPUData.size())) {
+            const auto& gpuData = model.meshGPUData[m_selectedMeshIndex];
+            if (gpuData.isValid) {
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                glDisable(GL_DEPTH_TEST);  // Draw on top
+                glLineWidth(2.0f);
+                
+                // Highlight color (yellow)
+                glUniform4f(glGetUniformLocation(m_meshShader, "uBaseColor"), 1.0f, 1.0f, 0.0f, 1.0f);
+                
+                glm::mat4 modelMatrix = model.worldTransform.toMatrix();
+                glUniformMatrix4fv(glGetUniformLocation(m_meshShader, "uModel"), 1, GL_FALSE, glm::value_ptr(modelMatrix));
+                
+                glBindVertexArray(gpuData.vao);
+                glDrawElements(GL_TRIANGLES, gpuData.indexCount, GL_UNSIGNED_INT, nullptr);
+                glBindVertexArray(0);
+                
+                glEnable(GL_DEPTH_TEST);
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+                glLineWidth(1.0f);
+            }
+        }
     }
     
     // Render grid AFTER meshes, with depth write disabled so it doesn't occlude
@@ -856,12 +975,30 @@ void CharacterEditorUI::renderDebugOverlays() {
         
         glUniformMatrix4fv(glGetUniformLocation(m_lineShader, "uMVP"), 1, GL_FALSE, glm::value_ptr(mvp));
         
+        // Determine which skeleton to use for rendering
+        const Skeleton& skeletonToRender = 
+            (m_ikEnabled && !m_solvedSkeleton.empty()) ? m_solvedSkeleton :
+            (!m_posedSkeleton.empty()) ? m_posedSkeleton :
+            model.loadResult.skeleton;
+        
         if (hasFlag(m_debugViews, DebugView::Bones)) {
-            renderBones(model.loadResult.skeleton, modelMatrix);
+            renderBones(skeletonToRender, modelMatrix);
         }
         
         if (hasFlag(m_debugViews, DebugView::Sockets)) {
-            renderSockets(model.loadResult.extractedSockets, modelMatrix);
+            renderSockets(model.loadResult.extractedSockets, skeletonToRender, modelMatrix);
+        }
+        
+        // Render IK targets
+        if (m_ikEnabled && hasFlag(m_debugViews, DebugView::IKChains)) {
+            renderIKTargets(modelMatrix);
+        }
+        
+        // Render rotation gizmo for selected bone (when not in IK mode)
+        if (!m_ikEnabled && m_selectedBoneIndex >= 0 && 
+            m_selectedBoneIndex < static_cast<int>(skeletonToRender.bones.size())) {
+            Transform boneWorld = skeletonToRender.getWorldTransform(static_cast<uint32_t>(m_selectedBoneIndex));
+            renderRotationGizmo(boneWorld.position, boneWorld.rotation, 0.3f);
         }
         
         if (hasFlag(m_debugViews, DebugView::BoundingBox)) {
@@ -955,7 +1092,7 @@ void CharacterEditorUI::renderBones(const Skeleton& skeleton, const glm::mat4& m
     }
 }
 
-void CharacterEditorUI::renderSockets(const std::vector<Socket>& sockets, const glm::mat4& modelMatrix) {
+void CharacterEditorUI::renderSockets(const std::vector<Socket>& sockets, const Skeleton& skeleton, const glm::mat4& modelMatrix) {
     std::vector<float> lineData;
     
     auto addLine = [&](const glm::vec3& p1, const glm::vec3& p2, const glm::vec4& color) {
@@ -967,7 +1104,14 @@ void CharacterEditorUI::renderSockets(const std::vector<Socket>& sockets, const 
     
     for (size_t i = 0; i < sockets.size(); ++i) {
         const auto& socket = sockets[i];
+        
+        // Find the bone this socket is attached to and compute world position
         glm::vec3 pos = socket.localOffset.position;
+        auto it = skeleton.boneNameToIndex.find(socket.boneName);
+        if (it != skeleton.boneNameToIndex.end()) {
+            Transform worldTransform = skeleton.getWorldTransform(static_cast<uint32_t>(it->second));
+            pos = worldTransform.position;
+        }
         glm::vec4 color = (static_cast<int>(i) == m_selectedSocketIndex) ? m_selectedColor : m_socketColor;
         
         float size = socket.influenceRadius > 0 ? socket.influenceRadius : 0.1f;
@@ -1001,6 +1145,95 @@ void CharacterEditorUI::renderSockets(const std::vector<Socket>& sockets, const 
         glBufferData(GL_ARRAY_BUFFER, lineData.size() * sizeof(float), lineData.data(), GL_DYNAMIC_DRAW);
         glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lineData.size() / 7));
         glBindVertexArray(0);
+    }
+}
+
+void CharacterEditorUI::renderIKTargets(const glm::mat4& modelMatrix) {
+    if (m_ikTargets.empty()) return;
+    
+    std::vector<float> lineData;
+    
+    auto addLine = [&](const glm::vec3& p1, const glm::vec3& p2, const glm::vec4& color) {
+        lineData.push_back(p1.x); lineData.push_back(p1.y); lineData.push_back(p1.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+        lineData.push_back(p2.x); lineData.push_back(p2.y); lineData.push_back(p2.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+    };
+    
+    for (size_t i = 0; i < m_ikTargets.size(); ++i) {
+        const auto& ikTarget = m_ikTargets[i];
+        glm::vec3 pos = ikTarget.target.position;
+        
+        // Color: selected = yellow, active = magenta, inactive = gray
+        glm::vec4 color;
+        if (static_cast<int>(i) == m_selectedIKTarget) {
+            color = m_selectedColor;
+        } else if (ikTarget.isActive) {
+            color = m_ikTargetColor;
+        } else {
+            color = glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
+        }
+        
+        float size = 0.15f;
+        
+        // Draw crosshair at target position
+        addLine(pos - glm::vec3(size, 0, 0), pos + glm::vec3(size, 0, 0), color);
+        addLine(pos - glm::vec3(0, size, 0), pos + glm::vec3(0, size, 0), color);
+        addLine(pos - glm::vec3(0, 0, size), pos + glm::vec3(0, 0, size), color);
+        
+        // Draw sphere-like wireframe
+        int segments = 8;
+        float radius = size * 0.5f;
+        for (int j = 0; j < segments; ++j) {
+            float a1 = (float)j / segments * 2.0f * 3.14159f;
+            float a2 = (float)(j + 1) / segments * 2.0f * 3.14159f;
+            
+            // XY circle
+            addLine(pos + glm::vec3(std::cos(a1) * radius, std::sin(a1) * radius, 0),
+                    pos + glm::vec3(std::cos(a2) * radius, std::sin(a2) * radius, 0), color);
+            // XZ circle
+            addLine(pos + glm::vec3(std::cos(a1) * radius, 0, std::sin(a1) * radius),
+                    pos + glm::vec3(std::cos(a2) * radius, 0, std::sin(a2) * radius), color);
+            // YZ circle
+            addLine(pos + glm::vec3(0, std::cos(a1) * radius, std::sin(a1) * radius),
+                    pos + glm::vec3(0, std::cos(a2) * radius, std::sin(a2) * radius), color);
+        }
+        
+        // Draw chain visualization if valid
+        if (ikTarget.chain.isValid() && !m_solvedSkeleton.empty()) {
+            glm::vec4 chainColor = ikTarget.isActive ? glm::vec4(1.0f, 0.8f, 0.0f, 1.0f) : glm::vec4(0.5f, 0.4f, 0.0f, 1.0f);
+            
+            for (size_t ci = 0; ci < ikTarget.chain.boneIndices.size() - 1; ++ci) {
+                uint32_t boneIdx = ikTarget.chain.boneIndices[ci];
+                uint32_t nextIdx = ikTarget.chain.boneIndices[ci + 1];
+                
+                glm::vec3 p1 = m_solvedSkeleton.getWorldTransform(boneIdx).position;
+                glm::vec3 p2 = m_solvedSkeleton.getWorldTransform(nextIdx).position;
+                
+                // Thicker line effect
+                addLine(p1, p2, chainColor);
+            }
+            
+            // Draw line from end effector to target
+            if (ikTarget.isActive) {
+                uint32_t tipIdx = ikTarget.chain.tipBoneIndex;
+                glm::vec3 effectorPos = m_solvedSkeleton.getWorldTransform(tipIdx).position;
+                addLine(effectorPos, pos, glm::vec4(1.0f, 0.0f, 0.5f, 0.5f));
+            }
+        }
+    }
+    
+    if (!lineData.empty()) {
+        glBindVertexArray(m_lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_lineVBO);
+        glBufferData(GL_ARRAY_BUFFER, lineData.size() * sizeof(float), lineData.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lineData.size() / 7));
+        glBindVertexArray(0);
+    }
+    
+    // Render translation gizmo for selected target
+    if (m_selectedIKTarget >= 0 && m_selectedIKTarget < static_cast<int>(m_ikTargets.size())) {
+        renderTranslationGizmo(m_ikTargets[m_selectedIKTarget].target.position, 0.5f);
     }
 }
 
@@ -1115,9 +1348,24 @@ void CharacterEditorUI::renderHierarchyPanel() {
             if (ImGui::TreeNode("Meshes")) {
                 for (size_t i = 0; i < model.loadResult.meshes.size(); ++i) {
                     const auto& mesh = model.loadResult.meshes[i];
-                    ImGui::Text("%s (%zu verts, %zu tris)", 
-                               mesh.name.empty() ? "Unnamed" : mesh.name.c_str(),
-                               mesh.vertices.size(), mesh.indices.size() / 3);
+                    
+                    ImGuiTreeNodeFlags meshFlags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                    if (static_cast<int>(mi) == m_selectedModelIndex && static_cast<int>(i) == m_selectedMeshIndex) {
+                        meshFlags |= ImGuiTreeNodeFlags_Selected;
+                    }
+                    
+                    std::string meshLabel = mesh.name.empty() ? "Unnamed" : mesh.name;
+                    meshLabel += " (" + std::to_string(mesh.vertices.size()) + " verts";
+                    if (!mesh.shapeKeys.empty()) {
+                        meshLabel += ", " + std::to_string(mesh.shapeKeys.size()) + " keys";
+                    }
+                    meshLabel += ")";
+                    
+                    ImGui::TreeNodeEx(meshLabel.c_str(), meshFlags);
+                    if (ImGui::IsItemClicked()) {
+                        m_selectedModelIndex = static_cast<int>(mi);
+                        m_selectedMeshIndex = static_cast<int>(i);
+                    }
                 }
                 ImGui::TreePop();
             }
@@ -1136,6 +1384,11 @@ void CharacterEditorUI::renderHierarchyPanel() {
                         if (ImGui::IsItemClicked()) {
                             m_selectedModelIndex = static_cast<int>(mi);
                             m_selectedBoneIndex = static_cast<int>(i);
+                            
+                            // Initialize posed skeleton when selecting a bone
+                            if (m_posedSkeleton.empty()) {
+                                m_posedSkeleton = model.loadResult.skeleton;
+                            }
                         }
                     }
                     ImGui::TreePop();
@@ -1199,6 +1452,44 @@ void CharacterEditorUI::renderPropertiesPanel() {
                    bone.localTransform.position.z);
         ImGui::Text("Parent ID: %u", bone.parentID);
         ImGui::Text("Children: %zu", bone.childIDs.size());
+        
+        // Pose editing controls
+        ImGui::Separator();
+        ImGui::Text("Pose Editing");
+        
+        // Initialize posed skeleton if needed
+        if (m_posedSkeleton.empty()) {
+            m_posedSkeleton = model.loadResult.skeleton;
+        }
+        
+        if (m_selectedBoneIndex < static_cast<int>(m_posedSkeleton.bones.size())) {
+            auto& posedBone = m_posedSkeleton.bones[m_selectedBoneIndex];
+            
+            // Rotation as Euler angles for easier editing
+            glm::vec3 euler = glm::degrees(glm::eulerAngles(posedBone.localTransform.rotation));
+            if (ImGui::DragFloat3("Rotation", glm::value_ptr(euler), 1.0f, -180.0f, 180.0f)) {
+                posedBone.localTransform.rotation = glm::quat(glm::radians(euler));
+                m_bonePoseOverrides[m_selectedBoneIndex] = posedBone.localTransform.rotation;
+            }
+            
+            // Reset this bone button
+            if (ImGui::Button("Reset Bone")) {
+                posedBone.localTransform.rotation = bone.localTransform.rotation;
+                m_bonePoseOverrides.erase(m_selectedBoneIndex);
+            }
+        }
+        
+        ImGui::Separator();
+        
+        // Reset all pose button
+        if (!m_bonePoseOverrides.empty()) {
+            if (ImGui::Button("Reset All Pose")) {
+                m_posedSkeleton = model.loadResult.skeleton;
+                m_bonePoseOverrides.clear();
+            }
+            ImGui::SameLine();
+            ImGui::Text("(%zu bones modified)", m_bonePoseOverrides.size());
+        }
     }
     
     // Selected socket info
@@ -1221,31 +1512,109 @@ void CharacterEditorUI::renderShapeKeyPanel() {
         return;
     }
     
-    const auto& model = m_models[m_selectedModelIndex];
+    auto& model = m_models[m_selectedModelIndex];
     
-    bool hasShapeKeys = false;
+    // Count meshes with shape keys
+    int meshesWithKeys = 0;
     for (const auto& mesh : model.loadResult.meshes) {
-        if (!mesh.shapeKeys.empty()) {
-            hasShapeKeys = true;
-            break;
-        }
+        if (!mesh.shapeKeys.empty()) meshesWithKeys++;
     }
     
-    if (!hasShapeKeys) {
-        ImGui::TextDisabled("No shape keys");
+    if (meshesWithKeys == 0) {
+        ImGui::TextDisabled("No shape keys in model");
         return;
     }
     
-    for (auto& mesh : m_models[m_selectedModelIndex].loadResult.meshes) {
-        if (mesh.shapeKeys.empty()) continue;
+    // If a mesh is selected, show its shape keys prominently
+    if (m_selectedMeshIndex >= 0 && m_selectedMeshIndex < static_cast<int>(model.loadResult.meshes.size())) {
+        auto& mesh = model.loadResult.meshes[m_selectedMeshIndex];
         
-        if (ImGui::TreeNode(mesh.name.empty() ? "Mesh" : mesh.name.c_str())) {
+        if (!mesh.shapeKeys.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Selected: %s", 
+                mesh.name.empty() ? "Unnamed Mesh" : mesh.name.c_str());
+            ImGui::Spacing();
+            
+            // Reset all button
+            if (ImGui::Button("Reset All##selected")) {
+                for (auto& key : mesh.shapeKeys) {
+                    key.weight = 0.0f;
+                }
+                if (m_selectedMeshIndex < static_cast<int>(model.meshGPUData.size())) {
+                    updateMeshVertices(mesh, model.meshGPUData[m_selectedMeshIndex]);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Max All##selected")) {
+                for (auto& key : mesh.shapeKeys) {
+                    key.weight = key.maxWeight;
+                }
+                if (m_selectedMeshIndex < static_cast<int>(model.meshGPUData.size())) {
+                    updateMeshVertices(mesh, model.meshGPUData[m_selectedMeshIndex]);
+                }
+            }
+            
+            ImGui::Separator();
+            
+            bool anyChanged = false;
             for (auto& key : mesh.shapeKeys) {
                 ImGui::PushID(key.name.c_str());
-                ImGui::SliderFloat(key.name.c_str(), &key.weight, key.minWeight, key.maxWeight);
+                
+                // Slider with input
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 60);
+                if (ImGui::SliderFloat("##slider", &key.weight, key.minWeight, key.maxWeight, "%.3f")) {
+                    anyChanged = true;
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", key.name.c_str());
+                
                 ImGui::PopID();
             }
+            
+            if (anyChanged && m_selectedMeshIndex < static_cast<int>(model.meshGPUData.size())) {
+                updateMeshVertices(mesh, model.meshGPUData[m_selectedMeshIndex]);
+            }
+        } else {
+            ImGui::TextDisabled("Selected mesh has no shape keys");
+        }
+        
+        ImGui::Spacing();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Other Meshes:");
+    }
+    
+    // Show other meshes with shape keys in collapsible sections
+    for (size_t mi = 0; mi < model.loadResult.meshes.size(); ++mi) {
+        // Skip the selected mesh (already shown above)
+        if (static_cast<int>(mi) == m_selectedMeshIndex) continue;
+        
+        auto& mesh = model.loadResult.meshes[mi];
+        if (mesh.shapeKeys.empty()) continue;
+        
+        std::string header = mesh.name.empty() ? "Mesh " + std::to_string(mi) : mesh.name;
+        header += " (" + std::to_string(mesh.shapeKeys.size()) + " keys)";
+        
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_None;
+        if (ImGui::TreeNodeEx(header.c_str(), flags)) {
+            bool anyChanged = false;
+            for (auto& key : mesh.shapeKeys) {
+                ImGui::PushID((std::to_string(mi) + key.name).c_str());
+                if (ImGui::SliderFloat(key.name.c_str(), &key.weight, key.minWeight, key.maxWeight)) {
+                    anyChanged = true;
+                }
+                ImGui::PopID();
+            }
+            
+            if (anyChanged && mi < model.meshGPUData.size()) {
+                updateMeshVertices(mesh, model.meshGPUData[mi]);
+            }
+            
             ImGui::TreePop();
+        }
+        
+        // Click header to select mesh
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            m_selectedMeshIndex = static_cast<int>(mi);
         }
     }
 }
@@ -1278,7 +1647,7 @@ void CharacterEditorUI::renderSocketPanel() {
 }
 
 void CharacterEditorUI::renderIKPanel() {
-    ImGui::Text("IK Testing");
+    ImGui::Text("Live IK Testing");
     ImGui::Separator();
     
     ImGui::Checkbox("Enable IK", &m_ikEnabled);
@@ -1288,32 +1657,184 @@ void CharacterEditorUI::renderIKPanel() {
         return;
     }
     
-    // TODO: Implement IK testing UI
-    ImGui::TextDisabled("IK testing not yet implemented");
-    
-    if (ImGui::Button("Add IK Target")) {
-        IKTestTarget target;
-        target.targetPosition = m_camera.target;
-        m_ikTargets.push_back(target);
+    // Get current model's skeleton
+    if (m_models.empty() || m_selectedModelIndex < 0 || 
+        m_selectedModelIndex >= static_cast<int>(m_models.size())) {
+        ImGui::TextDisabled("No model loaded");
+        return;
     }
     
+    auto& model = m_models[m_selectedModelIndex];
+    const Skeleton& skeleton = model.loadResult.skeleton;
+    
+    if (skeleton.empty()) {
+        ImGui::TextDisabled("Model has no skeleton");
+        return;
+    }
+    
+    // Copy skeleton for IK modifications if needed
+    if (m_solvedSkeleton.bones.size() != skeleton.bones.size()) {
+        m_solvedSkeleton = skeleton;
+    }
+    
+    // IK Solver settings
+    if (ImGui::CollapsingHeader("Solver Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static float tolerance = 0.001f;
+        static int maxIterations = 10;
+        
+        if (ImGui::DragFloat("Tolerance", &tolerance, 0.0001f, 0.0001f, 0.1f, "%.4f")) {
+            m_ikSolver.setTolerance(tolerance);
+        }
+        if (ImGui::DragInt("Max Iterations", &maxIterations, 1, 1, 50)) {
+            m_ikSolver.setMaxIterations(maxIterations);
+        }
+    }
+    
+    ImGui::Separator();
+    
+    // Add new IK chain
+    if (ImGui::Button("Add IK Chain")) {
+        IKTestTarget target;
+        target.name = "Chain " + std::to_string(m_ikTargets.size() + 1);
+        target.target.position = m_camera.target;
+        m_ikTargets.push_back(target);
+        m_selectedIKTarget = static_cast<int>(m_ikTargets.size()) - 1;
+    }
+    
+    ImGui::Separator();
+    
+    // IK chains list
     for (size_t i = 0; i < m_ikTargets.size(); ++i) {
-        auto& target = m_ikTargets[i];
+        auto& ikTarget = m_ikTargets[i];
         ImGui::PushID(static_cast<int>(i));
         
-        if (ImGui::TreeNode("Target")) {
-            ImGui::DragFloat3("Position", glm::value_ptr(target.targetPosition), 0.01f);
-            ImGui::Checkbox("Active", &target.isActive);
-            
-            if (ImGui::Button("Remove")) {
-                m_ikTargets.erase(m_ikTargets.begin() + i);
-                --i;
-            }
-            
-            ImGui::TreePop();
+        bool isSelected = (m_selectedIKTarget == static_cast<int>(i));
+        std::string label = ikTarget.name + (ikTarget.chain.isValid() ? " [OK]" : " [Setup]");
+        
+        if (ImGui::Selectable(label.c_str(), isSelected)) {
+            m_selectedIKTarget = static_cast<int>(i);
+        }
+        
+        if (isSelected && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            // Double-click to toggle active
+            ikTarget.isActive = !ikTarget.isActive;
         }
         
         ImGui::PopID();
+    }
+    
+    ImGui::Separator();
+    
+    // Selected chain details
+    if (m_selectedIKTarget >= 0 && m_selectedIKTarget < static_cast<int>(m_ikTargets.size())) {
+        auto& ikTarget = m_ikTargets[m_selectedIKTarget];
+        
+        ImGui::Text("Chain Setup");
+        
+        // Chain name
+        char nameBuf[128];
+        strncpy(nameBuf, ikTarget.name.c_str(), sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+        if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+            ikTarget.name = nameBuf;
+        }
+        
+        // Start bone selection (combo box)
+        if (ImGui::BeginCombo("Start Bone", 
+            ikTarget.startBoneIndex >= 0 ? skeleton.bones[ikTarget.startBoneIndex].name.c_str() : "None")) {
+            for (size_t bi = 0; bi < skeleton.bones.size(); ++bi) {
+                bool selected = (ikTarget.startBoneIndex == static_cast<int>(bi));
+                if (ImGui::Selectable(skeleton.bones[bi].name.c_str(), selected)) {
+                    ikTarget.startBoneIndex = static_cast<int>(bi);
+                    // Rebuild chain if both bones are set
+                    if (ikTarget.endBoneIndex >= 0) {
+                        ikTarget.chain = FABRIKSolver::buildChain(
+                            skeleton, 
+                            static_cast<uint32_t>(ikTarget.startBoneIndex),
+                            static_cast<uint32_t>(ikTarget.endBoneIndex));
+                    }
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        
+        // End bone selection (combo box)
+        if (ImGui::BeginCombo("End Bone", 
+            ikTarget.endBoneIndex >= 0 ? skeleton.bones[ikTarget.endBoneIndex].name.c_str() : "None")) {
+            for (size_t bi = 0; bi < skeleton.bones.size(); ++bi) {
+                bool selected = (ikTarget.endBoneIndex == static_cast<int>(bi));
+                if (ImGui::Selectable(skeleton.bones[bi].name.c_str(), selected)) {
+                    ikTarget.endBoneIndex = static_cast<int>(bi);
+                    // Rebuild chain if both bones are set
+                    if (ikTarget.startBoneIndex >= 0) {
+                        ikTarget.chain = FABRIKSolver::buildChain(
+                            skeleton, 
+                            static_cast<uint32_t>(ikTarget.startBoneIndex),
+                            static_cast<uint32_t>(ikTarget.endBoneIndex));
+                    }
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        
+        // Chain status
+        if (ikTarget.chain.isValid()) {
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), 
+                "Chain valid: %zu bones", ikTarget.chain.length());
+        } else if (ikTarget.startBoneIndex >= 0 && ikTarget.endBoneIndex >= 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), 
+                "Invalid chain (bones not connected)");
+        } else {
+            ImGui::TextDisabled("Select start and end bones");
+        }
+        
+        ImGui::Separator();
+        ImGui::Text("Target");
+        
+        // Target position
+        ImGui::DragFloat3("Position", glm::value_ptr(ikTarget.target.position), 0.01f);
+        
+        // Quick set target to current end effector position
+        if (ikTarget.chain.isValid() && ImGui::Button("Set to End Effector")) {
+            Transform endWorld = skeleton.getWorldTransform(ikTarget.chain.tipBoneIndex);
+            ikTarget.target.position = endWorld.position;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Set to Camera Target")) {
+            ikTarget.target.position = m_camera.target;
+        }
+        
+        // Blend weight
+        ImGui::SliderFloat("Blend Weight", &ikTarget.blendWeight, 0.0f, 1.0f);
+        
+        // Active toggle
+        ImGui::Checkbox("Active", &ikTarget.isActive);
+        
+        ImGui::Separator();
+        
+        // Remove button
+        if (ImGui::Button("Remove Chain")) {
+            m_ikTargets.erase(m_ikTargets.begin() + m_selectedIKTarget);
+            m_selectedIKTarget = -1;
+        }
+    }
+    
+    // Run IK solver for all active chains
+    if (m_ikEnabled) {
+        // Reset to original skeleton
+        m_solvedSkeleton = skeleton;
+        
+        for (auto& ikTarget : m_ikTargets) {
+            if (ikTarget.isActive && ikTarget.chain.isValid()) {
+                IKSolveResult result = m_ikSolver.solve(m_solvedSkeleton, ikTarget.chain, ikTarget.target);
+                if (!result.solvedTransforms.empty()) {
+                    FABRIKSolver::applyResult(m_solvedSkeleton, ikTarget.chain, result, ikTarget.blendWeight);
+                }
+            }
+        }
     }
 }
 
@@ -1340,6 +1861,45 @@ void CharacterEditorUI::handleViewportInput() {
     // Mouse position relative to viewport
     ImVec2 mousePos = io.MousePos;
     ImVec2 mouseDelta = io.MouseDelta;
+    glm::vec2 viewportMouse(io.MousePos.x - m_viewportPos.x, io.MousePos.y - m_viewportPos.y);
+    
+    // Handle gizmo first (if we have a selected IK target)
+    if (m_ikEnabled && m_selectedIKTarget >= 0 && m_selectedIKTarget < static_cast<int>(m_ikTargets.size())) {
+        handleGizmo();
+        if (m_isDraggingGizmo) {
+            return;  // Don't process other input while dragging gizmo
+        }
+    }
+    
+    // Handle bone gizmo (if we have a selected bone and not in IK mode)
+    if (!m_ikEnabled && m_selectedBoneIndex >= 0) {
+        handleBoneGizmo();
+        if (m_isDraggingGizmo) {
+            return;  // Don't process other input while dragging gizmo
+        }
+    }
+    
+    // Click to select bone or mesh (when not Alt-clicking for orbit)
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt && !m_isDraggingGizmo) {
+        // First try to pick a bone
+        int pickedBone = pickBone(viewportMouse);
+        if (pickedBone >= 0) {
+            m_selectedBoneIndex = pickedBone;
+            m_selectedMeshIndex = -1;  // Deselect mesh when selecting bone
+            
+            // Initialize posed skeleton when first selecting a bone
+            if (m_posedSkeleton.empty() && !m_models.empty()) {
+                m_posedSkeleton = m_models[0].loadResult.skeleton;
+            }
+        } else {
+            // Try to pick a mesh if no bone was hit
+            int pickedMesh = pickMesh(viewportMouse);
+            if (pickedMesh >= 0) {
+                m_selectedMeshIndex = pickedMesh;
+                m_selectedBoneIndex = -1;  // Deselect bone when selecting mesh
+            }
+        }
+    }
     
     // Orbit with middle mouse button or Alt+Left
     if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ||
@@ -1362,6 +1922,1397 @@ void CharacterEditorUI::handleViewportInput() {
     if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
         m_camera.pan(mouseDelta.x, mouseDelta.y);
     }
+    
+    // Press Escape to deselect bone and mesh
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        m_selectedBoneIndex = -1;
+        m_selectedMeshIndex = -1;
+    }
+}
+
+void CharacterEditorUI::handleGizmo() {
+    ImGuiIO& io = ImGui::GetIO();
+    
+    if (m_selectedIKTarget < 0 || m_selectedIKTarget >= static_cast<int>(m_ikTargets.size())) {
+        return;
+    }
+    
+    auto& ikTarget = m_ikTargets[m_selectedIKTarget];
+    glm::vec3& targetPos = ikTarget.target.position;
+    
+    // Convert mouse position to viewport-relative coordinates
+    glm::vec2 mousePos(io.MousePos.x - m_viewportPos.x, io.MousePos.y - m_viewportPos.y);
+    
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
+        // Try to pick a gizmo axis
+        GizmoAxis axis;
+        if (pickGizmoAxis(targetPos, mousePos, axis)) {
+            m_isDraggingGizmo = true;
+            m_gizmoDragAxis = axis;
+            m_gizmoTargetStart = targetPos;
+            m_gizmoDragStart = projectMouseOntoPlane(mousePos, targetPos, 
+                m_camera.getPosition() - targetPos);
+        }
+    }
+    
+    if (m_isDraggingGizmo && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        // Project current mouse position and calculate delta
+        glm::vec3 currentDrag = projectMouseOntoPlane(mousePos, m_gizmoTargetStart,
+            m_camera.getPosition() - m_gizmoTargetStart);
+        glm::vec3 delta = currentDrag - m_gizmoDragStart;
+        
+        // Constrain to axis
+        switch (m_gizmoDragAxis) {
+            case GizmoAxis::X:
+                delta.y = 0.0f; delta.z = 0.0f;
+                break;
+            case GizmoAxis::Y:
+                delta.x = 0.0f; delta.z = 0.0f;
+                break;
+            case GizmoAxis::Z:
+                delta.x = 0.0f; delta.y = 0.0f;
+                break;
+            default:
+                break;
+        }
+        
+        targetPos = m_gizmoTargetStart + delta;
+    }
+    
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        m_isDraggingGizmo = false;
+        m_gizmoDragAxis = GizmoAxis::None;
+    }
+}
+
+bool CharacterEditorUI::pickGizmoAxis(const glm::vec3& gizmoPos, const glm::vec2& mousePos, GizmoAxis& outAxis) {
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 vp = projection * view;
+    
+    float gizmoSize = 0.5f;  // World space size
+    
+    // Project gizmo origin and axis endpoints to screen space
+    auto project = [&](const glm::vec3& worldPos) -> glm::vec2 {
+        glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+        if (clip.w <= 0) return glm::vec2(-10000);
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        return glm::vec2(
+            (ndc.x * 0.5f + 0.5f) * m_viewportSize.x,
+            (1.0f - (ndc.y * 0.5f + 0.5f)) * m_viewportSize.y
+        );
+    };
+    
+    glm::vec2 origin = project(gizmoPos);
+    glm::vec2 xEnd = project(gizmoPos + glm::vec3(gizmoSize, 0, 0));
+    glm::vec2 yEnd = project(gizmoPos + glm::vec3(0, gizmoSize, 0));
+    glm::vec2 zEnd = project(gizmoPos + glm::vec3(0, 0, gizmoSize));
+    
+    // Distance from mouse to each axis line
+    auto distToLine = [](const glm::vec2& p, const glm::vec2& a, const glm::vec2& b) -> float {
+        glm::vec2 ab = b - a;
+        float len = glm::length(ab);
+        if (len < 0.001f) return glm::length(p - a);
+        glm::vec2 n = ab / len;
+        float t = glm::clamp(glm::dot(p - a, n), 0.0f, len);
+        return glm::length(p - (a + n * t));
+    };
+    
+    float pickThreshold = 15.0f;  // Pixels
+    
+    float distX = distToLine(mousePos, origin, xEnd);
+    float distY = distToLine(mousePos, origin, yEnd);
+    float distZ = distToLine(mousePos, origin, zEnd);
+    
+    float minDist = std::min({distX, distY, distZ});
+    
+    if (minDist > pickThreshold) {
+        outAxis = GizmoAxis::None;
+        return false;
+    }
+    
+    if (distX == minDist) {
+        outAxis = GizmoAxis::X;
+    } else if (distY == minDist) {
+        outAxis = GizmoAxis::Y;
+    } else {
+        outAxis = GizmoAxis::Z;
+    }
+    
+    return true;
+}
+
+glm::vec3 CharacterEditorUI::projectMouseOntoPlane(const glm::vec2& mousePos, 
+                                                    const glm::vec3& planeOrigin, 
+                                                    const glm::vec3& planeNormal) {
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 invVP = glm::inverse(projection * view);
+    
+    // Convert mouse position to NDC
+    float ndcX = (mousePos.x / m_viewportSize.x) * 2.0f - 1.0f;
+    float ndcY = 1.0f - (mousePos.y / m_viewportSize.y) * 2.0f;
+    
+    // Create ray from camera through mouse position
+    glm::vec4 nearPoint = invVP * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
+    glm::vec4 farPoint = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    
+    nearPoint /= nearPoint.w;
+    farPoint /= farPoint.w;
+    
+    glm::vec3 rayOrigin = glm::vec3(nearPoint);
+    glm::vec3 rayDir = glm::normalize(glm::vec3(farPoint) - rayOrigin);
+    
+    // Intersect ray with plane
+    glm::vec3 n = glm::normalize(planeNormal);
+    float denom = glm::dot(n, rayDir);
+    
+    if (std::abs(denom) < 0.0001f) {
+        // Ray parallel to plane - return origin
+        return planeOrigin;
+    }
+    
+    float t = glm::dot(planeOrigin - rayOrigin, n) / denom;
+    return rayOrigin + rayDir * t;
+}
+
+void CharacterEditorUI::renderTranslationGizmo(const glm::vec3& position, float size) {
+    std::vector<float> lineData;
+    
+    auto addLine = [&](const glm::vec3& p1, const glm::vec3& p2, const glm::vec4& color) {
+        lineData.push_back(p1.x); lineData.push_back(p1.y); lineData.push_back(p1.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+        lineData.push_back(p2.x); lineData.push_back(p2.y); lineData.push_back(p2.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+    };
+    
+    // Colors - highlight if being dragged
+    glm::vec4 xColor = (m_gizmoDragAxis == GizmoAxis::X) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(1.0f, 0.3f, 0.3f, 1.0f);
+    glm::vec4 yColor = (m_gizmoDragAxis == GizmoAxis::Y) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(0.3f, 1.0f, 0.3f, 1.0f);
+    glm::vec4 zColor = (m_gizmoDragAxis == GizmoAxis::Z) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(0.3f, 0.3f, 1.0f, 1.0f);
+    
+    // X axis
+    addLine(position, position + glm::vec3(size, 0, 0), xColor);
+    // Arrow head
+    addLine(position + glm::vec3(size, 0, 0), position + glm::vec3(size * 0.85f, size * 0.1f, 0), xColor);
+    addLine(position + glm::vec3(size, 0, 0), position + glm::vec3(size * 0.85f, -size * 0.1f, 0), xColor);
+    addLine(position + glm::vec3(size, 0, 0), position + glm::vec3(size * 0.85f, 0, size * 0.1f), xColor);
+    addLine(position + glm::vec3(size, 0, 0), position + glm::vec3(size * 0.85f, 0, -size * 0.1f), xColor);
+    
+    // Y axis
+    addLine(position, position + glm::vec3(0, size, 0), yColor);
+    // Arrow head
+    addLine(position + glm::vec3(0, size, 0), position + glm::vec3(size * 0.1f, size * 0.85f, 0), yColor);
+    addLine(position + glm::vec3(0, size, 0), position + glm::vec3(-size * 0.1f, size * 0.85f, 0), yColor);
+    addLine(position + glm::vec3(0, size, 0), position + glm::vec3(0, size * 0.85f, size * 0.1f), yColor);
+    addLine(position + glm::vec3(0, size, 0), position + glm::vec3(0, size * 0.85f, -size * 0.1f), yColor);
+    
+    // Z axis
+    addLine(position, position + glm::vec3(0, 0, size), zColor);
+    // Arrow head
+    addLine(position + glm::vec3(0, 0, size), position + glm::vec3(size * 0.1f, 0, size * 0.85f), zColor);
+    addLine(position + glm::vec3(0, 0, size), position + glm::vec3(-size * 0.1f, 0, size * 0.85f), zColor);
+    addLine(position + glm::vec3(0, 0, size), position + glm::vec3(0, size * 0.1f, size * 0.85f), zColor);
+    addLine(position + glm::vec3(0, 0, size), position + glm::vec3(0, -size * 0.1f, size * 0.85f), zColor);
+    
+    if (!lineData.empty()) {
+        glLineWidth(3.0f);
+        glBindVertexArray(m_lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_lineVBO);
+        glBufferData(GL_ARRAY_BUFFER, lineData.size() * sizeof(float), lineData.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lineData.size() / 7));
+        glBindVertexArray(0);
+        glLineWidth(1.0f);
+    }
+}
+
+int CharacterEditorUI::pickBone(const glm::vec2& mousePos) {
+    if (m_models.empty()) return -1;
+    
+    const auto& model = m_models[0];
+    const Skeleton& skeleton = m_posedSkeleton.empty() ? model.loadResult.skeleton : m_posedSkeleton;
+    if (skeleton.empty()) return -1;
+    
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 vp = projection * view;
+    
+    // Project function
+    auto project = [&](const glm::vec3& worldPos) -> glm::vec2 {
+        glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+        if (clip.w <= 0) return glm::vec2(-10000);
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        return glm::vec2(
+            (ndc.x * 0.5f + 0.5f) * m_viewportSize.x,
+            (1.0f - (ndc.y * 0.5f + 0.5f)) * m_viewportSize.y
+        );
+    };
+    
+    float pickRadius = 20.0f;  // Pixels
+    float closestDist = pickRadius;
+    int closestBone = -1;
+    
+    for (size_t i = 0; i < skeleton.bones.size(); ++i) {
+        Transform worldTransform = skeleton.getWorldTransform(static_cast<uint32_t>(i));
+        glm::vec2 screenPos = project(worldTransform.position);
+        
+        float dist = glm::length(mousePos - screenPos);
+        if (dist < closestDist) {
+            closestDist = dist;
+            closestBone = static_cast<int>(i);
+        }
+    }
+    
+    return closestBone;
+}
+
+int CharacterEditorUI::pickMesh(const glm::vec2& mousePos) {
+    if (m_models.empty() || m_selectedModelIndex < 0 || 
+        m_selectedModelIndex >= static_cast<int>(m_models.size())) {
+        return -1;
+    }
+    
+    const auto& model = m_models[m_selectedModelIndex];
+    if (model.loadResult.meshes.empty()) return -1;
+    
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 modelMatrix = model.worldTransform.toMatrix();
+    
+    // Convert mouse position to normalized device coordinates
+    float ndcX = (mousePos.x / m_viewportSize.x) * 2.0f - 1.0f;
+    float ndcY = 1.0f - (mousePos.y / m_viewportSize.y) * 2.0f;
+    
+    // Create ray from camera through mouse position
+    glm::mat4 invProj = glm::inverse(projection);
+    glm::mat4 invView = glm::inverse(view);
+    
+    glm::vec4 rayClip(ndcX, ndcY, -1.0f, 1.0f);
+    glm::vec4 rayEye = invProj * rayClip;
+    rayEye = glm::vec4(rayEye.x, rayEye.y, -1.0f, 0.0f);
+    glm::vec3 rayDir = glm::normalize(glm::vec3(invView * rayEye));
+    glm::vec3 rayOrigin = m_camera.getPosition();
+    
+    // Test against each mesh's bounding box
+    int closestMesh = -1;
+    float closestT = FLT_MAX;
+    
+    for (size_t i = 0; i < model.loadResult.meshes.size(); ++i) {
+        const auto& mesh = model.loadResult.meshes[i];
+        
+        // Transform bounds to world space
+        glm::vec3 minWorld = glm::vec3(modelMatrix * glm::vec4(mesh.boundsMin, 1.0f));
+        glm::vec3 maxWorld = glm::vec3(modelMatrix * glm::vec4(mesh.boundsMax, 1.0f));
+        
+        // Ensure min < max after transform
+        glm::vec3 boundsMin = glm::min(minWorld, maxWorld);
+        glm::vec3 boundsMax = glm::max(minWorld, maxWorld);
+        
+        // Ray-AABB intersection (slab method)
+        glm::vec3 invDir = 1.0f / rayDir;
+        glm::vec3 t1 = (boundsMin - rayOrigin) * invDir;
+        glm::vec3 t2 = (boundsMax - rayOrigin) * invDir;
+        
+        glm::vec3 tMin = glm::min(t1, t2);
+        glm::vec3 tMax = glm::max(t1, t2);
+        
+        float tEnter = glm::max(tMin.x, glm::max(tMin.y, tMin.z));
+        float tExit = glm::min(tMax.x, glm::min(tMax.y, tMax.z));
+        
+        if (tEnter <= tExit && tExit > 0.0f) {
+            float t = (tEnter > 0.0f) ? tEnter : tExit;
+            if (t < closestT) {
+                closestT = t;
+                closestMesh = static_cast<int>(i);
+            }
+        }
+    }
+    
+    return closestMesh;
+}
+
+bool CharacterEditorUI::pickRotationGizmoAxis(const glm::vec3& gizmoPos, const glm::vec2& mousePos,
+                                                float radius, GizmoAxis& outAxis) {
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 vp = projection * view;
+    
+    auto project = [&](const glm::vec3& worldPos) -> glm::vec2 {
+        glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+        if (clip.w <= 0) return glm::vec2(-10000);
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        return glm::vec2(
+            (ndc.x * 0.5f + 0.5f) * m_viewportSize.x,
+            (1.0f - (ndc.y * 0.5f + 0.5f)) * m_viewportSize.y
+        );
+    };
+    
+    // Distance from mouse to each rotation ring
+    auto distToRing = [&](const glm::vec3& axis) -> float {
+        float minDist = FLT_MAX;
+        int segments = 32;
+        
+        // Get perpendicular vectors
+        glm::vec3 up = (std::abs(axis.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+        glm::vec3 perp1 = glm::normalize(glm::cross(axis, up));
+        glm::vec3 perp2 = glm::cross(axis, perp1);
+        
+        for (int i = 0; i < segments; ++i) {
+            float a1 = (float)i / segments * 2.0f * 3.14159f;
+            float a2 = (float)(i + 1) / segments * 2.0f * 3.14159f;
+            
+            glm::vec3 p1 = gizmoPos + (perp1 * std::cos(a1) + perp2 * std::sin(a1)) * radius;
+            glm::vec3 p2 = gizmoPos + (perp1 * std::cos(a2) + perp2 * std::sin(a2)) * radius;
+            
+            glm::vec2 sp1 = project(p1);
+            glm::vec2 sp2 = project(p2);
+            
+            // Distance from point to line segment
+            glm::vec2 ab = sp2 - sp1;
+            float len = glm::length(ab);
+            if (len < 0.001f) continue;
+            glm::vec2 n = ab / len;
+            float t = glm::clamp(glm::dot(mousePos - sp1, n), 0.0f, len);
+            float d = glm::length(mousePos - (sp1 + n * t));
+            minDist = std::min(minDist, d);
+        }
+        
+        return minDist;
+    };
+    
+    float pickThreshold = 12.0f;  // Pixels
+    
+    float distX = distToRing(glm::vec3(1, 0, 0));
+    float distY = distToRing(glm::vec3(0, 1, 0));
+    float distZ = distToRing(glm::vec3(0, 0, 1));
+    
+    float minDist = std::min({distX, distY, distZ});
+    
+    if (minDist > pickThreshold) {
+        outAxis = GizmoAxis::None;
+        return false;
+    }
+    
+    if (distX == minDist) {
+        outAxis = GizmoAxis::X;
+    } else if (distY == minDist) {
+        outAxis = GizmoAxis::Y;
+    } else {
+        outAxis = GizmoAxis::Z;
+    }
+    
+    return true;
+}
+
+void CharacterEditorUI::handleBoneGizmo() {
+    ImGuiIO& io = ImGui::GetIO();
+    
+    if (m_selectedBoneIndex < 0 || m_models.empty()) return;
+    
+    const auto& model = m_models[0];
+    Skeleton& skeleton = m_posedSkeleton.empty() ? m_posedSkeleton : m_posedSkeleton;
+    
+    // Initialize posed skeleton if needed
+    if (m_posedSkeleton.empty() && !model.loadResult.skeleton.empty()) {
+        m_posedSkeleton = model.loadResult.skeleton;
+    }
+    
+    if (m_selectedBoneIndex >= static_cast<int>(m_posedSkeleton.bones.size())) return;
+    
+    glm::vec2 mousePos(io.MousePos.x - m_viewportPos.x, io.MousePos.y - m_viewportPos.y);
+    Transform boneWorld = m_posedSkeleton.getWorldTransform(static_cast<uint32_t>(m_selectedBoneIndex));
+    
+    float gizmoRadius = 0.3f;
+    
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyAlt) {
+        // Try to pick a rotation axis
+        GizmoAxis axis;
+        if (pickRotationGizmoAxis(boneWorld.position, mousePos, gizmoRadius, axis)) {
+            m_isDraggingGizmo = true;
+            m_gizmoDragAxis = axis;
+            m_gizmoRotationStart = m_posedSkeleton.bones[m_selectedBoneIndex].localTransform.rotation;
+            m_gizmoDragStart = projectMouseOntoPlane(mousePos, boneWorld.position,
+                m_camera.getPosition() - boneWorld.position);
+        }
+    }
+    
+    if (m_isDraggingGizmo && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        glm::vec3 currentDrag = projectMouseOntoPlane(mousePos, boneWorld.position,
+            m_camera.getPosition() - boneWorld.position);
+        
+        // Calculate rotation based on movement around the gizmo center
+        glm::vec3 startDir = glm::normalize(m_gizmoDragStart - boneWorld.position);
+        glm::vec3 currentDir = glm::normalize(currentDrag - boneWorld.position);
+        
+        // Determine rotation axis in world space
+        glm::vec3 rotAxis;
+        switch (m_gizmoDragAxis) {
+            case GizmoAxis::X: rotAxis = glm::vec3(1, 0, 0); break;
+            case GizmoAxis::Y: rotAxis = glm::vec3(0, 1, 0); break;
+            case GizmoAxis::Z: rotAxis = glm::vec3(0, 0, 1); break;
+            default: return;
+        }
+        
+        // Project directions onto rotation plane
+        glm::vec3 startProj = startDir - rotAxis * glm::dot(startDir, rotAxis);
+        glm::vec3 currentProj = currentDir - rotAxis * glm::dot(currentDir, rotAxis);
+        
+        if (glm::length(startProj) > 0.001f && glm::length(currentProj) > 0.001f) {
+            startProj = glm::normalize(startProj);
+            currentProj = glm::normalize(currentProj);
+            
+            float angle = std::acos(glm::clamp(glm::dot(startProj, currentProj), -1.0f, 1.0f));
+            float sign = glm::dot(rotAxis, glm::cross(startProj, currentProj)) > 0 ? 1.0f : -1.0f;
+            angle *= sign;
+            
+            // Convert to local space rotation
+            // Get parent's world rotation to transform the axis
+            glm::quat parentWorldRot(1, 0, 0, 0);
+            uint32_t parentID = m_posedSkeleton.bones[m_selectedBoneIndex].parentID;
+            if (parentID != UINT32_MAX && parentID < m_posedSkeleton.bones.size()) {
+                parentWorldRot = m_posedSkeleton.getWorldTransform(parentID).rotation;
+            }
+            
+            // Transform rotation axis to local space
+            glm::vec3 localAxis = glm::inverse(parentWorldRot) * rotAxis;
+            
+            // Create delta rotation and apply
+            glm::quat deltaRot = glm::angleAxis(angle, localAxis);
+            m_posedSkeleton.bones[m_selectedBoneIndex].localTransform.rotation = 
+                glm::normalize(deltaRot * m_gizmoRotationStart);
+            
+            // Store the pose override
+            m_bonePoseOverrides[m_selectedBoneIndex] = 
+                m_posedSkeleton.bones[m_selectedBoneIndex].localTransform.rotation;
+        }
+    }
+    
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        m_isDraggingGizmo = false;
+        m_gizmoDragAxis = GizmoAxis::None;
+    }
+}
+
+void CharacterEditorUI::renderRotationGizmo(const glm::vec3& position, 
+                                             const glm::quat& rotation, float radius) {
+    std::vector<float> lineData;
+    
+    auto addLine = [&](const glm::vec3& p1, const glm::vec3& p2, const glm::vec4& color) {
+        lineData.push_back(p1.x); lineData.push_back(p1.y); lineData.push_back(p1.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+        lineData.push_back(p2.x); lineData.push_back(p2.y); lineData.push_back(p2.z);
+        lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
+    };
+    
+    // Draw a ring for each axis
+    auto drawRing = [&](const glm::vec3& axis, const glm::vec4& color) {
+        int segments = 32;
+        glm::vec3 up = (std::abs(axis.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+        glm::vec3 perp1 = glm::normalize(glm::cross(axis, up));
+        glm::vec3 perp2 = glm::cross(axis, perp1);
+        
+        for (int i = 0; i < segments; ++i) {
+            float a1 = (float)i / segments * 2.0f * 3.14159f;
+            float a2 = (float)(i + 1) / segments * 2.0f * 3.14159f;
+            
+            glm::vec3 p1 = position + (perp1 * std::cos(a1) + perp2 * std::sin(a1)) * radius;
+            glm::vec3 p2 = position + (perp1 * std::cos(a2) + perp2 * std::sin(a2)) * radius;
+            
+            addLine(p1, p2, color);
+        }
+    };
+    
+    // Colors - highlight if being dragged
+    glm::vec4 xColor = (m_gizmoDragAxis == GizmoAxis::X) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(1.0f, 0.3f, 0.3f, 1.0f);
+    glm::vec4 yColor = (m_gizmoDragAxis == GizmoAxis::Y) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(0.3f, 1.0f, 0.3f, 1.0f);
+    glm::vec4 zColor = (m_gizmoDragAxis == GizmoAxis::Z) ? glm::vec4(1.0f, 1.0f, 0.0f, 1.0f) : glm::vec4(0.3f, 0.3f, 1.0f, 1.0f);
+    
+    drawRing(glm::vec3(1, 0, 0), xColor);  // X - rotate around X axis (YZ plane)
+    drawRing(glm::vec3(0, 1, 0), yColor);  // Y - rotate around Y axis (XZ plane)
+    drawRing(glm::vec3(0, 0, 1), zColor);  // Z - rotate around Z axis (XY plane)
+    
+    if (!lineData.empty()) {
+        glLineWidth(2.0f);
+        glBindVertexArray(m_lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_lineVBO);
+        glBufferData(GL_ARRAY_BUFFER, lineData.size() * sizeof(float), lineData.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lineData.size() / 7));
+        glBindVertexArray(0);
+        glLineWidth(1.0f);
+    }
+}
+
+// ============================================================
+// Parts Library Methods
+// ============================================================
+
+void CharacterEditorUI::setPartLibrary(PartLibrary* library) {
+    m_partLibrary = library;
+    if (m_partLibrary) {
+        refreshPartsList();
+    }
+}
+
+void CharacterEditorUI::refreshPartsList() {
+    m_partSummaries.clear();
+    m_partCategories.clear();
+    m_selectedPartSummaryIndex = -1;
+    
+    if (!m_partLibrary) return;
+    
+    // Get all part summaries
+    m_partSummaries = m_partLibrary->getAllPartSummaries();
+    m_partCategories = m_partLibrary->getAllCategories();
+}
+
+// ============================================================
+// Character Manager Methods
+// ============================================================
+
+void CharacterEditorUI::setCharacterManager(CharacterManager* manager) {
+    m_characterManager = manager;
+    if (m_characterManager) {
+        refreshPrefabsList();
+        refreshCharactersList();
+    }
+}
+
+void CharacterEditorUI::refreshPrefabsList() {
+    m_prefabSummaries.clear();
+    m_selectedPrefabIndex = -1;
+    
+    if (!m_characterManager) return;
+    m_prefabSummaries = m_characterManager->getAllPrefabSummaries();
+}
+
+void CharacterEditorUI::refreshCharactersList() {
+    m_characterSummaries.clear();
+    m_selectedCharacterIndex = -1;
+    
+    if (!m_characterManager) return;
+    m_characterSummaries = m_characterManager->getAllCharacterSummaries();
+}
+
+void CharacterEditorUI::startPartDrag(int64_t partDbID) {
+    if (!m_partLibrary) return;
+    
+    m_isDraggingPart = true;
+    m_draggingPartDbID = partDbID;
+    m_draggingPart = m_partLibrary->loadPart(partDbID);
+    m_dragStartPos = glm::vec2(ImGui::GetIO().MousePos.x, ImGui::GetIO().MousePos.y);
+    m_highlightedSocket = nullptr;
+    
+    if (m_draggingPart) {
+        PLOGI << "Started dragging part: " << m_draggingPart->name;
+    }
+}
+
+void CharacterEditorUI::cancelPartDrag() {
+    m_isDraggingPart = false;
+    m_draggingPartDbID = -1;
+    m_draggingPart.reset();
+    m_highlightedSocket = nullptr;
+}
+
+void CharacterEditorUI::renderPartsLibraryPanel() {
+    ImGui::Text("Parts Library");
+    ImGui::Separator();
+    
+    if (!m_partLibrary) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No vault connected");
+        ImGui::TextWrapped("Connect to a vault to access the parts library.");
+        return;
+    }
+    
+    // Search bar
+    static char searchBuf[256] = "";
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##PartsSearch", "Search parts...", searchBuf, sizeof(searchBuf))) {
+        m_partsSearchQuery = searchBuf;
+    }
+    
+    // Category filter
+    if (!m_partCategories.empty()) {
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##Category", m_partsSelectedCategory.empty() ? "All Categories" : m_partsSelectedCategory.c_str())) {
+            if (ImGui::Selectable("All Categories", m_partsSelectedCategory.empty())) {
+                m_partsSelectedCategory.clear();
+            }
+            for (const auto& cat : m_partCategories) {
+                if (ImGui::Selectable(cat.c_str(), m_partsSelectedCategory == cat)) {
+                    m_partsSelectedCategory = cat;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    
+    // Import button
+    if (ImGui::Button("Import Part...", ImVec2(-1, 0))) {
+        m_showImportPartModal = true;
+        m_partImportError.clear();
+        // Initialize browser path to current directory if not set
+        if (m_importBrowserPath.empty()) {
+            m_importBrowserPath = std::filesystem::current_path();
+        }
+        ImGui::OpenPopup("Import Part File");
+    }
+    
+    // Import Part File browser modal
+    if (ImGui::BeginPopupModal("Import Part File", &m_showImportPartModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Select a model file to import:");
+        ImGui::Separator();
+        
+        // Current path display
+        ImGui::TextWrapped("%s", m_importBrowserPath.string().c_str());
+        ImGui::SameLine();
+        if (ImGui::Button("Up##import")) {
+            if (m_importBrowserPath.has_parent_path()) {
+                m_importBrowserPath = m_importBrowserPath.parent_path();
+            }
+        }
+        ImGui::Separator();
+        
+        // File listing
+        ImGui::BeginChild("ImportFileList", ImVec2(400, 300), true);
+        try {
+            std::vector<std::filesystem::directory_entry> dirs, files;
+            for (auto& e : std::filesystem::directory_iterator(m_importBrowserPath)) {
+                if (e.is_directory()) {
+                    dirs.push_back(e);
+                } else if (e.is_regular_file()) {
+                    // Filter by extension
+                    auto ext = e.path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".fbx" || ext == ".glb" || ext == ".gltf" || ext == ".obj") {
+                        files.push_back(e);
+                    }
+                }
+            }
+            
+            // Sort alphabetically
+            std::sort(dirs.begin(), dirs.end(), [](const auto& a, const auto& b) {
+                return a.path().filename().string() < b.path().filename().string();
+            });
+            std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
+                return a.path().filename().string() < b.path().filename().string();
+            });
+            
+            // Display directories
+            for (auto& d : dirs) {
+                std::string label = "[DIR] " + d.path().filename().string();
+                if (ImGui::Selectable(label.c_str())) {
+                    m_importBrowserPath = d.path();
+                    m_importBrowserSelectedFile.clear();
+                }
+            }
+            
+            // Display files
+            for (auto& f : files) {
+                std::string fname = f.path().filename().string();
+                bool selected = (m_importBrowserSelectedFile == fname);
+                if (ImGui::Selectable(fname.c_str(), selected)) {
+                    m_importBrowserSelectedFile = fname;
+                }
+                
+                // Double-click to import
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    m_importBrowserSelectedFile = fname;
+                    // Perform import
+                    std::filesystem::path fullPath = m_importBrowserPath / fname;
+                    std::string error;
+                    auto part = m_partLibrary->importFromFile(fullPath.string(), &error);
+                    if (part) {
+                        int64_t dbID = m_partLibrary->savePart(*part);
+                        if (dbID > 0) {
+                            PLOGI << "Imported and saved part: " << part->name << " (ID: " << dbID << ")";
+                            refreshPartsList();
+                            m_partImportError.clear();
+                        } else {
+                            m_partImportError = "Failed to save part to database";
+                        }
+                    } else {
+                        m_partImportError = error.empty() ? "Failed to import part" : error;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        } catch (const std::exception& ex) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s", ex.what());
+        }
+        ImGui::EndChild();
+        
+        // Selected file display
+        if (!m_importBrowserSelectedFile.empty()) {
+            ImGui::Text("Selected: %s", m_importBrowserSelectedFile.c_str());
+        }
+        
+        // Action buttons
+        ImGui::Separator();
+        if (ImGui::Button("Import", ImVec2(100, 0))) {
+            if (!m_importBrowserSelectedFile.empty()) {
+                std::filesystem::path fullPath = m_importBrowserPath / m_importBrowserSelectedFile;
+                std::string error;
+                auto part = m_partLibrary->importFromFile(fullPath.string(), &error);
+                if (part) {
+                    int64_t dbID = m_partLibrary->savePart(*part);
+                    if (dbID > 0) {
+                        PLOGI << "Imported and saved part: " << part->name << " (ID: " << dbID << ")";
+                        refreshPartsList();
+                        m_partImportError.clear();
+                    } else {
+                        m_partImportError = "Failed to save part to database";
+                    }
+                } else {
+                    m_partImportError = error.empty() ? "Failed to import part" : error;
+                }
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        
+        ImGui::EndPopup();
+    }
+    
+    if (!m_partImportError.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s", m_partImportError.c_str());
+    }
+    
+    ImGui::Separator();
+    
+    // Parts list
+    ImGui::BeginChild("PartsList", ImVec2(0, 200), true);
+    
+    // Filter and display parts
+    std::vector<PartSummary> filteredParts;
+    for (const auto& summary : m_partSummaries) {
+        // Category filter
+        if (!m_partsSelectedCategory.empty() && summary.category != m_partsSelectedCategory) {
+            continue;
+        }
+        
+        // Search filter
+        if (!m_partsSearchQuery.empty()) {
+            std::string searchLower = m_partsSearchQuery;
+            std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+            
+            std::string nameLower = summary.name;
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+            
+            std::string tagsLower = summary.tags;
+            std::transform(tagsLower.begin(), tagsLower.end(), tagsLower.begin(), ::tolower);
+            
+            if (nameLower.find(searchLower) == std::string::npos &&
+                tagsLower.find(searchLower) == std::string::npos) {
+                continue;
+            }
+        }
+        
+        filteredParts.push_back(summary);
+    }
+    
+    for (size_t i = 0; i < filteredParts.size(); ++i) {
+        const auto& summary = filteredParts[i];
+        
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        
+        // Find original index
+        int originalIndex = -1;
+        for (size_t j = 0; j < m_partSummaries.size(); ++j) {
+            if (m_partSummaries[j].dbID == summary.dbID) {
+                originalIndex = static_cast<int>(j);
+                break;
+            }
+        }
+        
+        if (originalIndex == m_selectedPartSummaryIndex) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+        
+        // Display with category prefix if showing all
+        std::string displayName = summary.name;
+        if (m_partsSelectedCategory.empty() && !summary.category.empty()) {
+            displayName = "[" + summary.category + "] " + summary.name;
+        }
+        
+        ImGui::TreeNodeEx((void*)(intptr_t)summary.dbID, flags, "%s", displayName.c_str());
+        
+        if (ImGui::IsItemClicked()) {
+            m_selectedPartSummaryIndex = originalIndex;
+        }
+        
+        // Start drag on mouse drag
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 5.0f)) {
+            if (!m_isDraggingPart) {
+                startPartDrag(summary.dbID);
+            }
+        }
+        
+        // Tooltip with part details
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("Name: %s", summary.name.c_str());
+            if (!summary.category.empty()) {
+                ImGui::Text("Category: %s", summary.category.c_str());
+            }
+            ImGui::Text("Vertices: %d", summary.vertexCount);
+            ImGui::Text("Bones: %d", summary.boneCount);
+            ImGui::Text("Sockets: %d", summary.socketCount);
+            if (!summary.rootSocket.empty()) {
+                ImGui::Text("Attaches via: %s", summary.rootSocket.c_str());
+            }
+            if (!summary.tags.empty()) {
+                ImGui::Text("Tags: %s", summary.tags.c_str());
+            }
+            ImGui::EndTooltip();
+        }
+        
+        // Double-click to load/preview
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            m_previewPart = m_partLibrary->loadPart(summary.dbID);
+            if (m_previewPart) {
+                PLOGI << "Loaded part for preview: " << m_previewPart->name;
+            }
+        }
+    }
+    
+    ImGui::EndChild();
+    
+    // Part details / actions
+    if (m_selectedPartSummaryIndex >= 0 && m_selectedPartSummaryIndex < static_cast<int>(m_partSummaries.size())) {
+        const auto& selected = m_partSummaries[m_selectedPartSummaryIndex];
+        
+        ImGui::Separator();
+        ImGui::Text("Selected: %s", selected.name.c_str());
+        
+        // Action buttons
+        if (ImGui::Button("Load Preview", ImVec2(-1, 0))) {
+            m_previewPart = m_partLibrary->loadPart(selected.dbID);
+            if (m_previewPart) {
+                PLOGI << "Loaded preview part: " << m_previewPart->name;
+            }
+        }
+        
+        // Show available sockets
+        if (m_selectedModelIndex >= 0 && m_selectedModelIndex < static_cast<int>(m_models.size())) {
+            if (ImGui::Button("Attach to Selected Socket", ImVec2(-1, 0))) {
+                if (m_selectedSocketIndex >= 0 && m_previewPart) {
+                    auto& model = m_models[m_selectedModelIndex];
+                    if (!model.loadResult.extractedSockets.empty() && 
+                        m_selectedSocketIndex < static_cast<int>(model.loadResult.extractedSockets.size())) {
+                        
+                        auto& socket = model.loadResult.extractedSockets[m_selectedSocketIndex];
+                        auto result = m_partLibrary->attachPart(*m_previewPart, socket, model.loadResult.skeleton);
+                        
+                        if (result.success) {
+                            PLOGI << "Attached part to socket: " << socket.name;
+                        } else {
+                            PLOGE << "Failed to attach part: " << result.error;
+                            m_partImportError = result.error;
+                        }
+                    }
+                } else {
+                    m_partImportError = "Select a socket first";
+                }
+            }
+        }
+        
+        ImGui::Separator();
+        
+        if (ImGui::Button("Delete Part", ImVec2(-1, 0))) {
+            // TODO: Confirm dialog
+            if (m_partLibrary->deletePart(selected.dbID)) {
+                refreshPartsList();
+            }
+        }
+    }
+}
+
+// ============================================================
+// Prefabs Panel
+// ============================================================
+
+void CharacterEditorUI::renderPrefabsPanel() {
+    ImGui::Text("Prefabs");
+    ImGui::Separator();
+    
+    if (!m_characterManager) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No vault connected");
+        return;
+    }
+    
+    // Save current assembly as prefab
+    if (!m_activeAttachments.empty()) {
+        if (ImGui::Button("Save as Prefab...", ImVec2(-1, 0))) {
+            ImGui::OpenPopup("SavePrefabPopup");
+        }
+    }
+    
+    // Save prefab popup
+    if (ImGui::BeginPopup("SavePrefabPopup")) {
+        static char prefabNameBuf[128] = "";
+        static char prefabCategoryBuf[64] = "";
+        
+        ImGui::Text("Save Current Assembly as Prefab");
+        ImGui::Separator();
+        
+        ImGui::InputText("Name", prefabNameBuf, sizeof(prefabNameBuf));
+        ImGui::InputText("Category", prefabCategoryBuf, sizeof(prefabCategoryBuf));
+        
+        if (ImGui::Button("Save", ImVec2(100, 0))) {
+            if (strlen(prefabNameBuf) > 0) {
+                CharacterPrefab prefab = m_characterManager->createPrefabFromParts(
+                    prefabNameBuf, m_activeAttachments);
+                prefab.category = prefabCategoryBuf;
+                
+                int64_t id = m_characterManager->savePrefab(prefab);
+                if (id > 0) {
+                    PLOGI << "Saved prefab: " << prefabNameBuf;
+                    refreshPrefabsList();
+                    prefabNameBuf[0] = '\0';
+                    prefabCategoryBuf[0] = '\0';
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        
+        ImGui::EndPopup();
+    }
+    
+    // Search
+    static char searchBuf[256] = "";
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##PrefabSearch", "Search prefabs...", searchBuf, sizeof(searchBuf))) {
+        m_prefabSearchQuery = searchBuf;
+    }
+    
+    ImGui::Separator();
+    
+    // Prefabs list
+    ImGui::BeginChild("PrefabsList", ImVec2(0, 150), true);
+    
+    for (size_t i = 0; i < m_prefabSummaries.size(); ++i) {
+        const auto& summary = m_prefabSummaries[i];
+        
+        // Search filter
+        if (!m_prefabSearchQuery.empty()) {
+            std::string searchLower = m_prefabSearchQuery;
+            std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+            
+            std::string nameLower = summary.name;
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+            
+            if (nameLower.find(searchLower) == std::string::npos) {
+                continue;
+            }
+        }
+        
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        if (static_cast<int>(i) == m_selectedPrefabIndex) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+        
+        std::string displayName = summary.name;
+        if (!summary.category.empty()) {
+            displayName = "[" + summary.category + "] " + summary.name;
+        }
+        displayName += " (" + std::to_string(summary.partCount) + " parts)";
+        
+        ImGui::TreeNodeEx((void*)(intptr_t)summary.dbID, flags, "%s", displayName.c_str());
+        
+        if (ImGui::IsItemClicked()) {
+            m_selectedPrefabIndex = static_cast<int>(i);
+        }
+        
+        // Double-click to load
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            m_loadedPrefab = m_characterManager->loadPrefab(summary.dbID);
+            if (m_loadedPrefab) {
+                // Convert prefab parts to active attachments
+                m_activeAttachments.clear();
+                for (const auto& inst : m_loadedPrefab->parts) {
+                    ActiveAttachment att;
+                    att.partID = inst.partID;
+                    att.attachmentID = inst.attachmentID;
+                    att.socketID = inst.parentSocketID;
+                    att.transform = inst.localTransform;
+                    m_activeAttachments.push_back(att);
+                }
+                PLOGI << "Loaded prefab: " << m_loadedPrefab->name << " with " << m_activeAttachments.size() << " parts";
+            }
+        }
+        
+        // Tooltip
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("Name: %s", summary.name.c_str());
+            if (!summary.category.empty()) {
+                ImGui::Text("Category: %s", summary.category.c_str());
+            }
+            ImGui::Text("Parts: %d", summary.partCount);
+            if (!summary.description.empty()) {
+                ImGui::TextWrapped("Description: %s", summary.description.c_str());
+            }
+            ImGui::EndTooltip();
+        }
+    }
+    
+    ImGui::EndChild();
+    
+    // Actions for selected prefab
+    if (m_selectedPrefabIndex >= 0 && m_selectedPrefabIndex < static_cast<int>(m_prefabSummaries.size())) {
+        const auto& selected = m_prefabSummaries[m_selectedPrefabIndex];
+        
+        ImGui::Separator();
+        ImGui::Text("Selected: %s", selected.name.c_str());
+        
+        if (ImGui::Button("Load to Editor", ImVec2(-1, 0))) {
+            m_loadedPrefab = m_characterManager->loadPrefab(selected.dbID);
+            if (m_loadedPrefab) {
+                m_activeAttachments.clear();
+                for (const auto& inst : m_loadedPrefab->parts) {
+                    ActiveAttachment att;
+                    att.partID = inst.partID;
+                    att.attachmentID = inst.attachmentID;
+                    att.socketID = inst.parentSocketID;
+                    att.transform = inst.localTransform;
+                    m_activeAttachments.push_back(att);
+                }
+            }
+        }
+        
+        if (ImGui::Button("Create Character from Prefab", ImVec2(-1, 0))) {
+            if (m_loadedPrefab || (m_loadedPrefab = m_characterManager->loadPrefab(selected.dbID))) {
+                m_loadedCharacter = std::make_unique<Character>(
+                    m_characterManager->createCharacterFromPrefab("New Character", *m_loadedPrefab));
+                m_loadedCharacter->basePrefabID = selected.dbID;
+                PLOGI << "Created character from prefab";
+            }
+        }
+        
+        if (ImGui::Button("Delete Prefab", ImVec2(-1, 0))) {
+            if (m_characterManager->deletePrefab(selected.dbID)) {
+                refreshPrefabsList();
+            }
+        }
+    }
+}
+
+// ============================================================
+// Characters Panel
+// ============================================================
+
+void CharacterEditorUI::renderCharactersPanel() {
+    ImGui::Text("Characters");
+    ImGui::Separator();
+    
+    if (!m_characterManager) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No vault connected");
+        return;
+    }
+    
+    // Create new character button
+    if (ImGui::Button("New Character", ImVec2(-1, 0))) {
+        ImGui::OpenPopup("NewCharacterPopup");
+    }
+    
+    // New character popup
+    if (ImGui::BeginPopup("NewCharacterPopup")) {
+        static char charNameBuf[128] = "";
+        
+        ImGui::Text("Create New Character");
+        ImGui::Separator();
+        
+        ImGui::InputText("Name", charNameBuf, sizeof(charNameBuf));
+        
+        if (ImGui::Button("Create Empty", ImVec2(120, 0))) {
+            if (strlen(charNameBuf) > 0) {
+                m_loadedCharacter = std::make_unique<Character>(
+                    m_characterManager->createEmptyCharacter(charNameBuf));
+                m_activeAttachments.clear();
+                charNameBuf[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        
+        ImGui::EndPopup();
+    }
+    
+    // Save current character
+    if (m_loadedCharacter) {
+        if (ImGui::Button("Save Character", ImVec2(-1, 0))) {
+            // Update character parts from active attachments
+            m_loadedCharacter->parts.clear();
+            for (const auto& att : m_activeAttachments) {
+                AttachedPartInstance inst;
+                inst.partID = att.partID;
+                inst.attachmentID = att.attachmentID;
+                inst.parentSocketID = att.socketID;
+                inst.localTransform = att.transform;
+                m_loadedCharacter->parts.push_back(inst);
+            }
+            
+            int64_t id = m_characterManager->saveCharacter(*m_loadedCharacter);
+            if (id > 0) {
+                PLOGI << "Saved character: " << m_loadedCharacter->name;
+                refreshCharactersList();
+            }
+        }
+    }
+    
+    // Search
+    static char searchBuf[256] = "";
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputTextWithHint("##CharSearch", "Search characters...", searchBuf, sizeof(searchBuf))) {
+        m_characterSearchQuery = searchBuf;
+    }
+    
+    ImGui::Separator();
+    
+    // Characters list
+    ImGui::BeginChild("CharactersList", ImVec2(0, 150), true);
+    
+    for (size_t i = 0; i < m_characterSummaries.size(); ++i) {
+        const auto& summary = m_characterSummaries[i];
+        
+        // Search filter
+        if (!m_characterSearchQuery.empty()) {
+            std::string searchLower = m_characterSearchQuery;
+            std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+            
+            std::string nameLower = summary.name;
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+            
+            if (nameLower.find(searchLower) == std::string::npos) {
+                continue;
+            }
+        }
+        
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        if (static_cast<int>(i) == m_selectedCharacterIndex) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+        
+        ImGui::TreeNodeEx((void*)(intptr_t)summary.dbID, flags, "%s", summary.name.c_str());
+        
+        if (ImGui::IsItemClicked()) {
+            m_selectedCharacterIndex = static_cast<int>(i);
+        }
+        
+        // Double-click to load
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+            m_loadedCharacter = m_characterManager->loadCharacter(summary.dbID);
+            if (m_loadedCharacter) {
+                // Convert character parts to active attachments
+                m_activeAttachments.clear();
+                for (const auto& inst : m_loadedCharacter->parts) {
+                    ActiveAttachment att;
+                    att.partID = inst.partID;
+                    att.attachmentID = inst.attachmentID;
+                    att.socketID = inst.parentSocketID;
+                    att.transform = inst.localTransform;
+                    m_activeAttachments.push_back(att);
+                }
+                PLOGI << "Loaded character: " << m_loadedCharacter->name;
+            }
+        }
+        
+        // Tooltip
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::Text("Name: %s", summary.name.c_str());
+            if (!summary.description.empty()) {
+                ImGui::TextWrapped("Description: %s", summary.description.c_str());
+            }
+            if (summary.basePrefabID > 0) {
+                ImGui::Text("Based on prefab ID: %ld", summary.basePrefabID);
+            }
+            ImGui::EndTooltip();
+        }
+    }
+    
+    ImGui::EndChild();
+    
+    // Actions for selected character
+    if (m_selectedCharacterIndex >= 0 && m_selectedCharacterIndex < static_cast<int>(m_characterSummaries.size())) {
+        const auto& selected = m_characterSummaries[m_selectedCharacterIndex];
+        
+        ImGui::Separator();
+        ImGui::Text("Selected: %s", selected.name.c_str());
+        
+        if (ImGui::Button("Load to Editor", ImVec2(-1, 0))) {
+            m_loadedCharacter = m_characterManager->loadCharacter(selected.dbID);
+            if (m_loadedCharacter) {
+                m_activeAttachments.clear();
+                for (const auto& inst : m_loadedCharacter->parts) {
+                    ActiveAttachment att;
+                    att.partID = inst.partID;
+                    att.attachmentID = inst.attachmentID;
+                    att.socketID = inst.parentSocketID;
+                    att.transform = inst.localTransform;
+                    m_activeAttachments.push_back(att);
+                }
+            }
+        }
+        
+        if (ImGui::Button("Delete Character", ImVec2(-1, 0))) {
+            if (m_characterManager->deleteCharacter(selected.dbID)) {
+                if (m_loadedCharacter && m_loadedCharacter->characterID == selected.characterID) {
+                    m_loadedCharacter.reset();
+                }
+                refreshCharactersList();
+            }
+        }
+    }
+    
+    // Show currently loaded character info
+    if (m_loadedCharacter) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), "Editing: %s", m_loadedCharacter->name.c_str());
+        ImGui::Text("Parts: %zu", m_activeAttachments.size());
+    }
+}
+
+// ============================================================
+// Drag-Drop Handling
+// ============================================================
+
+void CharacterEditorUI::handlePartDragDrop() {
+    ImGuiIO& io = ImGui::GetIO();
+    
+    if (!m_isDraggingPart || !m_draggingPart) return;
+    
+    // Check for mouse release (drop)
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        if (m_viewportHovered && m_highlightedSocket) {
+            // Drop on highlighted socket
+            ActiveAttachment att;
+            att.partID = m_draggingPart->id;  // Part uses 'id' field
+            att.attachmentID = m_characterManager ? m_characterManager->generateUUID() : std::to_string(m_activeAttachments.size());
+            att.socketID = m_highlightedSocket->name;
+            att.transform = m_highlightedSocket->localOffset;
+            
+            m_activeAttachments.push_back(att);
+            PLOGI << "Attached part '" << m_draggingPart->name << "' to socket '" << m_highlightedSocket->name << "'";
+        }
+        
+        cancelPartDrag();
+        return;
+    }
+    
+    // Check for Escape to cancel
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        cancelPartDrag();
+        return;
+    }
+    
+    // If hovering over viewport, find nearest compatible socket
+    if (m_viewportHovered) {
+        glm::vec2 mousePos(io.MousePos.x - m_viewportPos.x, io.MousePos.y - m_viewportPos.y);
+        float dist;
+        m_highlightedSocket = findNearestCompatibleSocket(*m_draggingPart, mousePos, dist);
+    } else {
+        m_highlightedSocket = nullptr;
+    }
+    
+    // Draw drag preview cursor
+    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    
+    // Draw floating tooltip showing what's being dragged
+    ImGui::BeginTooltip();
+    ImGui::Text("Dragging: %s", m_draggingPart->name.c_str());
+    if (m_highlightedSocket) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Drop on: %s", m_highlightedSocket->name.c_str());
+    } else if (m_viewportHovered) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "No compatible socket nearby");
+    }
+    ImGui::EndTooltip();
+}
+
+Socket* CharacterEditorUI::findNearestCompatibleSocket(const Part& part, const glm::vec2& screenPos, float& outDist) {
+    outDist = FLT_MAX;
+    Socket* nearest = nullptr;
+    
+    if (m_models.empty()) return nullptr;
+    
+    const auto& model = m_models[0];
+    if (model.loadResult.extractedSockets.empty()) return nullptr;
+    
+    float aspectRatio = m_viewportSize.x / m_viewportSize.y;
+    glm::mat4 view = m_camera.getViewMatrix();
+    glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
+    glm::mat4 vp = projection * view;
+    
+    // Project function
+    auto project = [&](const glm::vec3& worldPos) -> glm::vec2 {
+        glm::vec4 clip = vp * glm::vec4(worldPos, 1.0f);
+        if (clip.w <= 0) return glm::vec2(-10000);
+        glm::vec3 ndc = glm::vec3(clip) / clip.w;
+        return glm::vec2(
+            (ndc.x * 0.5f + 0.5f) * m_viewportSize.x,
+            (1.0f - (ndc.y * 0.5f + 0.5f)) * m_viewportSize.y
+        );
+    };
+    
+    // Get part's attachment specs category (what sockets it can connect to)
+    std::string partCategory;
+    if (!part.attachmentSpecs.empty()) {
+        // Use the first attachment spec's required profile category
+        partCategory = part.attachmentSpecs[0].requiredProfile.category;
+    }
+    
+    const Skeleton& skeleton = m_posedSkeleton.empty() ? model.loadResult.skeleton : m_posedSkeleton;
+    
+    float snapThreshold = 50.0f;  // Pixels
+    
+    // Note: extractedSockets is const, so we need to cast to non-const to return mutable pointer
+    // This is safe since we're returning pointer to member data that we know exists
+    auto& mutableSockets = const_cast<std::vector<Socket>&>(model.loadResult.extractedSockets);
+    
+    for (size_t i = 0; i < mutableSockets.size(); ++i) {
+        auto& socket = mutableSockets[i];
+        
+        // Check socket category compatibility using Part::canAttachTo
+        if (!part.canAttachTo(socket)) {
+            continue;
+        }
+        
+        // Get socket world position
+        glm::vec3 socketWorldPos = socket.localOffset.position;
+        auto it = skeleton.boneNameToIndex.find(socket.boneName);
+        if (it != skeleton.boneNameToIndex.end()) {
+            Transform boneWorld = skeleton.getWorldTransform(static_cast<uint32_t>(it->second));
+            socketWorldPos = boneWorld.position + boneWorld.rotation * socket.localOffset.position;
+        }
+        
+        glm::vec2 socketScreen = project(socketWorldPos);
+        float dist = glm::length(screenPos - socketScreen);
+        
+        if (dist < snapThreshold && dist < outDist) {
+            outDist = dist;
+            nearest = &socket;
+        }
+    }
+    
+    return nearest;
 }
 
 } // namespace CharacterEditor

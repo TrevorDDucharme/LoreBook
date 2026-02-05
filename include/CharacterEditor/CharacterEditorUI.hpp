@@ -1,6 +1,9 @@
 #pragma once
 #include <CharacterEditor/ModelLoader.hpp>
 #include <CharacterEditor/Part.hpp>
+#include <CharacterEditor/PartLibrary.hpp>
+#include <CharacterEditor/CharacterManager.hpp>
+#include <CharacterEditor/IKSolver.hpp>
 #include <imgui.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -9,6 +12,7 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <filesystem>
 
 namespace CharacterEditor {
 
@@ -113,11 +117,13 @@ struct LoadedModel {
  * @brief IK test target for debugging
  */
 struct IKTestTarget {
-    std::string boneName;
-    glm::vec3 targetPosition{0.0f};
-    glm::quat targetRotation{1.0f, 0.0f, 0.0f, 0.0f};
+    std::string name;
+    IKChain chain;
+    IKTarget target;
     bool isActive = false;
-    bool positionOnly = true;
+    int startBoneIndex = -1;
+    int endBoneIndex = -1;
+    float blendWeight = 1.0f;
 };
 
 /**
@@ -181,6 +187,20 @@ public:
     ViewportCamera& getCamera() { return m_camera; }
     const ViewportCamera& getCamera() const { return m_camera; }
     
+    // Parts Library
+    void setPartLibrary(PartLibrary* library);
+    void refreshPartsList();
+    
+    // Character Manager (prefabs/characters)
+    void setCharacterManager(CharacterManager* manager);
+    void refreshPrefabsList();
+    void refreshCharactersList();
+    
+    // Drag-drop state for parts
+    bool isDraggingPart() const { return m_isDraggingPart; }
+    void startPartDrag(int64_t partDbID);
+    void cancelPartDrag();
+    
 private:
     // Framebuffer management
     bool createFramebuffer(int width, int height);
@@ -193,6 +213,7 @@ private:
     
     // Mesh GPU upload
     bool uploadMeshToGPU(const Mesh& mesh, MeshGPUData& gpuData);
+    void updateMeshVertices(const Mesh& mesh, MeshGPUData& gpuData);
     
     // Rendering
     void renderViewport();
@@ -200,8 +221,9 @@ private:
     void renderMesh(const Mesh& mesh, const MeshGPUData& gpuData, const glm::mat4& modelMatrix);
     void renderDebugOverlays();
     void renderBones(const Skeleton& skeleton, const glm::mat4& modelMatrix);
-    void renderSockets(const std::vector<Socket>& sockets, const glm::mat4& modelMatrix);
+    void renderSockets(const std::vector<Socket>& sockets, const Skeleton& skeleton, const glm::mat4& modelMatrix);
     void renderBoundingBox(const glm::vec3& min, const glm::vec3& max, const glm::mat4& modelMatrix);
+    void renderIKTargets(const glm::mat4& modelMatrix);
     void renderGrid();
     void renderGizmo(const glm::vec3& position, float size);
     
@@ -214,6 +236,17 @@ private:
     void renderSocketPanel();
     void renderIKPanel();
     void renderDebugPanel();
+    void renderPartsLibraryPanel();
+    void renderPrefabsPanel();
+    void renderCharactersPanel();
+    
+    // Drag-drop handling
+    void handlePartDragDrop();
+    Socket* findNearestCompatibleSocket(const Part& part, const glm::vec2& screenPos, float& outDist);
+    
+    // Gizmo enums (must be before function declarations that use them)
+    enum class GizmoAxis { None, X, Y, Z, XY, XZ, YZ, All };
+    enum class GizmoMode { Translate, Rotate, Scale };
     
     // Input handling
     void handleViewportInput();
@@ -221,6 +254,15 @@ private:
     void handleMousePan();
     void handleMouseZoom();
     void handleSelection();
+    void handleGizmo();
+    void handleBoneGizmo();
+    bool pickGizmoAxis(const glm::vec3& gizmoPos, const glm::vec2& mousePos, GizmoAxis& outAxis);
+    bool pickRotationGizmoAxis(const glm::vec3& gizmoPos, const glm::vec2& mousePos, float radius, GizmoAxis& outAxis);
+    int pickBone(const glm::vec2& mousePos);
+    int pickMesh(const glm::vec2& mousePos);  // Returns mesh index or -1
+    glm::vec3 projectMouseOntoPlane(const glm::vec2& mousePos, const glm::vec3& planeOrigin, const glm::vec3& planeNormal);
+    void renderTranslationGizmo(const glm::vec3& position, float size);
+    void renderRotationGizmo(const glm::vec3& position, const glm::quat& rotation, float radius);
     
     // State
     bool m_isOpen = false;
@@ -256,9 +298,23 @@ private:
     bool m_isPanning = false;
     ImVec2 m_lastMousePos{0, 0};
     
+    // Gizmo state
+    GizmoMode m_gizmoMode = GizmoMode::Rotate;  // Default to rotation for bone posing
+    GizmoAxis m_gizmoDragAxis = GizmoAxis::None;
+    bool m_isDraggingGizmo = false;
+    glm::vec3 m_gizmoDragStart{0.0f};
+    glm::vec3 m_gizmoTargetStart{0.0f};
+    glm::quat m_gizmoRotationStart{1.0f, 0.0f, 0.0f, 0.0f};
+    float m_gizmoRotationAngleStart = 0.0f;
+    
+    // Bone pose editing
+    std::unordered_map<uint32_t, glm::quat> m_bonePoseOverrides;  // Bone index -> rotation override
+    Skeleton m_posedSkeleton;  // Skeleton with pose overrides applied
+    
     // Loaded models
     std::vector<LoadedModel> m_models;
     int m_selectedModelIndex = -1;
+    int m_selectedMeshIndex = -1;
     int m_selectedBoneIndex = -1;
     int m_selectedSocketIndex = -1;
     
@@ -276,6 +332,8 @@ private:
     std::vector<IKTestTarget> m_ikTargets;
     int m_selectedIKTarget = -1;
     bool m_ikEnabled = false;
+    FABRIKSolver m_ikSolver;
+    Skeleton m_solvedSkeleton;  // Copy for IK modifications
     
     // Colors for debug visualization
     glm::vec4 m_boneColor{0.2f, 0.8f, 0.3f, 1.0f};
@@ -283,6 +341,43 @@ private:
     glm::vec4 m_selectedColor{1.0f, 1.0f, 0.0f, 1.0f};
     glm::vec4 m_ikTargetColor{1.0f, 0.0f, 0.5f, 1.0f};
     glm::vec4 m_gridColor{0.3f, 0.3f, 0.3f, 1.0f};
+    
+    // Parts Library
+    PartLibrary* m_partLibrary = nullptr;     // Non-owning pointer (owned by Vault)
+    std::vector<PartSummary> m_partSummaries;
+    std::vector<std::string> m_partCategories;
+    std::string m_partsSearchQuery;
+    std::string m_partsSelectedCategory;      // Empty = all categories
+    int m_selectedPartSummaryIndex = -1;
+    std::unique_ptr<Part> m_previewPart;      // Part being previewed
+    std::string m_partImportError;
+    
+    // Part import file browser state
+    bool m_showImportPartModal = false;
+    std::filesystem::path m_importBrowserPath;
+    std::string m_importBrowserSelectedFile;
+    
+    // Character Manager (prefabs/characters)
+    CharacterManager* m_characterManager = nullptr;
+    std::vector<PrefabSummary> m_prefabSummaries;
+    std::vector<CharacterSummary> m_characterSummaries;
+    std::string m_prefabSearchQuery;
+    std::string m_characterSearchQuery;
+    int m_selectedPrefabIndex = -1;
+    int m_selectedCharacterIndex = -1;
+    std::unique_ptr<CharacterPrefab> m_loadedPrefab;   // Currently editing prefab
+    std::unique_ptr<Character> m_loadedCharacter;      // Currently editing character
+    
+    // Active character assembly (parts attached in viewport)
+    std::vector<ActiveAttachment> m_activeAttachments;
+    int m_selectedAttachmentIndex = -1;
+    
+    // Drag-drop state for parts
+    bool m_isDraggingPart = false;
+    int64_t m_draggingPartDbID = -1;
+    std::unique_ptr<Part> m_draggingPart;
+    glm::vec2 m_dragStartPos{0.0f};
+    Socket* m_highlightedSocket = nullptr;
 };
 
 } // namespace CharacterEditor

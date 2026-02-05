@@ -170,6 +170,66 @@ std::unique_ptr<Vault> Vault::Open(const VaultConfig& cfg, std::string* outError
             // Ensure schema version entry
             const char* insertSchemaVer = "INSERT INTO VaultMeta (`Key`,`Value`) VALUES ('SchemaVersion','3') ON DUPLICATE KEY UPDATE `Value`='3';";
             if(!mb->execute(insertSchemaVer, &err)) PLOGW << "MySQL: failed inserting SchemaVersion: " << err;
+
+            // ============================================================
+            // Character Editor tables: Parts, CharacterPrefabs, Characters
+            // ============================================================
+            
+            // Parts table
+            const char* createParts = R"SQL(CREATE TABLE IF NOT EXISTS Parts (
+                ID BIGINT AUTO_INCREMENT PRIMARY KEY,
+                PartID VARCHAR(64) UNIQUE NOT NULL,
+                Name VARCHAR(256) NOT NULL,
+                Category VARCHAR(128) DEFAULT '',
+                RootSocket VARCHAR(128) DEFAULT '',
+                Tags TEXT,
+                Role INT DEFAULT 0,
+                VertexCount INT DEFAULT 0,
+                BoneCount INT DEFAULT 0,
+                SocketCount INT DEFAULT 0,
+                PartData LONGBLOB,
+                Thumbnail MEDIUMBLOB,
+                SourceFile VARCHAR(512),
+                CreatedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                ModifiedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                INDEX idx_Parts_Category (Category),
+                INDEX idx_Parts_RootSocket (RootSocket),
+                INDEX idx_Parts_Name (Name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createParts, &err)) PLOGW << "MySQL: failed creating Parts: " << err;
+
+            // CharacterPrefabs table
+            const char* createPrefabs = R"SQL(CREATE TABLE IF NOT EXISTS CharacterPrefabs (
+                ID BIGINT AUTO_INCREMENT PRIMARY KEY,
+                PrefabID VARCHAR(64) UNIQUE NOT NULL,
+                Name VARCHAR(256) NOT NULL,
+                Category VARCHAR(128) DEFAULT '',
+                Description TEXT,
+                PrefabJSON MEDIUMTEXT NOT NULL,
+                Tags TEXT,
+                Thumbnail MEDIUMBLOB,
+                CreatedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                ModifiedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                INDEX idx_CharacterPrefabs_Category (Category)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createPrefabs, &err)) PLOGW << "MySQL: failed creating CharacterPrefabs: " << err;
+
+            // Characters table
+            const char* createChars = R"SQL(CREATE TABLE IF NOT EXISTS Characters (
+                ID BIGINT AUTO_INCREMENT PRIMARY KEY,
+                CharacterID VARCHAR(64) UNIQUE NOT NULL,
+                Name VARCHAR(256) NOT NULL,
+                Description TEXT,
+                BasePrefabID BIGINT,
+                CharacterJSON MEDIUMTEXT NOT NULL,
+                Tags TEXT,
+                Thumbnail MEDIUMBLOB,
+                CreatedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                ModifiedAt BIGINT DEFAULT (UNIX_TIMESTAMP()),
+                INDEX idx_Characters_Name (Name),
+                FOREIGN KEY (BasePrefabID) REFERENCES CharacterPrefabs(ID)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;)SQL";
+            if(!mb->execute(createChars, &err)) PLOGW << "MySQL: failed creating Characters: " << err;
         }
 
         auto v = std::make_unique<Vault>(std::move(mb), ci.mysql_db.empty() ? std::string("remote") : ci.mysql_db);

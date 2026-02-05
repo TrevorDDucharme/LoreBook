@@ -898,6 +898,90 @@ public:
                 }
             }
 
+            // ============================================================
+            // Character Editor tables: Parts, CharacterPrefabs, Characters
+            // ============================================================
+            {
+                // Parts table - stores individual 3D model parts for character composition
+                const char *createPartsSQL = "CREATE TABLE IF NOT EXISTS Parts ("
+                                              "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                              "PartID TEXT UNIQUE NOT NULL, "
+                                              "Name TEXT NOT NULL, "
+                                              "Category TEXT DEFAULT '', "
+                                              "RootSocket TEXT DEFAULT '', "
+                                              "Tags TEXT DEFAULT '', "
+                                              "Role INTEGER DEFAULT 0, "
+                                              "VertexCount INTEGER DEFAULT 0, "
+                                              "BoneCount INTEGER DEFAULT 0, "
+                                              "SocketCount INTEGER DEFAULT 0, "
+                                              "PartData BLOB, "
+                                              "Thumbnail BLOB, "
+                                              "SourceFile TEXT, "
+                                              "CreatedAt INTEGER DEFAULT (strftime('%s', 'now')), "
+                                              "ModifiedAt INTEGER DEFAULT (strftime('%s', 'now'))"
+                                              ");";
+                char *pErr = nullptr;
+                if (sqlite3_exec(dbConnection, createPartsSQL, nullptr, nullptr, &pErr) != SQLITE_OK)
+                {
+                    if (pErr)
+                        sqlite3_free(pErr);
+                }
+                
+                const char *idxPartsCategory = "CREATE INDEX IF NOT EXISTS idx_Parts_Category ON Parts(Category);";
+                const char *idxPartsSocket = "CREATE INDEX IF NOT EXISTS idx_Parts_RootSocket ON Parts(RootSocket);";
+                const char *idxPartsName = "CREATE INDEX IF NOT EXISTS idx_Parts_Name ON Parts(Name);";
+                sqlite3_exec(dbConnection, idxPartsCategory, nullptr, nullptr, nullptr);
+                sqlite3_exec(dbConnection, idxPartsSocket, nullptr, nullptr, nullptr);
+                sqlite3_exec(dbConnection, idxPartsName, nullptr, nullptr, nullptr);
+
+                // CharacterPrefabs table - reusable part combinations as templates
+                const char *createPrefabsSQL = "CREATE TABLE IF NOT EXISTS CharacterPrefabs ("
+                                                "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                                "PrefabID TEXT UNIQUE NOT NULL, "
+                                                "Name TEXT NOT NULL, "
+                                                "Category TEXT DEFAULT '', "
+                                                "Description TEXT DEFAULT '', "
+                                                "PrefabJSON TEXT NOT NULL, "
+                                                "Tags TEXT DEFAULT '', "
+                                                "Thumbnail BLOB, "
+                                                "CreatedAt INTEGER DEFAULT (strftime('%s', 'now')), "
+                                                "ModifiedAt INTEGER DEFAULT (strftime('%s', 'now'))"
+                                                ");";
+                pErr = nullptr;
+                if (sqlite3_exec(dbConnection, createPrefabsSQL, nullptr, nullptr, &pErr) != SQLITE_OK)
+                {
+                    if (pErr)
+                        sqlite3_free(pErr);
+                }
+                
+                const char *idxPrefabsCategory = "CREATE INDEX IF NOT EXISTS idx_CharacterPrefabs_Category ON CharacterPrefabs(Category);";
+                sqlite3_exec(dbConnection, idxPrefabsCategory, nullptr, nullptr, nullptr);
+
+                // Characters table - actual character instances
+                const char *createCharsSQL = "CREATE TABLE IF NOT EXISTS Characters ("
+                                              "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                              "CharacterID TEXT UNIQUE NOT NULL, "
+                                              "Name TEXT NOT NULL, "
+                                              "Description TEXT DEFAULT '', "
+                                              "BasePrefabID INTEGER, "
+                                              "CharacterJSON TEXT NOT NULL, "
+                                              "Tags TEXT DEFAULT '', "
+                                              "Thumbnail BLOB, "
+                                              "CreatedAt INTEGER DEFAULT (strftime('%s', 'now')), "
+                                              "ModifiedAt INTEGER DEFAULT (strftime('%s', 'now')), "
+                                              "FOREIGN KEY(BasePrefabID) REFERENCES CharacterPrefabs(ID)"
+                                              ");";
+                pErr = nullptr;
+                if (sqlite3_exec(dbConnection, createCharsSQL, nullptr, nullptr, &pErr) != SQLITE_OK)
+                {
+                    if (pErr)
+                        sqlite3_free(pErr);
+                }
+                
+                const char *idxCharsName = "CREATE INDEX IF NOT EXISTS idx_Characters_Name ON Characters(Name);";
+                sqlite3_exec(dbConnection, idxCharsName, nullptr, nullptr, nullptr);
+            }
+
             // Initialize VaultHistory helper and ensure schema for revisions & conflicts
             history = std::make_unique<LoreBook::VaultHistory>(dbConnection);
             {

@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <filesystem>
 #include <optional>
+#include <fstream>
 #include <map>
 
 namespace CharacterEditor {
@@ -152,93 +153,26 @@ void collectAncestors(const aiNode* node, const aiNode* root,
     // Ancestors will be added during the recursive traversal
 }
 
-// Check if a node looks like an armature root
-bool isArmatureRoot(const aiNode* node) {
-    std::string name = node->mName.C_Str();
-    std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    
-    // Common armature root names from various 3D software
-    return lower == "armature" || lower == "skeleton" || lower == "rig" ||
-           lower.find("armature") != std::string::npos ||
-           lower.find("skeleton") != std::string::npos;
-}
-
-// Check if a node looks like a bone based on naming patterns
-bool looksLikeBone(const std::string& name) {
-    std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    
-    // Skip obvious non-bones
-    if (lower == "rootnode" || lower == "scene" || lower == "root") return false;
-    if (lower.find("mesh") != std::string::npos) return false;
-    if (lower.find("camera") != std::string::npos) return false;
-    if (lower.find("light") != std::string::npos) return false;
-    
-    // Common bone naming patterns
-    static const std::vector<std::string> bonePatterns = {
-        "bone", "spine", "pelvis", "hip", "thigh", "leg", "shin", "calf",
-        "foot", "toe", "shoulder", "arm", "elbow", "forearm", "hand", "wrist",
-        "finger", "thumb", "head", "neck", "jaw", "eye", "ear",
-        "chest", "torso", "clavicle", "collar", "tail", "wing",
-        "index", "middle", "ring", "pinky", "ik", "fk", "ctrl",
-        "upper", "lower", "left", "right", "_l", "_r", ".l", ".r"
-    };
-    
-    for (const auto& pattern : bonePatterns) {
-        if (lower.find(pattern) != std::string::npos) return true;
-    }
-    
-    return false;
-}
-
-// Check if a node is an actual skeleton bone (not a scene hierarchy node)
-bool isActualBone(const aiNode* node, const std::unordered_set<std::string>& meshBoneNames,
-                  const std::unordered_set<std::string>& armatureBoneNames,
+// Check if a node is an actual skeleton bone
+// Uses authoritative data: aiMesh::mBones list
+bool isActualBone(const aiNode* node, const aiScene* scene,
+                  const std::unordered_set<std::string>& meshBoneNames,
                   const std::string& socketPrefix) {
     std::string name = node->mName.C_Str();
     
+    // If this node has meshes attached, it's NOT a bone
+    if (node->mNumMeshes > 0) {
+        return false;
+    }
+    
     // Node is a bone if:
-    // 1. It's referenced as a bone by mesh skinning data
+    // 1. It's referenced as a bone by mesh skinning data (authoritative)
     if (meshBoneNames.count(name)) return true;
     
-    // 2. It's a socket bone (starts with socket prefix)
-    if (name.rfind(socketPrefix, 0) == 0) return true;
-    
-    // 3. It was found in an armature hierarchy
-    if (armatureBoneNames.count(name)) return true;
+    // 2. It's explicitly marked as a socket (starts with socket prefix)
+    if (!socketPrefix.empty() && name.rfind(socketPrefix, 0) == 0) return true;
     
     return false;
-}
-
-// Recursively collect bone names from armature hierarchy
-void collectArmatureBones(const aiNode* node, std::unordered_set<std::string>& armatureBoneNames) {
-    std::string name = node->mName.C_Str();
-    
-    // Skip the armature root itself, but include its children
-    if (!isArmatureRoot(node) && looksLikeBone(name)) {
-        armatureBoneNames.insert(name);
-    }
-    
-    // Recurse to children
-    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
-        collectArmatureBones(node->mChildren[i], armatureBoneNames);
-    }
-}
-
-// Find armature root in scene hierarchy
-const aiNode* findArmatureRoot(const aiNode* node) {
-    if (isArmatureRoot(node)) {
-        return node;
-    }
-    
-    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
-        const aiNode* found = findArmatureRoot(node->mChildren[i]);
-        if (found) return found;
-    }
-    return nullptr;
 }
 
 // Z-up to Y-up conversion matrix (-90 degrees around X axis)
@@ -260,7 +194,105 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
         return skeleton;
     }
     
-    // First, collect all bone names referenced by meshes (skinning data)
+    // Dump full Assimp tree to a log file for debugging
+    {
+        std::ofstream logFile("assimp_tree_dump.txt");
+        if (logFile.is_open()) {
+            logFile << "=== ASSIMP SCENE DUMP ===" << std::endl;
+            logFile << "Meshes: " << scene->mNumMeshes << std::endl;
+            logFile << "Animations: " << scene->mNumAnimations << std::endl;
+            logFile << "Materials: " << scene->mNumMaterials << std::endl;
+            logFile << "Textures: " << scene->mNumTextures << std::endl;
+            logFile << "Lights: " << scene->mNumLights << std::endl;
+            logFile << "Cameras: " << scene->mNumCameras << std::endl;
+            logFile << std::endl;
+            
+            // Dump all meshes with bone info
+            logFile << "=== MESHES ===" << std::endl;
+            for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
+                const aiMesh* mesh = scene->mMeshes[mi];
+                logFile << "Mesh[" << mi << "] '" << mesh->mName.C_Str() << "'" << std::endl;
+                logFile << "  Vertices: " << mesh->mNumVertices << std::endl;
+                logFile << "  Faces: " << mesh->mNumFaces << std::endl;
+                logFile << "  Bones: " << mesh->mNumBones << std::endl;
+                logFile << "  HasPositions: " << mesh->HasPositions() << std::endl;
+                logFile << "  HasNormals: " << mesh->HasNormals() << std::endl;
+                logFile << "  HasTangents: " << mesh->HasTangentsAndBitangents() << std::endl;
+                
+                // List bone names if any
+                for (unsigned int bi = 0; bi < mesh->mNumBones; ++bi) {
+                    const aiBone* bone = mesh->mBones[bi];
+                    logFile << "    Bone[" << bi << "] '" << bone->mName.C_Str() 
+                            << "' weights=" << bone->mNumWeights << std::endl;
+                }
+            }
+            logFile << std::endl;
+            
+            // Dump full node hierarchy
+            logFile << "=== NODE HIERARCHY ===" << std::endl;
+            std::function<void(const aiNode*, int)> dumpNode = [&](const aiNode* node, int depth) {
+                std::string indent(depth * 2, ' ');
+                logFile << indent << "Node: '" << node->mName.C_Str() << "'" << std::endl;
+                logFile << indent << "  Meshes: " << node->mNumMeshes;
+                if (node->mNumMeshes > 0) {
+                    logFile << " [";
+                    for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
+                        if (i > 0) logFile << ", ";
+                        logFile << node->mMeshes[i];
+                    }
+                    logFile << "]";
+                }
+                logFile << std::endl;
+                logFile << indent << "  Children: " << node->mNumChildren << std::endl;
+                
+                // Dump transform
+                const aiMatrix4x4& m = node->mTransformation;
+                logFile << indent << "  Transform:" << std::endl;
+                logFile << indent << "    [" << m.a1 << ", " << m.a2 << ", " << m.a3 << ", " << m.a4 << "]" << std::endl;
+                logFile << indent << "    [" << m.b1 << ", " << m.b2 << ", " << m.b3 << ", " << m.b4 << "]" << std::endl;
+                logFile << indent << "    [" << m.c1 << ", " << m.c2 << ", " << m.c3 << ", " << m.c4 << "]" << std::endl;
+                logFile << indent << "    [" << m.d1 << ", " << m.d2 << ", " << m.d3 << ", " << m.d4 << "]" << std::endl;
+                
+                // Recurse to children
+                for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+                    dumpNode(node->mChildren[i], depth + 1);
+                }
+            };
+            dumpNode(scene->mRootNode, 0);
+            
+            // Dump animations if any
+            if (scene->mNumAnimations > 0) {
+                logFile << std::endl << "=== ANIMATIONS ===" << std::endl;
+                for (unsigned int ai = 0; ai < scene->mNumAnimations; ++ai) {
+                    const aiAnimation* anim = scene->mAnimations[ai];
+                    logFile << "Animation[" << ai << "] '" << anim->mName.C_Str() << "'" << std::endl;
+                    logFile << "  Duration: " << anim->mDuration << std::endl;
+                    logFile << "  TicksPerSecond: " << anim->mTicksPerSecond << std::endl;
+                    logFile << "  Channels: " << anim->mNumChannels << std::endl;
+                    for (unsigned int ci = 0; ci < anim->mNumChannels && ci < 20; ++ci) {
+                        const aiNodeAnim* channel = anim->mChannels[ci];
+                        logFile << "    Channel[" << ci << "] '" << channel->mNodeName.C_Str() 
+                                << "' pos=" << channel->mNumPositionKeys 
+                                << " rot=" << channel->mNumRotationKeys 
+                                << " scale=" << channel->mNumScalingKeys << std::endl;
+                    }
+                    if (anim->mNumChannels > 20) {
+                        logFile << "    ... and " << (anim->mNumChannels - 20) << " more channels" << std::endl;
+                    }
+                }
+            }
+            
+            logFile.close();
+            PLOGI << "ModelLoader: Wrote full scene dump to assimp_tree_dump.txt";
+        }
+    }
+    
+    // Log scene structure for debugging
+    PLOGI << "ModelLoader: Scene has " << scene->mNumMeshes << " meshes, " 
+          << scene->mNumAnimations << " animations";
+    
+    // Collect all bone names referenced by meshes - this is the AUTHORITATIVE source
+    // A bone is defined by aiMesh::mBones, not by node names or hierarchy guessing
     std::unordered_set<std::string> meshBoneNames;
     for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
         const aiMesh* mesh = scene->mMeshes[mi];
@@ -271,62 +303,64 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
     
     PLOGI << "ModelLoader: Found " << meshBoneNames.size() << " bones from mesh skinning data";
     
-    // Second, look for armature hierarchy (for FBX files where meshes might not be skinned)
-    std::unordered_set<std::string> armatureBoneNames;
-    const aiNode* armatureRoot = findArmatureRoot(scene->mRootNode);
-    if (armatureRoot) {
-        PLOGI << "ModelLoader: Found armature root: " << armatureRoot->mName.C_Str();
-        collectArmatureBones(armatureRoot, armatureBoneNames);
-        PLOGI << "ModelLoader: Found " << armatureBoneNames.size() << " bones from armature hierarchy";
-    } else {
-        PLOGI << "ModelLoader: No armature root found in scene";
+    // Log some bone names for debugging
+    if (!meshBoneNames.empty()) {
+        int count = 0;
+        for (const auto& name : meshBoneNames) {
+            if (count++ < 5) PLOGI << "  Bone: '" << name << "'";
+        }
+        if (meshBoneNames.size() > 5) {
+            PLOGI << "  ... and " << (meshBoneNames.size() - 5) << " more";
+        }
     }
     
-    // If no bones from either source, return empty skeleton
-    if (meshBoneNames.empty() && armatureBoneNames.empty()) {
-        PLOGI << "ModelLoader: No bones found, returning empty skeleton";
+    // If no bones in meshes, return empty skeleton
+    if (meshBoneNames.empty()) {
+        PLOGW << "ModelLoader: No skinned bones found in any mesh";
         return skeleton;
     }
     
     std::unordered_map<std::string, int32_t> boneNameToId;
     
     // Recursive function to process nodes, building skeleton
-    std::function<void(const aiNode*, uint32_t)> processNode = 
-        [&](const aiNode* node, uint32_t parentId) {
+    // accumulatedTransform: transform accumulated from skipped parent nodes
+    std::function<void(const aiNode*, uint32_t, const glm::mat4&)> processNode = 
+        [&](const aiNode* node, uint32_t parentId, const glm::mat4& accumulatedTransform) {
         
         std::string nodeName = node->mName.C_Str();
+        glm::mat4 nodeTransform = toGlm(node->mTransformation);
         
         // Check if this node should be included in skeleton
-        bool isBone = isActualBone(node, meshBoneNames, armatureBoneNames, config.socketBonePrefix);
+        bool isBone = isActualBone(node, scene, meshBoneNames, config.socketBonePrefix);
         
-        // Only include actual bones in the skeleton
-        // Scene hierarchy nodes (RootNode, Armature, etc.) are skipped
         if (isBone) {
             Bone bone;
             bone.name = nodeName;
             bone.parentID = parentId;
             
-            // Get the local transform from the node
-            glm::mat4 localMat = toGlm(node->mTransformation);
-            
-            // Apply Z-up to Y-up conversion ONLY to root bones
-            // The conversion propagates through the hierarchy naturally:
-            // - root_world = C * root_local (converted)
-            // - child_world = parent_world * child_local (unchanged)
-            //              = C * parent_local * child_local = C * child_world_zup
-            // This matches how mesh vertices are converted: v_yup = C * v_zup
-            if (config.convertZUpToYUp && parentId == UINT32_MAX) {
-                PLOGI << "Converting root bone '" << nodeName << "' from Z-up to Y-up";
-                PLOGI << "  Before: pos=(" << localMat[3][0] << ", " << localMat[3][1] << ", " << localMat[3][2] << ")";
-                localMat = g_zUpToYUpMatrix * localMat;
-                PLOGI << "  After:  pos=(" << localMat[3][0] << ", " << localMat[3][1] << ", " << localMat[3][2] << ")";
+            // Compute the local transform
+            // If we have accumulated transform from skipped nodes, apply it
+            glm::mat4 localMat;
+            if (parentId == UINT32_MAX) {
+                // Root bone: include accumulated transform from skipped hierarchy nodes
+                localMat = accumulatedTransform * nodeTransform;
+                
+                // Apply Z-up to Y-up conversion for root bones
+                if (config.convertZUpToYUp) {
+                    PLOGI << "Converting root bone '" << nodeName << "' from Z-up to Y-up";
+                    localMat = g_zUpToYUpMatrix * localMat;
+                }
+            } else {
+                // Child bone: just use the node's local transform
+                localMat = nodeTransform;
             }
             
             bone.localTransform = Transform::fromMatrix(localMat * config.scaleFactor);
             
             // Log bone transform details
-            if (skeleton.bones.size() < 10) {
-                PLOGI << "Added bone '" << nodeName << "': parent=" << (parentId == UINT32_MAX ? -1 : (int)parentId)
+            if (skeleton.bones.size() < 15) {
+                PLOGI << "Added bone[" << skeleton.bones.size() << "] '" << nodeName 
+                      << "': parent=" << (parentId == UINT32_MAX ? -1 : (int)parentId)
                       << ", localPos=(" << bone.localTransform.position.x 
                       << ", " << bone.localTransform.position.y 
                       << ", " << bone.localTransform.position.z << ")";
@@ -343,21 +377,28 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
                 skeleton.bones[parentId].childIDs.push_back(boneId);
             }
             
-            // Process children with this bone as parent
+            // Process children with this bone as parent, reset accumulated transform
             for (unsigned int ci = 0; ci < node->mNumChildren; ++ci) {
-                processNode(node->mChildren[ci], boneId);
+                processNode(node->mChildren[ci], boneId, glm::mat4(1.0f));
             }
         } else {
-            // Skip this node but still traverse children to find bones
-            // This handles cases where bones are nested under scene hierarchy nodes
+            // Not a bone - skip this node but accumulate its transform
+            glm::mat4 newAccumulated = accumulatedTransform * nodeTransform;
+            
+            // Log skipped nodes for debugging
+            if (skeleton.bones.empty()) {
+                PLOGI << "Skipping non-bone node: '" << nodeName << "' (meshes=" << node->mNumMeshes << ")";
+            }
+            
+            // Continue traversing children, passing accumulated transform
             for (unsigned int ci = 0; ci < node->mNumChildren; ++ci) {
-                processNode(node->mChildren[ci], parentId);
+                processNode(node->mChildren[ci], parentId, newAccumulated);
             }
         }
     };
     
-    // Start from root
-    processNode(scene->mRootNode, UINT32_MAX);
+    // Start from root with identity accumulated transform
+    processNode(scene->mRootNode, UINT32_MAX, glm::mat4(1.0f));
     
     PLOGI << "ModelLoader: Built skeleton with " << skeleton.bones.size() << " bones";
     

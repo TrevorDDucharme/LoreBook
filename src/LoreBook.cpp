@@ -34,6 +34,8 @@
 #include <future>
 #include <CharacterEditor/ModelLoader.hpp>
 #include <CharacterEditor/CharacterEditorUI.hpp>
+#include <CharacterEditor/PartLibrary.hpp>
+#include <CharacterEditor/CharacterManager.hpp>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -214,6 +216,9 @@ int main(int argc, char** argv)
     static FloorPlanEditor floorPlanEditor;
     // Character Editor
     static CharacterEditor::CharacterEditorUI characterEditor;
+    static std::unique_ptr<CharacterEditor::PartLibrary> partLibrary;
+    static std::unique_ptr<CharacterEditor::CharacterManager> characterManager;
+    static sqlite3* lastConnectedVaultDb = nullptr;  // Track which vault we connected managers to
     // Create Vault modal state
     static bool showCreateVaultModal = false;
     static char createVaultDirBuf[1024];
@@ -300,9 +305,9 @@ int main(int argc, char** argv)
     openVaultDirBuf[sizeof(openVaultDirBuf)-1] = '\0';
 
     // Auto-load a test model into the Character Editor if present (for development)
-    if (std::filesystem::exists("./Ursine.fbx")) {
+    if (std::filesystem::exists("./Ursine.glb")) {
         characterEditor.setOpen(true);
-        if (characterEditor.loadModel("./Ursine.fbx")) {
+        if (characterEditor.loadModel("./Ursine.glb")) {
             PLOGI << "Auto-loaded test model into Character Editor";
         }
     }
@@ -1225,8 +1230,33 @@ int main(int argc, char** argv)
         // Floor Plan Editor
         floorPlanEditor.render();
 
-        // Character Editor
-        CenterNextPopupOnMainViewport();
+        // Character Editor - connect managers when vault is available and logged in
+        if (vault && vault->isOpen() && vault->getCurrentUserID() > 0) {
+            sqlite3* currentDb = vault->getDBPublic();
+            if (currentDb && currentDb != lastConnectedVaultDb) {
+                // Vault changed or newly connected, initialize managers
+                partLibrary = std::make_unique<CharacterEditor::PartLibrary>();
+                characterManager = std::make_unique<CharacterEditor::CharacterManager>();
+                if (partLibrary->initialize(currentDb)) {
+                    characterEditor.setPartLibrary(partLibrary.get());
+                    PLOGI << "Connected PartLibrary to CharacterEditorUI";
+                }
+                if (characterManager->initialize(currentDb, partLibrary.get())) {
+                    characterEditor.setCharacterManager(characterManager.get());
+                    PLOGI << "Connected CharacterManager to CharacterEditorUI";
+                }
+                lastConnectedVaultDb = currentDb;
+            }
+        } else if (!vault || !vault->isOpen()) {
+            // Vault closed, disconnect managers
+            if (lastConnectedVaultDb) {
+                characterEditor.setPartLibrary(nullptr);
+                characterEditor.setCharacterManager(nullptr);
+                partLibrary.reset();
+                characterManager.reset();
+                lastConnectedVaultDb = nullptr;
+            }
+        }
         characterEditor.render();
 
         // Rendering
