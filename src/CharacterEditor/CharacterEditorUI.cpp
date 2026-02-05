@@ -735,7 +735,7 @@ void CharacterEditorUI::renderViewport() {
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_fbWidth, m_fbHeight);
     
-    glClearColor(m_clearColor.r, m_clearColor.g, m_clearColor.b, 1.0f);
+    glClearColor(m_clearColor.r, m_clearColor.g, m_clearColor.b, m_clearColor.a);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     
     glEnable(GL_DEPTH_TEST);
@@ -764,15 +764,11 @@ void CharacterEditorUI::renderViewport() {
 }
 
 void CharacterEditorUI::renderScene() {
-    if (m_showGrid) {
-        renderGrid();
-    }
-    
     float aspectRatio = m_viewportSize.x / m_viewportSize.y;
     glm::mat4 view = m_camera.getViewMatrix();
     glm::mat4 projection = m_camera.getProjectionMatrix(aspectRatio);
     
-    // Render meshes
+    // Render meshes first
     glUseProgram(m_meshShader);
     
     glUniformMatrix4fv(glGetUniformLocation(m_meshShader, "uView"), 1, GL_FALSE, glm::value_ptr(view));
@@ -815,6 +811,11 @@ void CharacterEditorUI::renderScene() {
         
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glEnable(GL_CULL_FACE);
+    }
+    
+    // Render grid AFTER meshes, with depth write disabled so it doesn't occlude
+    if (m_showGrid) {
+        renderGrid();
     }
 }
 
@@ -892,10 +893,41 @@ void CharacterEditorUI::renderBones(const Skeleton& skeleton, const glm::mat4& m
         lineData.push_back(color.r); lineData.push_back(color.g); lineData.push_back(color.b); lineData.push_back(color.a);
     };
     
+    // Pre-compute world transforms for all bones
+    std::vector<glm::vec3> worldPositions(skeleton.bones.size());
+    
+    // Log first few bones for debugging
+    static bool loggedOnce = false;
+    bool shouldLog = !loggedOnce;
+    if (shouldLog) {
+        PLOGI << "=== Bone World Transform Debug (first 10 bones) ===";
+    }
+    
+    for (size_t i = 0; i < skeleton.bones.size(); ++i) {
+        Transform worldTransform = skeleton.getWorldTransform(static_cast<uint32_t>(i));
+        worldPositions[i] = worldTransform.position;
+        
+        if (shouldLog && i < 10) {
+            const auto& bone = skeleton.bones[i];
+            PLOGI << "Bone[" << i << "] '" << bone.name << "': "
+                  << "parent=" << (bone.parentID == UINT32_MAX ? -1 : (int)bone.parentID)
+                  << ", local=(" << bone.localTransform.position.x 
+                  << ", " << bone.localTransform.position.y 
+                  << ", " << bone.localTransform.position.z << ")"
+                  << ", world=(" << worldPositions[i].x 
+                  << ", " << worldPositions[i].y 
+                  << ", " << worldPositions[i].z << ")";
+        }
+    }
+    
+    if (shouldLog) {
+        loggedOnce = true;
+    }
+    
     // Draw bone connections
     for (size_t i = 0; i < skeleton.bones.size(); ++i) {
         const auto& bone = skeleton.bones[i];
-        glm::vec3 bonePos = bone.localTransform.position;
+        glm::vec3 bonePos = worldPositions[i];
         
         // Draw octahedron representation
         float boneSize = 0.05f;
@@ -908,7 +940,7 @@ void CharacterEditorUI::renderBones(const Skeleton& skeleton, const glm::mat4& m
         
         // Draw connection to parent
         if (bone.parentID != UINT32_MAX && bone.parentID < skeleton.bones.size()) {
-            glm::vec3 parentPos = skeleton.bones[bone.parentID].localTransform.position;
+            glm::vec3 parentPos = worldPositions[bone.parentID];
             addLine(parentPos, bonePos, color * 0.7f);
         }
     }
@@ -1042,6 +1074,12 @@ void CharacterEditorUI::renderGrid() {
         glBindVertexArray(0);
     }
     
+    // Disable face culling so grid is visible from both sides
+    glDisable(GL_CULL_FACE);
+    
+    // Disable depth write so grid doesn't occlude meshes
+    glDepthMask(GL_FALSE);
+    
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     
@@ -1050,6 +1088,8 @@ void CharacterEditorUI::renderGrid() {
     glBindVertexArray(0);
     
     glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
 }
 
 void CharacterEditorUI::renderHierarchyPanel() {
@@ -1281,7 +1321,7 @@ void CharacterEditorUI::renderDebugPanel() {
     ImGui::Text("Debug Options");
     ImGui::Separator();
     
-    ImGui::ColorEdit3("Clear Color", glm::value_ptr(m_clearColor));
+    ImGui::ColorEdit4("Clear Color", glm::value_ptr(m_clearColor));
     ImGui::ColorEdit4("Bone Color", glm::value_ptr(m_boneColor));
     ImGui::ColorEdit4("Socket Color", glm::value_ptr(m_socketColor));
     

@@ -267,7 +267,7 @@ private:
     ShadingMode m_shadingMode = ShadingMode::Solid;
     bool m_showGrid = true;
     bool m_showGizmo = true;
-    glm::vec3 m_clearColor{0.15f, 0.15f, 0.18f};
+    glm::vec4 m_clearColor{0.15f, 0.15f, 0.18f, 0.0f};
     
     // Shape key editing
     std::string m_selectedShapeKey;

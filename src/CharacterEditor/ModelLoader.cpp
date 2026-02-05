@@ -3,6 +3,7 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#include <plog/Log.h>
 #include <algorithm>
 #include <functional>
 #include <unordered_set>
@@ -151,36 +152,105 @@ void collectAncestors(const aiNode* node, const aiNode* root,
     // Ancestors will be added during the recursive traversal
 }
 
+// Check if a node looks like an armature root
+bool isArmatureRoot(const aiNode* node) {
+    std::string name = node->mName.C_Str();
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    
+    // Common armature root names from various 3D software
+    return lower == "armature" || lower == "skeleton" || lower == "rig" ||
+           lower.find("armature") != std::string::npos ||
+           lower.find("skeleton") != std::string::npos;
+}
+
+// Check if a node looks like a bone based on naming patterns
+bool looksLikeBone(const std::string& name) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    
+    // Skip obvious non-bones
+    if (lower == "rootnode" || lower == "scene" || lower == "root") return false;
+    if (lower.find("mesh") != std::string::npos) return false;
+    if (lower.find("camera") != std::string::npos) return false;
+    if (lower.find("light") != std::string::npos) return false;
+    
+    // Common bone naming patterns
+    static const std::vector<std::string> bonePatterns = {
+        "bone", "spine", "pelvis", "hip", "thigh", "leg", "shin", "calf",
+        "foot", "toe", "shoulder", "arm", "elbow", "forearm", "hand", "wrist",
+        "finger", "thumb", "head", "neck", "jaw", "eye", "ear",
+        "chest", "torso", "clavicle", "collar", "tail", "wing",
+        "index", "middle", "ring", "pinky", "ik", "fk", "ctrl",
+        "upper", "lower", "left", "right", "_l", "_r", ".l", ".r"
+    };
+    
+    for (const auto& pattern : bonePatterns) {
+        if (lower.find(pattern) != std::string::npos) return true;
+    }
+    
+    return false;
+}
+
 // Check if a node is an actual skeleton bone (not a scene hierarchy node)
 bool isActualBone(const aiNode* node, const std::unordered_set<std::string>& meshBoneNames,
+                  const std::unordered_set<std::string>& armatureBoneNames,
                   const std::string& socketPrefix) {
     std::string name = node->mName.C_Str();
     
-    // Node is a bone ONLY if:
+    // Node is a bone if:
     // 1. It's referenced as a bone by mesh skinning data
     if (meshBoneNames.count(name)) return true;
     
     // 2. It's a socket bone (starts with socket prefix)
     if (name.rfind(socketPrefix, 0) == 0) return true;
     
-    // Scene hierarchy nodes like "RootNode", "Armature", "Scene" are NOT bones
-    // They're just containers - only include them if they're actually in meshBoneNames
+    // 3. It was found in an armature hierarchy
+    if (armatureBoneNames.count(name)) return true;
     
     return false;
 }
 
-// Recursively check if this subtree contains any actual bones
-bool containsActualBones(const aiNode* node, const std::unordered_set<std::string>& meshBoneNames,
-                         const std::string& socketPrefix) {
-    if (isActualBone(node, meshBoneNames, socketPrefix)) return true;
+// Recursively collect bone names from armature hierarchy
+void collectArmatureBones(const aiNode* node, std::unordered_set<std::string>& armatureBoneNames) {
+    std::string name = node->mName.C_Str();
+    
+    // Skip the armature root itself, but include its children
+    if (!isArmatureRoot(node) && looksLikeBone(name)) {
+        armatureBoneNames.insert(name);
+    }
+    
+    // Recurse to children
+    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+        collectArmatureBones(node->mChildren[i], armatureBoneNames);
+    }
+}
+
+// Find armature root in scene hierarchy
+const aiNode* findArmatureRoot(const aiNode* node) {
+    if (isArmatureRoot(node)) {
+        return node;
+    }
     
     for (unsigned int i = 0; i < node->mNumChildren; ++i) {
-        if (containsActualBones(node->mChildren[i], meshBoneNames, socketPrefix)) {
-            return true;
-        }
+        const aiNode* found = findArmatureRoot(node->mChildren[i]);
+        if (found) return found;
     }
-    return false;
+    return nullptr;
 }
+
+// Z-up to Y-up conversion matrix (-90 degrees around X axis)
+// This transforms: X stays X, Y becomes Z, Z becomes -Y
+static const glm::mat4 g_zUpToYUpMatrix = glm::mat4(
+    1.0f,  0.0f,  0.0f, 0.0f,
+    0.0f,  0.0f,  1.0f, 0.0f,
+    0.0f, -1.0f,  0.0f, 0.0f,
+    0.0f,  0.0f,  0.0f, 1.0f
+);
+
+static const glm::mat3 g_zUpToYUpMatrix3 = glm::mat3(g_zUpToYUpMatrix);
 
 // Build skeleton from Assimp scene
 Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
@@ -190,7 +260,7 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
         return skeleton;
     }
     
-    // First, collect all bone names referenced by meshes
+    // First, collect all bone names referenced by meshes (skinning data)
     std::unordered_set<std::string> meshBoneNames;
     for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
         const aiMesh* mesh = scene->mMeshes[mi];
@@ -199,21 +269,35 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
         }
     }
     
-    // If no bones in meshes, return empty skeleton
-    if (meshBoneNames.empty()) {
+    PLOGI << "ModelLoader: Found " << meshBoneNames.size() << " bones from mesh skinning data";
+    
+    // Second, look for armature hierarchy (for FBX files where meshes might not be skinned)
+    std::unordered_set<std::string> armatureBoneNames;
+    const aiNode* armatureRoot = findArmatureRoot(scene->mRootNode);
+    if (armatureRoot) {
+        PLOGI << "ModelLoader: Found armature root: " << armatureRoot->mName.C_Str();
+        collectArmatureBones(armatureRoot, armatureBoneNames);
+        PLOGI << "ModelLoader: Found " << armatureBoneNames.size() << " bones from armature hierarchy";
+    } else {
+        PLOGI << "ModelLoader: No armature root found in scene";
+    }
+    
+    // If no bones from either source, return empty skeleton
+    if (meshBoneNames.empty() && armatureBoneNames.empty()) {
+        PLOGI << "ModelLoader: No bones found, returning empty skeleton";
         return skeleton;
     }
     
     std::unordered_map<std::string, int32_t> boneNameToId;
     
-    // Recursive function to process nodes, only including skeleton nodes
+    // Recursive function to process nodes, building skeleton
     std::function<void(const aiNode*, uint32_t)> processNode = 
         [&](const aiNode* node, uint32_t parentId) {
         
         std::string nodeName = node->mName.C_Str();
         
         // Check if this node should be included in skeleton
-        bool isBone = isActualBone(node, meshBoneNames, config.socketBonePrefix);
+        bool isBone = isActualBone(node, meshBoneNames, armatureBoneNames, config.socketBonePrefix);
         
         // Only include actual bones in the skeleton
         // Scene hierarchy nodes (RootNode, Armature, etc.) are skipped
@@ -221,7 +305,33 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
             Bone bone;
             bone.name = nodeName;
             bone.parentID = parentId;
-            bone.localTransform = Transform::fromMatrix(toGlm(node->mTransformation) * config.scaleFactor);
+            
+            // Get the local transform from the node
+            glm::mat4 localMat = toGlm(node->mTransformation);
+            
+            // Apply Z-up to Y-up conversion ONLY to root bones
+            // The conversion propagates through the hierarchy naturally:
+            // - root_world = C * root_local (converted)
+            // - child_world = parent_world * child_local (unchanged)
+            //              = C * parent_local * child_local = C * child_world_zup
+            // This matches how mesh vertices are converted: v_yup = C * v_zup
+            if (config.convertZUpToYUp && parentId == UINT32_MAX) {
+                PLOGI << "Converting root bone '" << nodeName << "' from Z-up to Y-up";
+                PLOGI << "  Before: pos=(" << localMat[3][0] << ", " << localMat[3][1] << ", " << localMat[3][2] << ")";
+                localMat = g_zUpToYUpMatrix * localMat;
+                PLOGI << "  After:  pos=(" << localMat[3][0] << ", " << localMat[3][1] << ", " << localMat[3][2] << ")";
+            }
+            
+            bone.localTransform = Transform::fromMatrix(localMat * config.scaleFactor);
+            
+            // Log bone transform details
+            if (skeleton.bones.size() < 10) {
+                PLOGI << "Added bone '" << nodeName << "': parent=" << (parentId == UINT32_MAX ? -1 : (int)parentId)
+                      << ", localPos=(" << bone.localTransform.position.x 
+                      << ", " << bone.localTransform.position.y 
+                      << ", " << bone.localTransform.position.z << ")";
+            }
+            
             bone.role = inferRoleFromBoneName(nodeName, config.boneRoleOverrides);
             
             uint32_t boneId = static_cast<uint32_t>(skeleton.bones.size());
@@ -248,6 +358,8 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
     
     // Start from root
     processNode(scene->mRootNode, UINT32_MAX);
+    
+    PLOGI << "ModelLoader: Built skeleton with " << skeleton.bones.size() << " bones";
     
     // Now set inverse bind matrices from actual bone data in meshes
     for (unsigned int mi = 0; mi < scene->mNumMeshes; ++mi) {
@@ -340,10 +452,22 @@ Mesh processMesh(const aiMesh* aiMesh, const aiScene* scene,
     // Process vertices
     for (unsigned int vi = 0; vi < aiMesh->mNumVertices; ++vi) {
         Vertex vertex;
-        vertex.position = toGlm(aiMesh->mVertices[vi]) * config.scaleFactor;
+        glm::vec3 pos = toGlm(aiMesh->mVertices[vi]) * config.scaleFactor;
+        
+        // Convert Z-up to Y-up if requested
+        if (config.convertZUpToYUp) {
+            vertex.position = glm::vec3(g_zUpToYUpMatrix * glm::vec4(pos, 1.0f));
+        } else {
+            vertex.position = pos;
+        }
         
         if (aiMesh->HasNormals()) {
-            vertex.normal = toGlm(aiMesh->mNormals[vi]);
+            glm::vec3 norm = toGlm(aiMesh->mNormals[vi]);
+            if (config.convertZUpToYUp) {
+                vertex.normal = g_zUpToYUpMatrix3 * norm;
+            } else {
+                vertex.normal = norm;
+            }
         }
         
         if (aiMesh->HasTextureCoords(0)) {
@@ -353,6 +477,9 @@ Mesh processMesh(const aiMesh* aiMesh, const aiScene* scene,
         
         if (aiMesh->HasTangentsAndBitangents()) {
             glm::vec3 tan = toGlm(aiMesh->mTangents[vi]);
+            if (config.convertZUpToYUp) {
+                tan = g_zUpToYUpMatrix3 * tan;
+            }
             vertex.tangent = glm::vec4(tan, 1.0f);  // w=1.0 for right-handed tangent space
         }
         
@@ -564,7 +691,14 @@ LoadResult ModelLoader::loadFromFile(const std::string& filePath, const ImportCo
         aiProcess_CalcTangentSpace |
         aiProcess_JoinIdenticalVertices |
         aiProcess_LimitBoneWeights |
-        aiProcess_PopulateArmatureData;
+        aiProcess_PopulateArmatureData |
+        aiProcess_FlipUVs;  // Flip UVs for OpenGL
+    
+    // Convert to Y-up coordinate system if requested (most 3D software uses Y-up for rendering)
+    // This helps with Blender FBX files which use Z-up
+    if (config.leftHandedToRightHanded) {
+        flags |= aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder;
+    }
     
     const aiScene* scene = importer.ReadFile(filePath, flags);
     
@@ -623,7 +757,12 @@ LoadResult ModelLoader::loadFromMemory(const uint8_t* data, size_t size,
         aiProcess_CalcTangentSpace |
         aiProcess_JoinIdenticalVertices |
         aiProcess_LimitBoneWeights |
-        aiProcess_PopulateArmatureData;
+        aiProcess_PopulateArmatureData |
+        aiProcess_FlipUVs;
+    
+    if (config.leftHandedToRightHanded) {
+        flags |= aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder;
+    }
     
     const aiScene* scene = importer.ReadFileFromMemory(data, size, flags, formatHint.c_str());
     

@@ -351,6 +351,7 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("Vault Chat", dock_id_right);
             ImGui::DockBuilderDockWindow("World Map", dock_main_id);
             ImGui::DockBuilderDockWindow("Floor Plan Editor", dock_main_id);
+            ImGui::DockBuilderDockWindow("Character Editor", dock_main_id);
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }
@@ -1225,6 +1226,7 @@ int main(int argc, char** argv)
         floorPlanEditor.render();
 
         // Character Editor
+        CenterNextPopupOnMainViewport();
         characterEditor.render();
 
         // Rendering
