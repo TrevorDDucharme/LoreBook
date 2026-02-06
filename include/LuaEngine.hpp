@@ -3,6 +3,8 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <string>
+#include <map>
 
 extern "C" {
 #include <lua.h>
@@ -35,15 +37,32 @@ public:
     // Call UI() for ui scripts
     void callUI();
 
+    struct CanvasEvent {
+        std::string type;
+        std::map<std::string, std::string> data;
+    };
+
+    // Call optional OnEvent(event) for ui scripts
+    void callOnCanvasEvent(const CanvasEvent &event);
+
     // Last error message captured from Lua calls
     const std::string &lastError() const { return m_error; }
 
     lua_State *L() { return m_L; }
 
+    // Take captured stdout from the Lua 'print' binding. Returns and clears the buffer.
+    std::string takeStdout();
+
 private:
     lua_State *m_L = nullptr;
     std::string m_error;
 
+    // captured output from print() calls
+    std::string m_stdout;
+
     void setupSandbox();
     void captureLuaError(const char *msg);
+
+    // C-function used as the 'print' binding (added as a closure with 'this' as upvalue)
+    static int l_print(lua_State *L);
 };

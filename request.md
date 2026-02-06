@@ -1,0 +1,21 @@
+Step into my LoreBook, then make your own
+
+This isn’t a game. It isn’t a story. It isn’t even a sandbox. It’s a living, breathing universe that exists whether you are there or not. It moves, it grows, it changes. The people in it have lives, histories, ambitions, and failures independent of your presence. Cities rise and fall. Rivers carve valleys over centuries. Individuals live, struggle, love, and die. And all of it leaves traces. Nothing is paused for you. Nothing waits.
+
+I am asking you for something rare: twenty-four hours. One day. Step into the pre-built world I’ve included and watch it unfold. Watch the lives of people who do not care about you, who have their own desires and fears, who remember what happened and act accordingly. Spend a day living in the world, and see what it is like to inhabit a universe that continues when you look away.
+
+But this is only the beginning. AnyRPG LoreBook is a creation system. It is a place where you can build your own worlds, your own histories, your own species, your own rules, your own laws, your own physics. You can watch the lives you design unfold organically, see the interactions of thousands of individuals, and witness consequences you could never have scripted. Characters move through the world you built — they act according to the constraints you created, they grow, they fail, they find meaning, they suffer, and they leave their mark. The world is not yours. It is yours to design, but it is alive beyond you.
+
+The pre-built world I’ve included is a starting point. It exists so that you can see what complexity looks like, so that you can interact without being overwhelmed by a blank slate. Start here. Watch the simulation. See how the world reacts to itself. Follow a single life from birth to death, trace the ripple of their choices across a kingdom, a forest, a village. Observe how a dragon might cross the sky, or how the smallest villager tends to their garden, and how both are part of the same evolving system.
+
+Then pause the simulation. Change it. Add a new species. Introduce a hidden village or a magical ley line. Create characters with ambitions and flaws. Adjust the lore, the physics, the economics, the laws. Resume the simulation and watch the world evolve around your additions. See how your creations live, act, and shape the world. Watch them rise, fall, succeed, fail, and surprise you.
+
+You can step in as a god altering the very rules of reality, or you can be a single insignificant person in the vastness of a world that does not care. You can watch, or you can participate. You can explore, study, train, forage, fight, negotiate, or write the books that other characters will read. You can be heroic, brutish, wise, cowardly, or quiet. You will never predict everything, because the world is too vast, the systems too complex, the individuals too real. And that is the point: that even in a world full of dragons, magic, kingdoms, and wars, the small things — tending a garden, writing a book, listening to a patron in the library — are worth everything.
+
+I want you to experience that. I want you to be surprised. I want you to feel the weight and beauty of consequences that are not authored to make you feel heroic. I want you to watch the world lift characters up, push them down, honor them, destroy them. I want you to see how the simulation rewards patience, curiosity, empathy, and persistence. I want you to see that significance is not given — it is found in the flow of a life, the connections between people, the reverberations of choices.
+
+After you have spent time in the included world, after you have watched it breathe, you will understand why you can make your own. You will have the tools to build your own LoreBook — to create your own continents, civilizations, species, histories, magic, laws, and physics. To see them live independently. To watch your characters act, fail, and surprise you. To watch the world grow, evolve, and react.
+
+This is my invitation. Not to “play,” not to “win,” not to “be the hero.” To witness, to create, to explore, and to understand. Give the world twenty-four hours of your attention, and let it teach you what it is to be part of something bigger than yourself.
+
+Then, when you are ready, build your own.

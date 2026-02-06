@@ -38,7 +38,10 @@ LuaEngine* LuaScriptManager::getOrCreateEngine(const std::string &scriptPath, co
     auto eng = std::make_unique<LuaEngine>();
     if (!eng->loadScript(code))
     {
-        PLOGW << "LuaScriptManager: failed to load script: " << scriptPath;
+        std::string err = eng->lastError();
+        PLOGW << "LuaScriptManager: failed to load script: " << scriptPath << " err=" << err;
+        // record last error for the caller/UI to inspect
+        m_lastErrors[key] = err;
         return nullptr;
     }
     // Register basic bindings
@@ -57,4 +60,19 @@ void LuaScriptManager::invalidateScript(const std::string &scriptPath)
         if (it->first.find(scriptPath + "::") == 0) it = m_engines.erase(it);
         else ++it;
     }
+    // Also clear any recorded load errors for this script
+    for (auto it = m_lastErrors.begin(); it != m_lastErrors.end();) {
+        if (it->first.find(scriptPath + "::") == 0) it = m_lastErrors.erase(it);
+        else ++it;
+    }
+}
+
+std::string LuaScriptManager::getLastError(const std::string &scriptPath, const std::string &embedID)
+{
+    std::string key = scriptPath + "::" + embedID;
+    std::lock_guard<std::mutex> l(m_mutex);
+    auto it = m_lastErrors.find(key);
+    if (it != m_lastErrors.end())
+        return it->second;
+    return std::string();
 }

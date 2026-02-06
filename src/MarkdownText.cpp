@@ -5,6 +5,7 @@
 #include <vector>
 #include <stack>
 #include <chrono>
+#include <unordered_set>
 #include <Fonts.hpp>
 #include <plog/Log.h>
 #include "Vault.hpp"
@@ -79,6 +80,8 @@ namespace ImGui
         std::stack<bool> li_wrap_active;
         // Running source offset (number of text bytes processed so far)
         size_t src_pos = 0;
+        // Per-render unique embed counter for disambiguating multiple identical embeds in the same document
+        int embedCounter = 0;
         // Pointer to original source buffer base used to compute absolute byte offsets for md4c callbacks
         const MD_CHAR *source_base = nullptr; 
 
@@ -660,7 +663,8 @@ namespace ImGui
                     {
                         // scriptPath is the path portion after the prefix (e.g., 'magic_circle.lua')
                         std::string scriptName = src.substr(scriptsPrefix.size());
-                        std::string embedID = std::to_string(r->src_pos);
+                        // Create a per-instance embed ID using the source offset plus a per-render counter
+                        std::string embedID = std::to_string(r->src_pos) + ":" + std::to_string(++r->embedCounter);
                         auto mgr = v->getScriptManager();
                         if (!mgr)
                         {
@@ -671,19 +675,51 @@ namespace ImGui
                         if (!eng)
                         {
                             ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script failed to load: %s", scriptName.c_str());
+                            // Try to fetch any recorded load error from the script manager
+                            std::string loadErr = mgr ? mgr->getLastError(scriptName, embedID) : std::string();
+                            if (!loadErr.empty()){
+                                ImGui::TextWrapped("%s", loadErr.c_str());
+                                if (ImGui::SmallButton("Copy Error")) {
+                                    ImGui::SetClipboardText(loadErr.c_str());
+                                }
+                            } else {
+                                ImGui::TextWrapped("No additional error details available.");
+                            }
+
                             ImGui::SameLine();
                             if (ImGui::SmallButton("Open in Explorer"))
                                 RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
+
+                            // one-time error log so we don't spam the logs repeatedly while preview remains open
+                            static std::unordered_set<std::string> s_logged;
+                            std::string skey = scriptName + "::" + embedID + ":load";
+                            if (!loadErr.empty() && s_logged.find(skey) == s_logged.end()) {
+                                PLOGE << "md:script '" << scriptName << "' embed=" << embedID << " failed to load: " << loadErr;
+                                s_logged.insert(skey);
+                            }
+
                             return 0;
                         }
 
-                        // If script has error state, show it
+                        // If script has error state, show the full error in the preview and log it once
                         if (!eng->lastError().empty())
                         {
-                            ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script error: %s", eng->lastError().c_str());
+                            std::string err = eng->lastError();
+                            ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script error: %s", scriptName.c_str());
+                            ImGui::TextWrapped("%s", err.c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Copy Error")) ImGui::SetClipboardText(err.c_str());
                             ImGui::SameLine();
                             if (ImGui::SmallButton("Open in Explorer"))
                                 RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
+
+                            static std::unordered_set<std::string> s_logged_state;
+                            std::string skey_state = scriptName + "::" + embedID + ":state";
+                            if (s_logged_state.find(skey_state) == s_logged_state.end()) {
+                                PLOGE << "md:script '" << scriptName << "' embed=" << embedID << " error: " << err;
+                                s_logged_state.insert(skey_state);
+                            }
+
                             return 0;
                         }
 
@@ -691,11 +727,13 @@ namespace ImGui
                         int width = (urlW > 0) ? urlW : cfg.width;
                         int height = (urlH > 0) ? urlH : cfg.height;
 
-                        ImGui::PushID((void*)embedID.c_str());
+                        ImGui::PushID(embedID.c_str());
                         if (cfg.type == ScriptConfig::Type::Canvas)
                         {
+                            //no padding, we want the canvas to take the full size specified by the script or URL suffix
+                            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0));
                             ImGui::BeginChild("lua_canvas", ImVec2((float)width, (float)height), true);
-
+                            ImVec2 pos = ImGui::GetCursorScreenPos();
                             // Use the window content region origin (absolute screen coords) so the canvas
                             // coordinate space matches what ImGui actually draws for the child content.
                             ImVec2 winPos = ImGui::GetWindowPos();
@@ -718,7 +756,17 @@ namespace ImGui
                             // If the script produced a runtime error during Render(), display it here
                             if (!eng->lastError().empty())
                             {
-                                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Runtime error: %s", eng->lastError().c_str());
+                                std::string rerr = eng->lastError();
+                                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Runtime error: %s", scriptName.c_str());
+                                ImGui::TextWrapped("%s", rerr.c_str());
+                                if (ImGui::SmallButton("Copy Error")) ImGui::SetClipboardText(rerr.c_str());
+
+                                static std::unordered_set<std::string> s_logged_runtime;
+                                std::string skey_rt = scriptName + "::" + embedID + ":runtime";
+                                if (s_logged_runtime.find(skey_rt) == s_logged_runtime.end()) {
+                                    PLOGE << "md:script '" << scriptName << "' embed=" << embedID << " runtime error: " << rerr;
+                                    s_logged_runtime.insert(skey_rt);
+                                }
                             }
 
                             // Inspect canvas.draw_count to detect whether Render actually issued draw calls
@@ -747,7 +795,79 @@ namespace ImGui
                                 }
                             }
 
+                            // invisible button covering the canvas to capture all input
+                            ImGui::SetCursorScreenPos(pos);
+                            ImGui::InvisibleButton("canvas_click", ImVec2((float)width, (float)height));
+                            ImGuiIO &io = ImGui::GetIO();
+                            bool isHover = ImGui::IsItemHovered();
+
+                            // Mouse button events: down/up/click/doubleclick
+                            for (int b = 0; b < 3; ++b)
+                            {
+                                // mousedown (pressed)
+                                if (isHover && ImGui::IsMouseClicked((ImGuiMouseButton)b))
+                                {
+                                    ImVec2 clickPos = io.MouseClickedPos[b];
+                                    ImVec2 rel = ImVec2(clickPos.x - origin.x, clickPos.y - origin.y);
+                                    LuaEngine::CanvasEvent ev; ev.type = "mousedown";
+                                    ev.data["button"] = std::to_string(b);
+                                    ev.data["x"] = std::to_string(rel.x);
+                                    ev.data["y"] = std::to_string(rel.y);
+                                    ev.data["ctrl"] = io.KeyCtrl ? "1" : "0";
+                                    ev.data["shift"] = io.KeyShift ? "1" : "0";
+                                    ev.data["alt"] = io.KeyAlt ? "1" : "0";
+                                    eng->callOnCanvasEvent(ev);
+                                }
+                                // mouseup (released)
+                                if (isHover && ImGui::IsMouseReleased((ImGuiMouseButton)b))
+                                {
+                                    ImVec2 rel = ImVec2(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
+                                    LuaEngine::CanvasEvent ev; ev.type = "mouseup";
+                                    ev.data["button"] = std::to_string(b);
+                                    ev.data["x"] = std::to_string(rel.x);
+                                    ev.data["y"] = std::to_string(rel.y);
+                                    eng->callOnCanvasEvent(ev);
+                                }
+                                // double click
+                                if (isHover && ImGui::IsMouseDoubleClicked((ImGuiMouseButton)b))
+                                {
+                                    ImVec2 clickPos = io.MouseClickedPos[b];
+                                    ImVec2 rel = ImVec2(clickPos.x - origin.x, clickPos.y - origin.y);
+                                    LuaEngine::CanvasEvent ev; ev.type = "doubleclick";
+                                    ev.data["button"] = std::to_string(b);
+                                    ev.data["x"] = std::to_string(rel.x);
+                                    ev.data["y"] = std::to_string(rel.y);
+                                    eng->callOnCanvasEvent(ev);
+                                }
+                            }
+
+                            // Scroll events
+                            if (isHover && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f))
+                            {
+                                LuaEngine::CanvasEvent ev; ev.type = "scroll";
+                                ev.data["dx"] = std::to_string(io.MouseWheelH);
+                                ev.data["dy"] = std::to_string(io.MouseWheel);
+                                ev.data["x"] = std::to_string(io.MousePos.x - origin.x);
+                                ev.data["y"] = std::to_string(io.MousePos.y - origin.y);
+                                eng->callOnCanvasEvent(ev);
+                            }
+
+                            // Movement / hover update (keep sending while hovered)
+                            if (isHover)
+                            {
+                                ImVec2 rel = ImVec2(io.MousePos.x - origin.x, io.MousePos.y - origin.y);
+                                LuaEngine::CanvasEvent ev; ev.type = "mousemove";
+                                ev.data["x"] = std::to_string(rel.x);
+                                ev.data["y"] = std::to_string(rel.y);
+                                // indicate which buttons are currently down
+                                ev.data["left"] = io.MouseDown[0] ? "1" : "0";
+                                ev.data["right"] = io.MouseDown[1] ? "1" : "0";
+                                ev.data["middle"] = io.MouseDown[2] ? "1" : "0";
+                                eng->callOnCanvasEvent(ev);
+                            }
+
                             ImGui::EndChild();
+                            ImGui::PopStyleVar();
                         }
                         else if (cfg.type == ScriptConfig::Type::UI)
                         {

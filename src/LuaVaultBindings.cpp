@@ -1,5 +1,7 @@
 #include "LuaVaultBindings.hpp"
 #include "Vault.hpp"
+#include "LuaBindingDocs.hpp"
+#include "LuaBindingDocsUtil.hpp"
 #include <plog/Log.h>
 
 // Helper: push vector<string> as lua array
@@ -98,6 +100,16 @@ void registerLuaVaultBindings(lua_State *L, Vault *vault)
 
     // Set global 'vault'
     lua_setglobal(L, "vault");
+
+    // Register docs for vault bindings
+    LuaBindingDocs::get().registerDoc("vault.getNode", "getNode(id) -> table|nil", "Fetch a public vault item by id", "local n = vault.getNode(42); if n then print(n.name) end", __FILE__);
+    LuaBindingDocs::get().registerDoc("vault.getContent", "getContent(id) -> string", "Get raw content text of a vault item", "local s = vault.getContent(42)", __FILE__);
+    LuaBindingDocs::get().registerDoc("vault.getTags", "getTags(id) -> table", "Get tags associated with a vault item", "local tags = vault.getTags(42)", __FILE__);
+    LuaBindingDocs::get().registerDoc("vault.currentNodeID", "currentNodeID() -> id", "Get the currently selected node id in the UI", "local id = vault.currentNodeID()", __FILE__);
+    LuaBindingDocs::get().registerDoc("vault.currentUserID", "currentUserID() -> id", "Get the current user id", "local id = vault.currentUserID()", __FILE__);
+
+    // Enforce docs presence for vault bindings
+    LuaBindingDocsUtil::enforceTableHasDocs(L, "vault");
 
     // The userdata remains on the stack top; pop it
     lua_pop(L, 1);

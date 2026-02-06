@@ -42,28 +42,42 @@ void LuaEngine::setupSandbox()
     lua_pushnil(m_L);
     lua_setglobal(m_L, "load");
 
-    // Replace print with a logger function that forwards to plog
-    lua_pushcfunction(m_L, [](lua_State *L) -> int {
-        int nargs = lua_gettop(L);
-        std::ostringstream ss;
-        for (int i = 1; i <= nargs; ++i)
-        {
-            if (lua_isstring(L, i))
-                ss << lua_tostring(L, i);
-            else
-                ss << luaL_tolstring(L, i, nullptr);
-            if (i < nargs)
-                ss << "\t";
-        }
-        PLOGI << "lua: " << ss.str();
-        return 0;
-    });
+    // Replace print with a logger function that forwards to plog and captures output
+    // push 'this' as lightuserdata upvalue for the closure
+    lua_pushlightuserdata(m_L, this);
+    lua_pushcclosure(m_L, &LuaEngine::l_print, 1);
     lua_setglobal(m_L, "print");
+}
+
+int LuaEngine::l_print(lua_State *L)
+{
+    // upvalue 1 is our LuaEngine* pointer
+    LuaEngine *eng = reinterpret_cast<LuaEngine*>(lua_touserdata(L, lua_upvalueindex(1)));
+    int nargs = lua_gettop(L);
+    std::ostringstream ss;
+    for (int i = 1; i <= nargs; ++i)
+    {
+        if (lua_isstring(L, i))
+            ss << lua_tostring(L, i);
+        else
+            ss << luaL_tolstring(L, i, nullptr);
+        if (i < nargs)
+            ss << "\t";
+    }
+    std::string s = ss.str();
+    PLOGI << "lua: " << s;
+    if (eng)
+    {
+        eng->m_stdout += s;
+        eng->m_stdout.push_back('\n');
+    }
+    return 0;
 }
 
 bool LuaEngine::loadScript(const std::string &code)
 {
     m_error.clear();
+    m_stdout.clear();
     if (!m_L)
     {
         captureLuaError("lua state not initialized");
@@ -85,6 +99,13 @@ bool LuaEngine::loadScript(const std::string &code)
         return false;
     }
     return true;
+}
+
+std::string LuaEngine::takeStdout()
+{
+    std::string s = m_stdout;
+    m_stdout.clear();
+    return s;
 }
 
 ScriptConfig LuaEngine::callConfig()
@@ -153,6 +174,31 @@ void LuaEngine::callUI()
     lua_getglobal(m_L, "UI");
     if (!lua_isfunction(m_L, -1)) { lua_pop(m_L, 1); return; }
     if (lua_pcall(m_L, 0, 0, 0) != LUA_OK)
+    {
+        captureLuaError(lua_tostring(m_L, -1));
+        lua_pop(m_L, 1);
+    }
+}
+
+void LuaEngine::callOnCanvasEvent(const LuaEngine::CanvasEvent &event)
+{
+    if (!m_L) return;
+    m_error.clear();
+    lua_getglobal(m_L, "OnCanvasEvent");
+    if (!lua_isfunction(m_L, -1)) { lua_pop(m_L, 1); return; }
+    // push event table
+    lua_newtable(m_L);
+    lua_pushstring(m_L, event.type.c_str());
+    lua_setfield(m_L, -2, "type");
+    // data subtable
+    lua_newtable(m_L);
+    for (const auto &[k, v] : event.data)
+    {
+        lua_pushstring(m_L, v.c_str());
+        lua_setfield(m_L, -2, k.c_str());
+    }
+    lua_setfield(m_L, -2, "data");
+    if (lua_pcall(m_L, 1, 0, 0) != LUA_OK)
     {
         captureLuaError(lua_tostring(m_L, -1));
         lua_pop(m_L, 1);

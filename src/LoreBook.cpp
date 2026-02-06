@@ -23,6 +23,8 @@
 #include "ResourceExplorer.hpp"
 #include "ScriptEditor.hpp"
 #include "Fonts.hpp"
+#include "LuaDocsTest.hpp"
+#include <Editors/Lua/LuaEditor.hpp>
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include "MergeConflictUI.hpp"
 #include "MySQLTest.hpp"
@@ -69,6 +71,14 @@ int main(int argc, char** argv)
     static plog::ConsoleAppender<plog::TxtFormatter> consoleAppender(plog::streamStdErr);
     plog::init(plog::verbose, &consoleAppender);
     PLOGI << "plog initialized (verbose -> stderr)";
+
+    // Run Lua binding documentation checks early so we fail fast on missing docs.
+    try {
+        RunLuaDocChecks();
+    } catch (const std::exception &e) {
+        PLOGE << "Aborting startup due to undocumented Lua bindings: " << e.what();
+        return 1;
+    }
 
     try{
         if(!OpenCLContext::get().init()){
@@ -255,8 +265,8 @@ int main(int argc, char** argv)
     static char sync_remote_pass[128] = "";
     static bool sync_createRemote = true;
     static bool sync_dryRun = true; // default to safe dry-run
-    static bool syncInProgress = false;
-    static char syncStatusBuf[512] = ""; // short status for UI
+    bool syncInProgress = false;
+    char syncStatusBuf[512] = ""; // short status for UI
 
     // Auth/Login state
     static bool showLoginModal = false;
@@ -424,6 +434,9 @@ int main(int argc, char** argv)
                 }
                 if (ImGui::MenuItem("Script Editor", nullptr, showScriptEditor, canViewVault)) {
                     showScriptEditor = !showScriptEditor;
+                }
+                if (ImGui::MenuItem("Lua API Docs", nullptr, Lua::LuaEditor::get().isApiDocsOpen())) {
+                    if (Lua::LuaEditor::get().isApiDocsOpen()) Lua::LuaEditor::get().closeApiDocs(); else Lua::LuaEditor::get().openApiDocs();
                 }
                 ImGui::EndMenu();
             }
@@ -740,7 +753,7 @@ int main(int argc, char** argv)
                     strncpy(syncStatusBuf, "Starting upload...", sizeof(syncStatusBuf));
                     int64_t uploader = vault->getCurrentUserID();
                     // Launch background worker
-                    LoreBook::VaultSync::startUpload(vault.get(), ci, sync_dryRun, uploader, [&syncInProgress, &syncStatusBuf](int pct, const std::string &msg){ strncpy(syncStatusBuf, msg.c_str(), sizeof(syncStatusBuf)); if(pct >= 100 || pct < 0) syncInProgress = false; });
+                    LoreBook::VaultSync::startUpload(vault.get(), ci, sync_dryRun, uploader, [syncInProgressPtr = &syncInProgress, syncStatusBufPtr = syncStatusBuf, syncStatusBufSize = sizeof(syncStatusBuf)](int pct, const std::string &msg){ strncpy(syncStatusBufPtr, msg.c_str(), syncStatusBufSize); if(pct >= 100 || pct < 0) *syncInProgressPtr = false; });
                 }
                 ImGui::SameLine(); if(ImGui::Button("Cancel")){ ImGui::CloseCurrentPopup(); }
             } else {
@@ -1258,6 +1271,8 @@ int main(int argc, char** argv)
             RenderScriptEditor(vault.get(), &showScriptEditor);
         }
 
+        // Render Lua API docs window if requested
+        Lua::LuaEditor::get().renderApiDocsIfOpen();
         if(worldMapOpen){
             worldMap(worldMapOpen);
         }
