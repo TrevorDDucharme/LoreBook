@@ -25,20 +25,20 @@ static ImU32 parseColor(lua_State *L, int idx)
 
 static int l_canvas_width(lua_State *L)
 {
-    int w = (int)lua_tointeger(L, lua_upvalueindex(2));
+    int w = (int)lua_tointeger(L, lua_upvalueindex(1));
     lua_pushinteger(L, w);
     return 1;
 }
 static int l_canvas_height(lua_State *L)
 {
-    int h = (int)lua_tointeger(L, lua_upvalueindex(3));
+    int h = (int)lua_tointeger(L, lua_upvalueindex(1));
     lua_pushinteger(L, h);
     return 1;
 }
 
 static int l_canvas_circle(lua_State *L)
 {
-    // upvalues: origin.x, origin.y, width, height
+    // upvalues: origin.x, origin.y
     float ox = (float)lua_tonumber(L, lua_upvalueindex(1));
     float oy = (float)lua_tonumber(L, lua_upvalueindex(2));
     float cx = (float)luaL_checknumber(L, 1);
@@ -52,6 +52,19 @@ static int l_canvas_circle(lua_State *L)
         dl->AddCircleFilled(p, r, col);
     else
         dl->AddCircle(p, r, col);
+
+    // increment canvas.draw_count
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
     return 0;
 }
 
@@ -66,48 +79,52 @@ static int l_canvas_text(lua_State *L)
     ImDrawList *dl = ImGui::GetWindowDrawList();
     if (s)
         dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(ox + x, oy + y), col, s);
+
+    // increment canvas.draw_count
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
     return 0;
 }
 
 void registerLuaCanvasBindings(lua_State *L, ImVec2 origin, int width, int height)
 {
-    // push upvalues: origin.x, origin.y, width, height
-    lua_pushnumber(L, origin.x);
-    lua_pushnumber(L, origin.y);
-    lua_pushinteger(L, width);
-    lua_pushinteger(L, height);
-
+    // Create a new canvas table with small closures capturing the required upvalues.
     lua_newtable(L);
+
+    // initialize a draw_count field we can increment to detect whether Render() actually drew anything
+    lua_pushinteger(L, 0);
+    lua_setfield(L, -2, "draw_count");
+
     // width
-    lua_pushvalue(L, -4); // origin.x (dummy for alignment)
-    lua_pushvalue(L, -3); // origin.y (dummy)
-    lua_pushvalue(L, -2); // width
+    lua_pushinteger(L, width);
     lua_pushcclosure(L, l_canvas_width, 1);
     lua_setfield(L, -2, "width");
 
     // height
-    lua_pushvalue(L, -3); // origin.y (dummy)
-    lua_pushvalue(L, -2); // width
-    lua_pushvalue(L, -1); // height
+    lua_pushinteger(L, height);
     lua_pushcclosure(L, l_canvas_height, 1);
     lua_setfield(L, -2, "height");
 
-    // circle
-    // for circle we'll capture origin.x and origin.y as upvalues (1 & 2)
-    lua_pushvalue(L, -6); // origin.x
-    lua_pushvalue(L, -6); // origin.y (they get disrupted by previous pushes; push again reliably)
+    // circle (captures origin.x and origin.y)
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
     lua_pushcclosure(L, l_canvas_circle, 2);
     lua_setfield(L, -2, "circle");
 
-    // text
-    lua_pushvalue(L, -8); // origin.x
-    lua_pushvalue(L, -8); // origin.y
+    // text (captures origin.x and origin.y)
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
     lua_pushcclosure(L, l_canvas_text, 2);
     lua_setfield(L, -2, "text");
 
     lua_setglobal(L, "canvas");
-
-    // cleanup leftover upvalues on stack
-    // After setglobal, the table is popped. Remove the upvalues we pushed earlier
-    lua_pop(L, 4);
 }

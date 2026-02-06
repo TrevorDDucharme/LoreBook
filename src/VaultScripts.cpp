@@ -4,6 +4,11 @@
 
 LuaScriptManager* Vault::getScriptManager()
 {
+    if (!scriptManager)
+    {
+        PLOGI << "Lazy-init LuaScriptManager";
+        initScriptManager();
+    }
     return scriptManager.get();
 }
 

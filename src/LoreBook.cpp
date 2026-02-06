@@ -20,6 +20,8 @@
 #include "GraphView.hpp"
 #include <Vault.hpp>
 #include "VaultChat.hpp"
+#include "ResourceExplorer.hpp"
+#include "ScriptEditor.hpp"
 #include "Fonts.hpp"
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include "MergeConflictUI.hpp"
@@ -211,6 +213,8 @@ int main(int argc, char** argv)
     // Graph view (and chat)
     static bool showGraphWindow = true;
     static bool showChatWindow = true; // chat will dock/tab with the graph
+    static bool showResourceExplorer = false; // Resource Explorer dockable window
+    static bool showScriptEditor = false; // Script Editor dockable window
     static GraphView graphView;
     // Floor Plan Editor
     static FloorPlanEditor floorPlanEditor;
@@ -412,6 +416,12 @@ int main(int argc, char** argv)
                 ImGui::Separator();
                 if(ImGui::MenuItem("Character Editor", nullptr, characterEditor.isOpen())){
                     characterEditor.toggleOpen();
+                }
+                if (ImGui::MenuItem("Resource Explorer", nullptr, showResourceExplorer, canViewVault)) {
+                    showResourceExplorer = !showResourceExplorer;
+                }
+                if (ImGui::MenuItem("Script Editor", nullptr, showScriptEditor, canViewVault)) {
+                    showScriptEditor = !showScriptEditor;
                 }
                 ImGui::EndMenu();
             }
@@ -1226,6 +1236,24 @@ int main(int argc, char** argv)
             ImGui::Begin("Vault Chat");
             RenderVaultChat(vault.get());
             ImGui::End();
+        }
+
+        // If there's a pending request (from a preview attempt), open the Resource Explorer
+        if (vault && HasPendingOpenResourceExplorer()) {
+            showResourceExplorer = true;
+        }
+        // If there's a pending request to open a script, show the Script Editor
+        if (vault && HasPendingOpenScriptEditor()) {
+            showScriptEditor = true;
+        }
+
+        // Resource Explorer window
+        if (showResourceExplorer && vault && vault->getCurrentUserID() > 0) {
+            RenderResourceExplorer(vault.get(), &showResourceExplorer);
+        }
+        // Script Editor window
+        if (showScriptEditor && vault && vault->getCurrentUserID() > 0) {
+            RenderScriptEditor(vault.get(), &showScriptEditor);
         }
 
         if(worldMapOpen){

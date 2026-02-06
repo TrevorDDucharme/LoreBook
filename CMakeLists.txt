@@ -100,6 +100,14 @@ else()
     target_link_libraries(${PROJECT_NAME} PRIVATE OpenCL::OpenCL)
 endif()
 
+#jni
+find_package(JNI REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${JNI_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${JNI_LIBRARIES})
+
+#libarchive
+find_package(LibArchive REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE LibArchive::LibArchive) # since CMake 3.17
 
 #ffmpeg
 find_package(PkgConfig REQUIRED)
@@ -122,6 +130,13 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE X11::Xi X11::Xrandr X11::Xxf86vm)
 endif()
 
+#tree-sitter (optional - we provide an internal lexer fallback)
+find_package(unofficial-tree-sitter CONFIG)
+if (unofficial-tree-sitter_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::tree-sitter::tree-sitter)
+else()
+    message(STATUS "unofficial-tree-sitter not found: using internal lexer (no external highlight)")
+endif()
 
 # assimp (3D model import)
 find_package(assimp CONFIG REQUIRED)

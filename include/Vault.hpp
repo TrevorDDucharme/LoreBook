@@ -92,8 +92,6 @@ class Vault
     bool showImportAssetModal = false;
     std::filesystem::path importAssetPath = std::filesystem::current_path();
     std::unordered_set<std::string> importAssetSelectedFiles;
-    bool showAssetUploadedModal = false;
-    std::vector<std::string> lastUploadedExternalPaths;
 
     char importAssetDestFolderBuf[1024] = "";
 
@@ -395,8 +393,16 @@ public:
     int64_t storeScript(const std::string &name, const std::string &code);
     std::string getScript(const std::string &name);
     std::vector<std::string> listScripts();
+    // List attachments whose ExternalPath begins with `prefix` (e.g., "vault://Assets/")
+    std::vector<Attachment> listAttachmentsByPrefix(const std::string &prefix);
     // Initialize the script manager (called from constructors)
     void initScriptManager();
+
+    // Update attachment blob/size (returns true on success)
+    bool updateAttachmentData(int64_t attachmentID, const std::vector<uint8_t> &data);
+
+    // Update an existing script by name (writes to the existing attachment or creates it if missing)
+    bool updateScript(const std::string &name, const std::string &code);
 
     // Minimal item data accessor for external sync tools
     struct ItemRecord
@@ -5192,6 +5198,72 @@ inline int64_t Vault::addAttachment(int64_t itemID, const std::string &name, con
     return sqlite3_last_insert_rowid(dbConnection);
 }
 
+inline bool Vault::updateAttachmentData(int64_t attachmentID, const std::vector<uint8_t> &data)
+{
+    if (attachmentID <= 0) return false;
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string err;
+        auto stmt = dbBackend->prepare("UPDATE Attachments SET Data = ?, Size = ? WHERE ID = ?;", &err);
+        if (!stmt)
+        {
+            PLOGE << "updateAttachmentData prepare failed: " << err;
+            return false;
+        }
+        if (!data.empty())
+            stmt->bindBlob(1, reinterpret_cast<const void *>(data.data()), static_cast<int>(data.size()));
+        else
+            stmt->bindNull(1);
+        stmt->bindInt(2, static_cast<int64_t>(data.size()));
+        stmt->bindInt(3, attachmentID);
+        return stmt->execute();
+    }
+
+    if (!dbConnection) return false;
+    const char *sql = "UPDATE Attachments SET Data = ?, Size = ? WHERE ID = ?;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK)
+    {
+        if (!data.empty())
+            sqlite3_bind_blob(stmt, 1, reinterpret_cast<const void *>(data.data()), static_cast<int>(data.size()), SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null(stmt, 1);
+        sqlite3_bind_int64(stmt, 2, static_cast<int64_t>(data.size()));
+        sqlite3_bind_int64(stmt, 3, attachmentID);
+        sqlite3_step(stmt);
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    return true;
+}
+
+inline bool Vault::updateScript(const std::string &name, const std::string &code)
+{
+    std::string ext = "vault://Scripts/" + sanitizeExternalPath(name);
+    int64_t aid = findAttachmentByExternalPath(ext);
+    std::vector<uint8_t> data(code.begin(), code.end());
+    if (aid > 0)
+    {
+        PLOGI << "Updating existing script '" << name << "' (aid=" << aid << ")";
+        bool ok = updateAttachmentData(aid, data);
+        if (ok && scriptManager)
+        {
+            try { scriptManager->invalidateScript(name); } catch (...) {}
+        }
+        return ok;
+    }
+    else
+    {
+        PLOGI << "Storing new script '" << name << "'";
+        int64_t nid = addAttachment(-1, name, "text/x-lua", data, ext);
+        bool ok = (nid > 0);
+        if (ok && scriptManager)
+        {
+            try { scriptManager->invalidateScript(name); } catch (...) {}
+        }
+        return ok;
+    }
+}
+
 inline Vault::Attachment Vault::getAttachmentMeta(int64_t attachmentID)
 {
     Attachment a;
@@ -5316,6 +5388,68 @@ inline std::vector<Vault::Attachment> Vault::listAttachments(int64_t itemID)
     if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK)
     {
         sqlite3_bind_int64(stmt, 1, itemID);
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            Attachment a;
+            a.id = sqlite3_column_int64(stmt, 0);
+            a.itemID = sqlite3_column_int64(stmt, 1);
+            const unsigned char *t0 = sqlite3_column_text(stmt, 2);
+            if (t0)
+                a.name = reinterpret_cast<const char *>(t0);
+            const unsigned char *t1 = sqlite3_column_text(stmt, 3);
+            if (t1)
+                a.mimeType = reinterpret_cast<const char *>(t1);
+            a.size = sqlite3_column_int64(stmt, 4);
+            const unsigned char *t2 = sqlite3_column_text(stmt, 5);
+            if (t2)
+                a.externalPath = reinterpret_cast<const char *>(t2);
+            a.createdAt = sqlite3_column_int64(stmt, 6);
+            out.push_back(a);
+        }
+    }
+    if (stmt)
+        sqlite3_finalize(stmt);
+    return out;
+}
+
+inline std::vector<Vault::Attachment> Vault::listAttachmentsByPrefix(const std::string &prefix)
+{
+    std::vector<Attachment> out;
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ExternalPath LIKE ? ORDER BY ID ASC;";
+        std::string err;
+        auto stmt = dbBackend->prepare(sql, &err);
+        if (!stmt)
+        {
+            PLOGE << "listAttachmentsByPrefix prepare failed: " << err;
+            return out;
+        }
+        stmt->bindString(1, prefix + "%");
+        auto rs = stmt->executeQuery();
+        while (rs && rs->next())
+        {
+            Attachment a;
+            a.id = rs->getInt64(0);
+            a.itemID = rs->getInt64(1);
+            a.name = rs->getString(2);
+            a.mimeType = rs->getString(3);
+            a.size = rs->getInt64(4);
+            a.externalPath = rs->getString(5);
+            a.createdAt = rs->getInt64(6);
+            out.push_back(a);
+        }
+        return out;
+    }
+
+    if (!dbConnection)
+        return out;
+    const char *sql = "SELECT ID, ItemID, Name, MimeType, Size, ExternalPath, CreatedAt FROM Attachments WHERE ExternalPath LIKE ? ORDER BY ID ASC;";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) == SQLITE_OK)
+    {
+        std::string like = prefix + "%";
+        sqlite3_bind_text(stmt, 1, like.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt) == SQLITE_ROW)
         {
             Attachment a;

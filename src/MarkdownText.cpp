@@ -15,6 +15,7 @@
 #include "LuaCanvasBindings.hpp"
 #include "LuaImGuiBindings.hpp"
 #include "LuaEngine.hpp"
+#include "ResourceExplorer.hpp"
 
 // Parse optional size suffixes appended with ::<width>x<height>
 // Examples: "vault://Assets/model.glb::800x600" or "https://.../model.glb::640x480"
@@ -644,6 +645,14 @@ namespace ImGui
                                 PLOGW << "md:world failed to render world map for src='" << src << "'";
                                 PLOGW << "  exception: " << e.what();
                             }
+                        }
+                        else
+                        {
+                            ImGui::TextColored(ImVec4(1.0f,0.5f,0.0f,1.0f),"Invalid world map src format: '%s'",src.c_str());
+                            PLOGW << "md:world invalid src format: '" << src << "'";
+                        }
+                        return 0;
+                    }
 
                     // vault://Scripts/ namespace -> lua scripts
                     const std::string scriptsPrefix = "vault://Scripts/";
@@ -662,6 +671,9 @@ namespace ImGui
                         if (!eng)
                         {
                             ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script failed to load: %s", scriptName.c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Open in Explorer"))
+                                RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
                             return 0;
                         }
 
@@ -669,6 +681,9 @@ namespace ImGui
                         if (!eng->lastError().empty())
                         {
                             ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Script error: %s", eng->lastError().c_str());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Open in Explorer"))
+                                RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
                             return 0;
                         }
 
@@ -680,11 +695,58 @@ namespace ImGui
                         if (cfg.type == ScriptConfig::Type::Canvas)
                         {
                             ImGui::BeginChild("lua_canvas", ImVec2((float)width, (float)height), true);
-                            ImVec2 origin = ImGui::GetCursorScreenPos();
+
+                            // Use the window content region origin (absolute screen coords) so the canvas
+                            // coordinate space matches what ImGui actually draws for the child content.
+                            ImVec2 winPos = ImGui::GetWindowPos();
+                            ImVec2 contentMin = ImGui::GetWindowContentRegionMin(); // relative to window
+                            ImVec2 origin = ImVec2(winPos.x + contentMin.x, winPos.y + contentMin.y);
+
+                            // diagnostic overlay: draw a thin red rectangle around the canvas so we can
+                            // verify the canvas region and clipping behavior
+                            {
+                                ImVec2 br = ImVec2(origin.x + (float)width, origin.y + (float)height);
+                                ImDrawList *dl = ImGui::GetWindowDrawList();
+                                dl->AddRect(origin, br, IM_COL32(255, 0, 0, 180), 0.0f, 0, 1.0f);
+                            }
+
                             // bind canvas helpers for this draw call
                             registerLuaCanvasBindings(eng->L(), origin, width, height);
                             float dt = ImGui::GetIO().DeltaTime;
                             eng->callRender(dt);
+
+                            // If the script produced a runtime error during Render(), display it here
+                            if (!eng->lastError().empty())
+                            {
+                                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Runtime error: %s", eng->lastError().c_str());
+                            }
+
+                            // Inspect canvas.draw_count to detect whether Render actually issued draw calls
+                            {
+                                lua_State *L = eng->L();
+                                int drawCount = 0;
+                                lua_getglobal(L, "canvas");
+                                if (lua_istable(L, -1))
+                                {
+                                    lua_getfield(L, -1, "draw_count");
+                                    drawCount = (int)lua_tointeger(L, -1);
+                                    lua_pop(L, 1);
+                                }
+                                lua_pop(L, 1);
+
+                                // show small status in the preview and also log for tracing
+                                ImGui::TextColored(ImVec4(0.6f,1.0f,0.6f,1.0f), "Canvas draw calls: %d", drawCount);
+                                PLOGI << "md:script '" << scriptName << "' embed=" << embedID << " drawCalls=" << drawCount;
+
+                                if (drawCount == 0)
+                                {
+                                    ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Canvas produced no draw calls — check Render() or script");
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("Open in Explorer"))
+                                        RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
+                                }
+                            }
+
                             ImGui::EndChild();
                         }
                         else if (cfg.type == ScriptConfig::Type::UI)
@@ -700,8 +762,6 @@ namespace ImGui
                         }
                         ImGui::PopID();
                         return 0;
-                    }
-                        }
                     }
                     
                     // vault://Assets/ namespace – resolve by ExternalPath
@@ -754,15 +814,9 @@ namespace ImGui
                                 {
                                     if (mv && mv->loadFailed())
                                     {
-                                        ImGui::Text("Failed to load model: %s", displayName.c_str());
+                                        ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Failed to load model: %s", displayName.c_str());
                                         ImGui::SameLine();
                                         ImGui::TextDisabled("(%lld bytes)", (long long)meta.size);
-                                        ImGui::SameLine();
-                                        if (ImGui::SmallButton("View Raw"))
-                                            v->openPreviewFromSrc(src);
-                                        ImGui::SameLine();
-                                        if (ImGui::Button("View Model"))
-                                            v->openModelFromSrc(src);
                                     }
                                     else if (mv && mv->isLoading())
                                     {
@@ -824,18 +878,19 @@ namespace ImGui
                                     v->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
                                 else
                                 {
-                                    PLOGW << "md:assets missing data for aid=" << aid << " (no blob, no externalPath)";
-                                    ImGui::Text("Asset: %s (no data)", displayName.c_str());
-                                    ImGui::SameLine();
-                                    if (ImGui::SmallButton("Open"))
-                                        v->openPreviewFromSrc(src);
+                                    if (!meta.externalPath.empty())
+                                        v->asyncFetchAndStoreAttachment(meta.id, meta.externalPath);
+                                    else
+                                    {
+                                        PLOGW << "md:assets missing data for aid=" << aid << " (no blob, no externalPath)";
+                                        ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Asset missing data: %s", displayName.c_str());
+                                    }
                                 }
                             }
                         }
                         else
                         {
-                            if (ImGui::SmallButton((std::string("Asset: ") + label).c_str()))
-                                v->openPreviewFromSrc(src);
+                            ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Asset not found: %s", label.c_str());
                         }
                         return 0;
                     }
@@ -948,23 +1003,11 @@ namespace ImGui
                     }
                 }
 
-                // Fallback: show a placeholder small button (no context or unsupported scheme)
-                if (ImGui::SmallButton(label.c_str()))
-                {
-                    // If no Vault context, we could open external viewer if path is local
-                    try
-                    {
-                        std::string p(src);
-                        if (p.rfind("file://", 0) == 0)
-                            p = p.substr(7);
-                        if (std::filesystem::exists(p))
-                        {
-                            // try to open preview using system default (not implemented)
-                        }
-                    }
-                    catch (...)
-                    {
-                    }
+                // Fallback: unsupported scheme or no preview available
+                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Cannot preview resource: %s", label.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Open in Explorer")){
+                    RequestOpenResourceExplorer(src);
                 }
                 return 0;
             }
