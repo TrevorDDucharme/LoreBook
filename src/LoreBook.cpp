@@ -361,6 +361,8 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("World Map", dock_main_id);
             ImGui::DockBuilderDockWindow("Floor Plan Editor", dock_main_id);
             ImGui::DockBuilderDockWindow("Character Editor", dock_main_id);
+            ImGui::DockBuilderDockWindow("Script Editor", dock_main_id);
+            ImGui::DockBuilderDockWindow("Resource Explorer", dock_main_id);
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }

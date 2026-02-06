@@ -29,4 +29,7 @@ public:
 
 private:
     std::shared_ptr<Vault> m_vault;
+public:
+    // Expose vault pointer for callers that need access to vault (non-owning)
+    std::shared_ptr<Vault> getVault() const { return m_vault; }
 };

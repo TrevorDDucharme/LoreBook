@@ -35,6 +35,10 @@ void RenderScriptEditor(Vault *vault, bool *pOpen)
     // If there's a pending request, ensure the window is opened
     if (!s_pendingOpenScriptPath.empty() && pOpen) *pOpen = true;
 
+    // Ensure Script Editor opens on the main viewport and docks into the main dockspace
+    if (ImGui::GetMainViewport())
+        ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+    ImGui::SetNextWindowDockID(ImGui::GetID("MyDockSpace"), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Script Editor", pOpen)) { ImGui::End(); return; }
 
     if (!vault || !vault->isOpen()) {

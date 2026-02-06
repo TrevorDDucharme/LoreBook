@@ -49,6 +49,10 @@ void RenderResourceExplorer(Vault *vault, bool *pOpen)
     if (!s_pendingOpenPath.empty() && pOpen)
         *pOpen = true;
 
+    // Ensure Resource Explorer opens on the main viewport and docks into the main dockspace
+    if (ImGui::GetMainViewport())
+        ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
+    ImGui::SetNextWindowDockID(ImGui::GetID("MyDockSpace"), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Resource Explorer", pOpen)) { ImGui::End(); return; }
     if (!vault || !vault->isOpen())
     {

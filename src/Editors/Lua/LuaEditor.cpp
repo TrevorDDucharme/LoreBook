@@ -8,6 +8,12 @@
 #include <cctype>
 #include <unordered_set>
 
+#include <LuaEngine.hpp>
+#include <LuaVaultBindings.hpp>
+#include <LuaImGuiBindings.hpp>
+#include <FileBackends/VaultFileBackend.hpp>
+#include <LuaCanvasBindings.hpp>
+
 using namespace Lua;
 
 LuaEditor::LuaEditor()
@@ -893,9 +899,108 @@ void LuaEditor::scrollToCursorIfNeeded()
 void LuaEditor::updateLiveProgramStructure() { /* minimal: update current file in programStructure if needed */ }
 void LuaEditor::updateLiveProgramStructureForAllTabs() { /* minimal placeholder */ }
 bool LuaEditor::isInClassContext(size_t, size_t) const { return false; }
-void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool isQualifiedAccess, const std::string &objectName) { (void)isQualifiedAccess; (void)objectName; // simple keyword completions
+void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool isQualifiedAccess, const std::string &objectName)
+{
+    (void)isQualifiedAccess; (void)objectName;
+    // simple keyword completions
     static const std::vector<std::string> kws = {"function","local","if","then","else","end","for","in","pairs","ipairs","return","require","while","repeat","until","true","false","nil"};
-    for (const auto &k: kws) if (k.find(prefix)==0) { CompletionItem it; it.text=k; it.description="Lua keyword"; it.type=CompletionItem::KEYWORD; completionItems.push_back(it);} }
+    for (const auto &k: kws)
+        if (k.find(prefix) == 0)
+        {
+            CompletionItem it; it.text = k; it.description = "Lua keyword"; it.type = CompletionItem::KEYWORD; completionItems.push_back(it);
+        }
+
+    // Augment completions with registered binding globals by creating a temp LuaEngine,
+    // registering bindings (ImGui and vault if available), and enumerating globals.
+    try {
+        LuaEngine eng;
+        lua_State *L = eng.L();
+        if (L) {
+            // Register ImGui bindings to expose UI helper functions
+            registerLuaImGuiBindings(L);
+            // Also register canvas bindings with a default dummy region so canvas helpers
+            // (e.g., drawing helpers) are available for completion discovery.
+            registerLuaCanvasBindings(L, ImVec2(0,0), 300, 200);
+
+            // If the file backend is a VaultFileBackend, register vault bindings too
+            if (fileBackend)
+            {
+                auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
+                if (vb)
+                {
+                    auto vaultPtr = vb->getVault();
+                    if (vaultPtr)
+                        registerLuaVaultBindings(L, vaultPtr.get());
+                }
+            }
+
+            // If this is a qualified access (e.g. `canvas.draw` where objectName == "canvas" and prefix == "draw"),
+            // enumerate members of that table instead of top-level globals.
+            if (isQualifiedAccess && !objectName.empty())
+            {
+                // get global by name
+                lua_getglobal(L, objectName.c_str());
+                if (lua_istable(L, -1))
+                {
+                    lua_pushnil(L);
+                    while (lua_next(L, -2) != 0)
+                    {
+                        // key at -2, value at -1
+                        if (lua_type(L, -2) == LUA_TSTRING)
+                        {
+                            const char *mname = lua_tostring(L, -2);
+                            if (mname && mname[0] != '_')
+                            {
+                                std::string sname(mname);
+                                if (sname.rfind(prefix, 0) == 0)
+                                {
+                                    CompletionItem it; it.text = sname;
+                                    int vtype = lua_type(L, -1);
+                                    if (vtype == LUA_TFUNCTION) { it.type = CompletionItem::METHOD; it.description = "binding method"; }
+                                    else { it.type = CompletionItem::VARIABLE; it.description = "binding field"; }
+                                    completionItems.push_back(it);
+                                }
+                            }
+                        }
+                        lua_pop(L, 1); // pop value, keep key
+                    }
+                }
+                lua_pop(L, 1); // pop the object
+            }
+            else
+            {
+                // Iterate globals for completion candidates
+                lua_pushglobaltable(L);
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0)
+                {
+                    // key at -2, value at -1
+                    if (lua_type(L, -2) == LUA_TSTRING)
+                    {
+                        const char *name = lua_tostring(L, -2);
+                        if (name && name[0] != '_') // skip internal names
+                        {
+                            // only consider names that match the prefix
+                            std::string sname(name);
+                            if (sname.rfind(prefix, 0) == 0)
+                            {
+                                CompletionItem it;
+                                it.text = sname;
+                                int vtype = lua_type(L, -1);
+                                if (vtype == LUA_TFUNCTION) { it.type = CompletionItem::METHOD; it.description = "binding function"; }
+                                else { it.type = CompletionItem::VARIABLE; it.description = "binding"; }
+                                completionItems.push_back(it);
+                            }
+                        }
+                    }
+                    lua_pop(L, 1); // pop value, keep key
+                }
+                lua_pop(L, 1); // pop global table
+            }
+        }
+    }
+    catch (...) { /* best-effort: ignore lua completion failures */ }
+}
 
 
 
