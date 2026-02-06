@@ -46,12 +46,13 @@ static int l_canvas_circle(lua_State *L)
     float r = (float)luaL_checknumber(L, 3);
     ImU32 col = parseColor(L, 4);
     bool filled = lua_toboolean(L, 5);
+    float thickness = lua_isnumber(L, 6) ? (float)lua_tonumber(L, 6) : 1.0f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 p(ox + cx, oy + cy);
     if (filled)
         dl->AddCircleFilled(p, r, col);
     else
-        dl->AddCircle(p, r, col);
+        dl->AddCircle(p, r, col, 12, thickness);
 
     // increment canvas.draw_count
     lua_getglobal(L, "canvas");
@@ -95,6 +96,206 @@ static int l_canvas_text(lua_State *L)
     return 0;
 }
 
+static int l_canvas_rect(lua_State *L)
+{
+    float ox = (float)lua_tonumber(L, lua_upvalueindex(1));
+    float oy = (float)lua_tonumber(L, lua_upvalueindex(2));
+    float x = (float)luaL_checknumber(L, 1);
+    float y = (float)luaL_checknumber(L, 2);
+    float w = (float)luaL_checknumber(L, 3);
+    float h = (float)luaL_checknumber(L, 4);
+    ImU32 col = parseColor(L, 5);
+    bool filled = lua_toboolean(L, 6);
+    float thickness = lua_isnumber(L, 7) ? (float)lua_tonumber(L, 7) : 1.0f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 p1(ox + x, oy + y);
+    ImVec2 p2(ox + x + w, oy + y + h);
+    if (filled)
+        dl->AddRectFilled(p1, p2, col);
+    else
+        dl->AddRect(p1, p2, col, 0.0f, ~0u, thickness);
+
+    // increment canvas.draw_count
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+static int l_canvas_line(lua_State *L)
+{
+    float ox = (float)lua_tonumber(L, lua_upvalueindex(1));
+    float oy = (float)lua_tonumber(L, lua_upvalueindex(2));
+    float x1 = (float)luaL_checknumber(L, 1);
+    float y1 = (float)luaL_checknumber(L, 2);
+    float x2 = (float)luaL_checknumber(L, 3);
+    float y2 = (float)luaL_checknumber(L, 4);
+    ImU32 col = parseColor(L, 5);
+    float thickness = lua_isnumber(L, 6) ? (float)lua_tonumber(L, 6) : 1.0f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->AddLine(ImVec2(ox + x1, oy + y1), ImVec2(ox + x2, oy + y2), col, thickness);
+
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+static int l_canvas_poly(lua_State *L)
+{
+    // upvalues: origin.x, origin.y
+    float ox = (float)lua_tonumber(L, lua_upvalueindex(1));
+    float oy = (float)lua_tonumber(L, lua_upvalueindex(2));
+    if (!lua_istable(L, 1)) return 0;
+    ImU32 col = parseColor(L, 2);
+    bool filled = lua_toboolean(L, 3);
+    float thickness = lua_isnumber(L, 4) ? (float)lua_tonumber(L, 4) : 1.0f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    int n = (int)lua_rawlen(L, 1);
+    if (n < 2) return 0;
+    std::vector<ImVec2> pts; pts.reserve(n);
+    for (int i = 1; i <= n; ++i)
+    {
+        lua_rawgeti(L, 1, i);
+        if (lua_istable(L, -1))
+        {
+            lua_rawgeti(L, -1, 1); float x = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+            lua_rawgeti(L, -1, 2); float y = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+            pts.emplace_back(ox + x, oy + y);
+        }
+        lua_pop(L, 1);
+    }
+    if (filled)
+        dl->AddConvexPolyFilled(pts.data(), (int)pts.size(), col);
+    else
+        dl->AddPolyline(pts.data(), (int)pts.size(), col, true, thickness);
+
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+static int l_canvas_text_size(lua_State *L)
+{
+    const char *s = lua_tostring(L, 1);
+    if (!s) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
+    ImVec2 sz = ImGui::CalcTextSize(s);
+    lua_pushnumber(L, sz.x);
+    lua_pushnumber(L, sz.y);
+    return 2;
+}
+
+static int l_canvas_push_clip(lua_State *L)
+{
+    float ox = (float)lua_tonumber(L, lua_upvalueindex(1));
+    float oy = (float)lua_tonumber(L, lua_upvalueindex(2));
+    float x = (float)luaL_checknumber(L, 1);
+    float y = (float)luaL_checknumber(L, 2);
+    float w = (float)luaL_checknumber(L, 3);
+    float h = (float)luaL_checknumber(L, 4);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(ImVec2(ox + x, oy + y), ImVec2(ox + x + w, oy + y + h), true);
+    return 0;
+}
+
+static int l_canvas_pop_clip(lua_State *L)
+{
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    dl->PopClipRect();
+    return 0;
+}
+
+static int l_canvas_image(lua_State *L)
+{
+    // image binding is a no-op here; real image rendering requires texture ids
+    // Accept (key|string, x, y, w, h)
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1))
+    {
+        lua_getfield(L, -1, "draw_count");
+        int c = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        c++;
+        lua_pushinteger(L, c);
+        lua_setfield(L, -2, "draw_count");
+    }
+    lua_pop(L, 1);
+    return 0;
+}
+
+// Register a Lua callback: canvas.onMouseClick(fn) stores fn in canvas.__onMouseClick
+static int l_canvas_register_on_mouse_click(lua_State *L)
+{
+    if (!lua_isfunction(L, 1) && !lua_isnil(L, 1))
+        return luaL_error(L, "expected function or nil");
+
+    lua_getglobal(L, "canvas");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return luaL_error(L, "canvas not initialized"); }
+
+    if (lua_isnil(L, 1))
+    {
+        lua_pushnil(L);
+        lua_setfield(L, -2, "__onMouseClick");
+    }
+    else
+    {
+        lua_pushvalue(L, 1);
+        lua_setfield(L, -2, "__onMouseClick");
+    }
+
+    lua_pop(L, 1);
+    return 0;
+}
+
+// Register a Lua callback: canvas.onMouseDrag(fn) stores fn in canvas.__onMouseDrag
+static int l_canvas_register_on_mouse_drag(lua_State *L)
+{
+    if (!lua_isfunction(L, 1) && !lua_isnil(L, 1))
+        return luaL_error(L, "expected function or nil");
+
+    lua_getglobal(L, "canvas");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return luaL_error(L, "canvas not initialized"); }
+
+    if (lua_isnil(L, 1))
+    {
+        lua_pushnil(L);
+        lua_setfield(L, -2, "__onMouseDrag");
+    }
+    else
+    {
+        lua_pushvalue(L, 1);
+        lua_setfield(L, -2, "__onMouseDrag");
+    }
+
+    lua_pop(L, 1);
+    return 0;
+}
+
 void registerLuaCanvasBindings(lua_State *L, ImVec2 origin, int width, int height)
 {
     // Create a new canvas table with small closures capturing the required upvalues.
@@ -125,6 +326,47 @@ void registerLuaCanvasBindings(lua_State *L, ImVec2 origin, int width, int heigh
     lua_pushnumber(L, origin.y);
     lua_pushcclosure(L, l_canvas_text, 2);
     lua_setfield(L, -2, "text");
+
+    // rect(x,y,w,h,color,filled)
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
+    lua_pushcclosure(L, l_canvas_rect, 2);
+    lua_setfield(L, -2, "rect");
+
+    // line(x1,y1,x2,y2,color,thickness)
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
+    lua_pushcclosure(L, l_canvas_line, 2);
+    lua_setfield(L, -2, "line");
+
+
+    // poly(points_table, color, filled)
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
+    lua_pushcclosure(L, l_canvas_poly, 2);
+    lua_setfield(L, -2, "poly");
+
+    // text_size(s)
+    lua_pushcfunction(L, l_canvas_text_size);
+    lua_setfield(L, -2, "text_size");
+
+    // clip push/pop
+    lua_pushnumber(L, origin.x);
+    lua_pushnumber(L, origin.y);
+    lua_pushcclosure(L, l_canvas_push_clip, 2);
+    lua_setfield(L, -2, "push_clip");
+    lua_pushcfunction(L, l_canvas_pop_clip);
+    lua_setfield(L, -2, "pop_clip");
+
+    // image (stub)
+    lua_pushcfunction(L, l_canvas_image);
+    lua_setfield(L, -2, "image");
+
+    // onMouseClick(fn) and onMouseDrag(fn) -> register/clear handlers in canvas.__onMouseClick / __onMouseDrag
+    lua_pushcfunction(L, l_canvas_register_on_mouse_click);
+    lua_setfield(L, -2, "registerOnMouseClick");
+    lua_pushcfunction(L, l_canvas_register_on_mouse_drag);
+    lua_setfield(L, -2, "registerOnMouseDrag");
 
     lua_setglobal(L, "canvas");
 }
