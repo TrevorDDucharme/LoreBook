@@ -680,6 +680,105 @@ void LuaEditor::handleKeyboardInput()
         return;
     }
 
+    // Capture keyboard so Tab/arrow keys don't navigate ImGui widgets
+    io.WantCaptureKeyboard = true;
+    io.WantTextInput = true;
+
+    // --- Clipboard shortcuts: Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A ---
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
+    {
+        // Select all
+        editorState.selectionStartLine = 0;
+        editorState.selectionStartColumn = 0;
+        editorState.selectionEndLine = editorState.lines.size() - 1;
+        editorState.selectionEndColumn = editorState.lines.back().length();
+        editorState.cursorLine = editorState.selectionEndLine;
+        editorState.cursorColumn = editorState.selectionEndColumn;
+        editorState.hasSelection = true;
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
+    {
+        // Copy selection to clipboard
+        if (editorState.hasSelection)
+        {
+            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionStartColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionEndColumn;
+            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionEndColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionStartColumn;
+            std::string selected;
+            if (sL == eL)
+            {
+                selected = editorState.lines[sL].substr(sC, eC - sC);
+            }
+            else
+            {
+                selected = editorState.lines[sL].substr(sC) + "\n";
+                for (size_t l = sL + 1; l < eL; ++l)
+                    selected += editorState.lines[l] + "\n";
+                selected += editorState.lines[eL].substr(0, eC);
+            }
+            ImGui::SetClipboardText(selected.c_str());
+        }
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
+    {
+        // Cut selection to clipboard (copy then delete)
+        if (editorState.hasSelection)
+        {
+            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionStartColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionEndColumn;
+            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionEndColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionStartColumn;
+            std::string selected;
+            if (sL == eL)
+            {
+                selected = editorState.lines[sL].substr(sC, eC - sC);
+            }
+            else
+            {
+                selected = editorState.lines[sL].substr(sC) + "\n";
+                for (size_t l = sL + 1; l < eL; ++l)
+                    selected += editorState.lines[l] + "\n";
+                selected += editorState.lines[eL].substr(0, eC);
+            }
+            ImGui::SetClipboardText(selected.c_str());
+            deleteSelection();
+        }
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
+    {
+        // Paste from clipboard
+        const char *clip = ImGui::GetClipboardText();
+        if (clip && clip[0] != '\0')
+        {
+            if (editorState.hasSelection) deleteSelection();
+            insertTextAtCursor(std::string(clip));
+        }
+        return;
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Enter))
     {
         pushUndo();
