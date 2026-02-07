@@ -53,12 +53,31 @@ public:
     // Take captured stdout from the Lua 'print' binding. Returns and clears the buffer.
     std::string takeStdout();
 
+    // ── Canvas FBO rendering ──────────────────────────────────────────────
+    // Renders a canvas frame: creates/resizes FBO if needed, binds it,
+    // registers GL canvas bindings, calls Render(dt), flushes batched
+    // draws, unbinds FBO.  Returns the GL texture ID that can be displayed
+    // via ImGui::Image.  Both MarkdownText and LuaEditor call this.
+    unsigned int renderCanvasFrame(const std::string &embedID, int width, int height, float dt);
+
+    // Returns the texture ID from the last renderCanvasFrame call (0 if none).
+    unsigned int canvasTextureID() const { return m_fboTex; }
+
+    // Returns the number of canvas draw calls issued in the last frame.
+    int canvasDrawCount() const;
+
 private:
     lua_State *m_L = nullptr;
     std::string m_error;
 
     // captured output from print() calls
     std::string m_stdout;
+
+    // FBO state owned by this engine instance (one per engine)
+    unsigned int m_fbo = 0;
+    unsigned int m_fboTex = 0;
+    unsigned int m_fboRbo = 0;
+    int m_fboW = 0, m_fboH = 0;
 
     void setupSandbox();
     void captureLuaError(const char *msg);

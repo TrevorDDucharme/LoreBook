@@ -1,6 +1,8 @@
 #include "LuaEngine.hpp"
+#include "LuaCanvasBindings.hpp"
 #include <plog/Log.h>
 #include <sstream>
+#include <GL/glew.h>
 
 LuaEngine::LuaEngine()
 {
@@ -15,6 +17,11 @@ LuaEngine::LuaEngine()
 
 LuaEngine::~LuaEngine()
 {
+    // Clean up FBO resources
+    if (m_fbo)  { glDeleteFramebuffers(1, &m_fbo);  m_fbo = 0; }
+    if (m_fboTex) { glDeleteTextures(1, &m_fboTex); m_fboTex = 0; }
+    if (m_fboRbo) { glDeleteRenderbuffers(1, &m_fboRbo); m_fboRbo = 0; }
+
     if (m_L)
         lua_close(m_L);
 }
@@ -203,4 +210,95 @@ void LuaEngine::callOnCanvasEvent(const LuaEngine::CanvasEvent &event)
         captureLuaError(lua_tostring(m_L, -1));
         lua_pop(m_L, 1);
     }
+}
+
+// ── Canvas FBO rendering ─────────────────────────────────────────────────
+
+unsigned int LuaEngine::renderCanvasFrame(const std::string &embedID, int width, int height, float dt)
+{
+    if (!m_L) return 0;
+
+    // Create or resize FBO if dimensions changed
+    if (m_fboTex == 0 || m_fboW != width || m_fboH != height)
+    {
+        if (m_fbo)    { glDeleteFramebuffers(1, &m_fbo);    m_fbo = 0; }
+        if (m_fboTex) { glDeleteTextures(1, &m_fboTex);     m_fboTex = 0; }
+        if (m_fboRbo) { glDeleteRenderbuffers(1, &m_fboRbo); m_fboRbo = 0; }
+
+        m_fboW = width;
+        m_fboH = height;
+
+        glGenFramebuffers(1, &m_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+
+        glGenTextures(1, &m_fboTex);
+        glBindTexture(GL_TEXTURE_2D, m_fboTex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_fboTex, 0);
+
+        glGenRenderbuffers(1, &m_fboRbo);
+        glBindRenderbuffer(GL_RENDERBUFFER, m_fboRbo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_fboRbo);
+
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE)
+            PLOGW << "LuaEngine FBO incomplete for embed=" << embedID << " status=" << status;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    // Bind FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+
+    // Save GL state that ImGui / other renderers may have set
+    GLint lastViewport[4]; glGetIntegerv(GL_VIEWPORT, lastViewport);
+    GLboolean wasDepthTest  = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean wasCullFace   = glIsEnabled(GL_CULL_FACE);
+    GLboolean wasScissor    = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean wasStencil    = glIsEnabled(GL_STENCIL_TEST);
+
+    // Set clean GL state for canvas rendering
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
+
+    // Register GL-backed canvas bindings (sets up canvas table with width/height/clear/viewport etc.)
+    registerLuaGLCanvasBindings(m_L, embedID, m_fboTex, width, height);
+
+    // Call Render(dt)
+    callRender(dt);
+
+    // Flush batched canvas draws into the FBO
+    flushLuaCanvasForEmbed(m_L, embedID);
+
+    // Restore GL state
+    if (wasDepthTest)  glEnable(GL_DEPTH_TEST);
+    if (wasCullFace)   glEnable(GL_CULL_FACE);
+    if (wasScissor)    glEnable(GL_SCISSOR_TEST);
+    if (wasStencil)    glEnable(GL_STENCIL_TEST);
+    glViewport(lastViewport[0], lastViewport[1], lastViewport[2], lastViewport[3]);
+
+    // Unbind FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    return m_fboTex;
+}
+
+int LuaEngine::canvasDrawCount() const
+{
+    if (!m_L) return 0;
+    int count = 0;
+    lua_getglobal(m_L, "canvas");
+    if (lua_istable(m_L, -1))
+    {
+        lua_getfield(m_L, -1, "draw_count");
+        count = (int)lua_tointeger(m_L, -1);
+        lua_pop(m_L, 1);
+    }
+    lua_pop(m_L, 1);
+    return count;
 }

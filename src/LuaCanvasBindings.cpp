@@ -15,6 +15,94 @@ extern "C" {
 #include <string>
 #include <imgui.h>
 
+/*
+how canvas bindings work:
+
+function Config()
+    return {
+        type = "canvas",
+        width = 400,
+        height = 400,
+        title = "Circle"
+    }
+end
+
+camPosition = { x=0, y=0, z=0 }
+camUp = { x=0, y=1, z=0 }
+target = { x=0, y=0, z=0 }
+
+fov = 60
+aspectRatio = 1.0
+nearPlane = 0.1
+farPlane = 100.0
+
+-- For canvas scripts: called every frame
+function Render(dt)
+    canvas.clear({.35,.35,.35,1})
+    canvas.viewport(0,0,canvas.width, canvas.height)
+    canvas.viewMatrix(canvas.lookAt(camPosition, target, camUp))
+    canvas.projectionMatrix(canvas.ortho(0, 0, canvas.width, canvas.height, nearPlane, farPlane))
+    --[
+        or for 3D mode:
+        canvas.projectionMatrix(canvas.perspective(fov, aspectRatio, nearPlane, farPlane))
+    ]--
+
+    --appends a circle draw call to the canvas batch for this embed; actual GL draw happens in flushLuaCanvasForEmbed after Render returns
+    canvas.circle(circle.x, circle.y, circle.radius, circle.color, circle.filled, circle.thickness)
+
+end
+
+-- for more complex drawing we support vbo, texture, and shader management in Lua with a simple GL wrapper. Example usage:
+
+vert_source = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0; // convert from [0,size] to [-1,1]
+    gl_Position = vec4(p,0,1);
+}
+]]
+
+frag_source = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){
+    out_color = v_color;
+}
+]]
+
+shader = canvas.createShader(vert_source, frag_source)
+
+verts = {
+    -- x, y, r, g, b, a
+    100,100, 1,0,0,1,
+    200,100, 0,1,0,1,
+    200,200, 0,0,1,1,
+    100,100, 1,0,0,1,
+    200,200, 0,0,1,1,
+    100,200, 1,1,0,1
+}
+vbo = canvas.createVertexBuffer(verts)
+
+
+function Render(dt)
+    local w,h = canvas.width, canvas.height
+    canvas.viewport(0,0,w,h)
+    canvas.clear({.1,.1,.1,1})
+
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {w,h})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
+end
+*/
+
+
 // Forward declarations
 static GLuint compileShaderProgram(const char *vsSrc, const char *fsSrc);
 
@@ -90,10 +178,16 @@ void flushLuaCanvasForEmbed(lua_State *L, const std::string &embedID)
     GLint locSize = prog ? glGetUniformLocation(prog, "uSize") : -1;
     if (locSize >= 0) glUniform2f(locSize, (float)cs->width, (float)cs->height);
 
+    // enable alpha blending for canvas draws
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     for (auto &b : cs->batches){
         if (b.count <= 0) continue;
         glDrawArrays(b.mode, b.start, b.count);
     }
+
+    glDisable(GL_BLEND);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -107,10 +201,12 @@ void flushLuaCanvasForEmbed(lua_State *L, const std::string &embedID)
 // Common simple solid-color shader
 static const char *s_shape_vs_src = "#version 330 core\n"
 "layout(location=0) in vec2 in_pos;\n"
+"layout(location=1) in vec4 in_color;\n"
+"out vec4 v_color;\n"
 "uniform vec2 uSize;\n"
-"void main(){ vec2 p = in_pos / uSize * 2.0 - 1.0; p.y = -p.y; gl_Position = vec4(p,0.0,1.0); }\n";
+"void main(){ vec2 p = in_pos / uSize * 2.0 - 1.0; p.y = -p.y; v_color = in_color; gl_Position = vec4(p,0.0,1.0); }\n";
 static const char *s_shape_fs_src = "#version 330 core\n"
-"uniform vec4 uColor; out vec4 out_color; void main(){ out_color = uColor; }\n";
+"in vec4 v_color; out vec4 out_color; void main(){ out_color = v_color; }\n";
 
 // Helper: read color table {r,g,b,a} (0..1) or accept hex integer as first arg
 static ImU32 parseColor(lua_State *L, int idx)
@@ -144,6 +240,54 @@ static int l_canvas_height(lua_State *L)
     return 1;
 }
 
+// Append a stroke as a triangle strip along the given point list (pts contains x,y pairs)
+static void appendStrokeStrip(CanvasState *cs, const std::vector<float> &pts, float thickness, const ImVec4 &cc)
+{
+    if (!cs) return;
+    int n = (int)(pts.size() / 2);
+    if (n < 2) return;
+    size_t start = cs->cpuVerts.size() / cs->vertexStride;
+
+    std::vector<std::pair<float,float>> segNormals(n);
+    for (int i = 0; i < n-1; ++i){
+        float dx = pts[(i+1)*2] - pts[i*2];
+        float dy = pts[(i+1)*2+1] - pts[i*2+1];
+        float len = sqrtf(dx*dx + dy*dy);
+        if (len == 0.0f) { segNormals[i] = {0.0f, 0.0f}; }
+        else { segNormals[i].first = -dy / len; segNormals[i].second = dx / len; }
+    }
+    segNormals[n-1] = segNormals[n-2];
+
+    std::vector<std::pair<float,float>> normals(n);
+    for (int i = 0; i < n; ++i){
+        if (i == 0) normals[i] = segNormals[0];
+        else if (i == n-1) normals[i] = segNormals[n-2];
+        else {
+            float nx = segNormals[i-1].first + segNormals[i].first;
+            float ny = segNormals[i-1].second + segNormals[i].second;
+            float l = sqrtf(nx*nx + ny*ny);
+            if (l == 0.0f) normals[i] = segNormals[i];
+            else { normals[i].first = nx / l; normals[i].second = ny / l; }
+        }
+    }
+
+    float half = thickness * 0.5f;
+    for (int i = 0; i < n; ++i){
+        float x = pts[i*2], y = pts[i*2+1];
+        float nx = normals[i].first * half;
+        float ny = normals[i].second * half;
+        // top
+        cs->cpuVerts.push_back(x + nx); cs->cpuVerts.push_back(y + ny);
+        cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+        // bottom
+        cs->cpuVerts.push_back(x - nx); cs->cpuVerts.push_back(y - ny);
+        cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+    }
+    CanvasBatch b; b.mode = GL_TRIANGLE_STRIP; b.start = (int)start; b.count = n*2;
+    cs->batches.push_back(b);
+}
+
+
 static int l_canvas_circle(lua_State *L)
 {
     float cx = (float)luaL_checknumber(L, 1);
@@ -151,7 +295,8 @@ static int l_canvas_circle(lua_State *L)
     float r = (float)luaL_checknumber(L, 3);
     ImU32 col = parseColor(L, 4);
     bool filled = lua_toboolean(L, 5);
-    int segments = lua_isinteger(L, 6) ? (int)lua_tointeger(L, 6) : 32;
+    float thickness = lua_isnumber(L, 6) ? (float)lua_tonumber(L, 6) : 1.0f;
+    int segments = lua_isinteger(L, 7) ? (int)lua_tointeger(L, 7) : 32;
 
     GLuint prog = (GLuint)lua_tointeger(L, lua_upvalueindex(4));
     void *cup = lua_touserdata(L, lua_upvalueindex(5));
@@ -167,35 +312,26 @@ static int l_canvas_circle(lua_State *L)
     }
 
     if (cs) {
-        size_t start = cs->cpuVerts.size() / cs->vertexStride;
-        for (size_t i=0;i<verts.size(); i+=2){
-            float x = verts[i]; float y = verts[i+1];
-            cs->cpuVerts.push_back(x);
-            cs->cpuVerts.push_back(y);
-            ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
-            cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+        ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
+        if (filled) {
+            size_t start = cs->cpuVerts.size() / cs->vertexStride;
+            for (size_t i=0;i<verts.size(); i+=2){
+                float x = verts[i]; float y = verts[i+1];
+                cs->cpuVerts.push_back(x);
+                cs->cpuVerts.push_back(y);
+                cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+            }
+            CanvasBatch b; b.mode = GL_TRIANGLE_FAN; b.start = (int)start; b.count = (int)(verts.size()/2);
+            cs->batches.push_back(b);
+        } else {
+            appendStrokeStrip(cs, verts, thickness, cc);
         }
-        CanvasBatch b; b.mode = filled ? GL_TRIANGLE_FAN : GL_LINE_STRIP; b.start = (int)start; b.count = (int)(verts.size()/2);
-        cs->batches.push_back(b);
         lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int cc=(int)lua_tointeger(L,-1); lua_pop(L,1); cc++; lua_pushinteger(L,cc); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
 
-    if (!prog) return 0;
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    if (filled) glDrawArrays(GL_TRIANGLE_FAN, 0, (GLsizei)(verts.size()/2)); else { glLineWidth(1.0f); glDrawArrays(GL_LINE_STRIP, 0, (GLsizei)(verts.size()/2)); }
-    glBindBuffer(GL_ARRAY_BUFFER,0); glBindVertexArray(0); glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-
-    lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int cc=(int)lua_tointeger(L,-1); lua_pop(L,1); cc++; lua_pushinteger(L,cc); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
 }
 
@@ -234,48 +370,19 @@ static int l_canvas_rect(lua_State *L)
             }
             CanvasBatch b; b.mode = GL_TRIANGLES; b.start = (int)start; b.count = 6; cs->batches.push_back(b);
         } else {
-            // line loop: 4 vertices
-            float vx[8] = { x, y, x + w, y, x + w, y + h, x, y + h };
-            for (int i=0;i<4;i++){
-                cs->cpuVerts.push_back(vx[i*2]); cs->cpuVerts.push_back(vx[i*2+1]);
-                cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-            }
-            CanvasBatch b; b.mode = GL_LINE_LOOP; b.start = (int)start; b.count = 4; cs->batches.push_back(b);
+            std::vector<float> pts = { x, y, x + w, y, x + w, y + h, x, y + h };
+            appendStrokeStrip(cs, pts, thickness, cc);
         }
         lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
 
-    // fallback immediate path
-    if (!prog) return 0;
-    float verts[12];
-    verts[0] = x; verts[1] = y;
-    verts[2] = x + w; verts[3] = y;
-    verts[4] = x + w; verts[5] = y + h;
-    verts[6] = x; verts[7] = y;
-    verts[8] = x + w; verts[9] = y + h;
-    verts[10] = x; verts[11] = y + h;
-
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    if (filled){ glDrawArrays(GL_TRIANGLES, 0, 6); }
-    else { glLineWidth(thickness); glDrawArrays(GL_LINE_LOOP, 0, 4); }
-    glBindBuffer(GL_ARRAY_BUFFER, 0); glBindVertexArray(0);
-    glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-
-    // increment draw_count
-    lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
 }
+
+
 
 static int l_canvas_line(lua_State *L)
 {
@@ -290,29 +397,15 @@ static int l_canvas_line(lua_State *L)
     CanvasState *cs = (CanvasState*)cup;
     GLuint prog = (GLuint)lua_tointeger(L, lua_upvalueindex(4));
     if (cs) {
-        size_t start = cs->cpuVerts.size() / cs->vertexStride;
         ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
-        cs->cpuVerts.push_back(x1); cs->cpuVerts.push_back(y1); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        cs->cpuVerts.push_back(x2); cs->cpuVerts.push_back(y2); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        CanvasBatch b; b.mode = GL_LINES; b.start = (int)start; b.count = 2; cs->batches.push_back(b);
+        std::vector<float> pts = { x1, y1, x2, y2 };
+        appendStrokeStrip(cs, pts, thickness, cc);
         lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
-    // fallback to immediate draw
-    if (!prog) return 0;
-    float verts[4] = { x1, y1, x2, y2 };
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    glLineWidth(thickness); glDrawArrays(GL_LINES, 0, 2);
-    glBindBuffer(GL_ARRAY_BUFFER,0); glBindVertexArray(0); glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-    lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
 }
 
@@ -339,33 +432,28 @@ static int l_canvas_poly(lua_State *L)
     void *cup = lua_touserdata(L, lua_upvalueindex(5));
     CanvasState *cs = (CanvasState*)cup;
     GLuint prog = (GLuint)lua_tointeger(L, lua_upvalueindex(4));
+    float thickness = lua_isnumber(L,4) ? (float)lua_tonumber(L,4) : 1.0f;
     if (cs) {
-        size_t start = cs->cpuVerts.size() / cs->vertexStride;
         ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
-        for (size_t i=0;i<pts.size(); i+=2){
-            cs->cpuVerts.push_back(pts[i]); cs->cpuVerts.push_back(pts[i+1]);
-            cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+        if (filled) {
+            size_t start = cs->cpuVerts.size() / cs->vertexStride;
+            for (size_t i=0;i<pts.size(); i+=2){
+                cs->cpuVerts.push_back(pts[i]); cs->cpuVerts.push_back(pts[i+1]);
+                cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+            }
+            CanvasBatch b; b.mode = GL_TRIANGLE_FAN; b.start = (int)start; b.count = (int)(pts.size()/2); cs->batches.push_back(b);
+        } else {
+            appendStrokeStrip(cs, pts, thickness, cc);
         }
-        CanvasBatch b; b.mode = filled ? GL_TRIANGLE_FAN : GL_LINE_STRIP; b.start = (int)start; b.count = (int)(pts.size()/2); cs->batches.push_back(b);
         lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
 
-    // fallback immediate draw
-    if (!prog) return 0;
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, pts.size()*sizeof(float), pts.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    if (filled) glDrawArrays(GL_TRIANGLE_FAN, 0, (GLsizei)(pts.size()/2)); else glDrawArrays(GL_LINE_STRIP, 0, (GLsizei)(pts.size()/2));
-    glBindBuffer(GL_ARRAY_BUFFER,0); glBindVertexArray(0); glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-    lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
+
+
 }
 
 static int l_canvas_triangle(lua_State *L)
@@ -384,31 +472,23 @@ static int l_canvas_triangle(lua_State *L)
     CanvasState *cs = (CanvasState*)cup;
     GLuint prog = (GLuint)lua_tointeger(L, lua_upvalueindex(4));
     if (cs) {
-        size_t start = cs->cpuVerts.size() / cs->vertexStride;
         ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
-        cs->cpuVerts.push_back(x1); cs->cpuVerts.push_back(y1); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        cs->cpuVerts.push_back(x2); cs->cpuVerts.push_back(y2); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        cs->cpuVerts.push_back(x3); cs->cpuVerts.push_back(y3); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        CanvasBatch b; b.mode = filled ? GL_TRIANGLES : GL_LINE_LOOP; b.start = (int)start; b.count = filled ? 3 : 3; cs->batches.push_back(b);
+        if (filled) {
+            size_t start = cs->cpuVerts.size() / cs->vertexStride;
+            cs->cpuVerts.push_back(x1); cs->cpuVerts.push_back(y1); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+            cs->cpuVerts.push_back(x2); cs->cpuVerts.push_back(y2); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+            cs->cpuVerts.push_back(x3); cs->cpuVerts.push_back(y3); cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
+            CanvasBatch b; b.mode = GL_TRIANGLES; b.start = (int)start; b.count = 3; cs->batches.push_back(b);
+        } else {
+            std::vector<float> pts = { x1, y1, x2, y2, x3, y3 };
+            appendStrokeStrip(cs, pts, thickness, cc);
+        }
         lua_getglobal(L, "canvas"); if (lua_istable(L, -1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
 
-    // fallback immediate path
-    if (!prog) return 0;
-    float verts[6] = { x1,y1, x2,y2, x3,y3 };
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    if (filled) glDrawArrays(GL_TRIANGLES, 0, 3); else { glLineWidth(thickness); glDrawArrays(GL_LINE_LOOP, 0, 3); }
-    glBindBuffer(GL_ARRAY_BUFFER,0); glBindVertexArray(0); glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-    lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
 }
 
@@ -452,32 +532,17 @@ static int l_canvas_bezier(lua_State *L)
     CanvasState *cs = (CanvasState*)cup;
     GLuint prog = (GLuint)lua_tointeger(L, lua_upvalueindex(4));
     if (cs) {
-        size_t start = cs->cpuVerts.size() / cs->vertexStride;
         ImVec4 cc = ImGui::ColorConvertU32ToFloat4(col);
-        for (size_t i=0;i<pts.size(); i+=2){
-            cs->cpuVerts.push_back(pts[i]); cs->cpuVerts.push_back(pts[i+1]);
-            cs->cpuVerts.push_back(cc.x); cs->cpuVerts.push_back(cc.y); cs->cpuVerts.push_back(cc.z); cs->cpuVerts.push_back(cc.w);
-        }
-        CanvasBatch b; b.mode = GL_LINE_STRIP; b.start = (int)start; b.count = (int)(pts.size()/2); cs->batches.push_back(b);
+        appendStrokeStrip(cs, pts, thickness, cc);
         lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
         return 0;
     }
 
-    // fallback immediate path
-    if (!prog) return 0;
-    glUseProgram(prog);
-    GLint loc = glGetUniformLocation(prog, "uSize"); if (loc>=0) glUniform2f(loc, (float)lua_tointeger(L, lua_upvalueindex(2)), (float)lua_tointeger(L, lua_upvalueindex(3)));
-    ImVec4 c = ImGui::ColorConvertU32ToFloat4(col);
-    loc = glGetUniformLocation(prog, "uColor"); if (loc>=0) glUniform4f(loc, c.x, c.y, c.z, c.w);
-    GLuint vbo=0, vao=0; glGenBuffers(1,&vbo); glGenVertexArrays(1,&vao);
-    glBindVertexArray(vao); glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, pts.size()*sizeof(float), pts.data(), GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,2*sizeof(float),(void*)0);
-    glLineWidth(thickness); glDrawArrays(GL_LINE_STRIP, 0, (GLsizei)(pts.size()/2));
-    glBindBuffer(GL_ARRAY_BUFFER,0); glBindVertexArray(0); glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);
-    lua_getglobal(L, "canvas"); if (lua_istable(L,-1)){ lua_getfield(L,-1,"draw_count"); int c=(int)lua_tointeger(L,-1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count"); } lua_pop(L,1);
-    glUseProgram(0);
+    // batching-only mode: do not perform immediate GL draws
+    PLOGW << "lua:canvas immediate draw requested but batching-only mode; skipping draw";
     return 0;
+
+
 }
 
 static int l_canvas_text_size(lua_State *L)
@@ -539,26 +604,33 @@ void registerLuaCanvasBindings(lua_State *L, ImVec2 origin, int width, int heigh
     lua_setfield(L, -2, "draw_count");
     LuaBindingDocs::get().registerDoc("canvas.draw_count", "draw_count -> int", "Number of draw calls issued to canvas in this frame (for diagnostics)", 
     R"(
-        
-        print(canvas.draw_count)
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.circle(160, 120, 40, {0, 1, 0, 1}, true)
+    canvas.rect(10, 10, 80, 40, {1, 0, 0, 1}, true)
+    print("draw calls this frame: " .. canvas.draw_count)
+end
     )", __FILE__);
 
     // width
     lua_pushinteger(L, width);
     lua_pushcclosure(L, l_canvas_width, 1);
     lua_setfield(L, -2, "width");
-        LuaBindingDocs::get().registerDoc("canvas.width", "width() -> int", "Get canvas width in pixels", R"(
+        LuaBindingDocs::get().registerDoc("canvas.width", "width -> int", "Get canvas width in pixels", R"(
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    local w = canvas.width()
-    local h = canvas.height()
-    ui = string.format("Canvas: %dx%d", w, h)
-    -- draw a background so we can see size
+    canvas.clear({0.1,0.1,0.1,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
+    local w = canvas.width; local h = canvas.height
     canvas.rect(0,0,w,h, {0.1,0.1,0.1,1}, true)
-    canvas.text(10,10, ui, {1,1,1,1})
 end
 )", __FILE__);
 
@@ -566,16 +638,16 @@ end
     lua_pushinteger(L, height);
     lua_pushcclosure(L, l_canvas_height, 1);
     lua_setfield(L, -2, "height");
-        LuaBindingDocs::get().registerDoc("canvas.height", "height() -> int", "Get canvas height in pixels", R"(
+        LuaBindingDocs::get().registerDoc("canvas.height", "height -> int", "Get canvas height in pixels", R"(
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    local w = canvas.width()
-    local h = canvas.height()
+    canvas.clear({0.15,0.15,0.15,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
+    local w = canvas.width; local h = canvas.height
     canvas.rect(0,0,w,h, {0.15,0.15,0.15,1}, true)
-    canvas.text(10,10, string.format("H: %d", h), {1,1,1,1})
 end
 )", __FILE__);
 
@@ -586,16 +658,16 @@ end
     lua_setfield(L, -2, "circle");
     // doc
     LuaBindingDocs::get().registerDoc("canvas.circle", "circle(cx, cy, r, color, filled, thickness)", "Draw a circle at local canvas coordinates", R"(
--- Full canvas example: center a circle
+-- Full canvas example: stroked and filled circles
 function Config()
   return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-  local w = canvas.width()
-  local h = canvas.height()
-  local r = math.min(w,h) * 0.25
-  canvas.circle(w/2, h/2, r, {0,1,0,1}, true)
+  canvas.clear({0,0,0,1})
+  canvas.viewport(0,0,canvas.width,canvas.height)
+  canvas.circle(canvas.width/2, canvas.height/2, 48, {0,1,0,1}, false, 4)
+  canvas.circle(canvas.width/4, canvas.height/4, 20, {1,0,0,1}, true)
 end
 )", __FILE__);
 
@@ -604,17 +676,17 @@ end
     lua_pushnumber(L, origin.y);
     lua_pushcclosure(L, l_canvas_text, 2);
     lua_setfield(L, -2, "text");
-    LuaBindingDocs::get().registerDoc("canvas.text", "text(x, y, string, color)", "Draw text at local canvas coordinates", R"(
--- Full canvas example: centered text
+    LuaBindingDocs::get().registerDoc("canvas.text", "text(x, y, string, color)", "Draw text at local canvas coordinates (text rendering is a no-op in this environment)", R"(
+-- Full canvas example: measure text using text_size (canvas.text is a no-op here)
 function Config()
   return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-  local w = canvas.width()
-  local h = canvas.height()
+  canvas.clear({0.15,0.15,0.15,1})
+  canvas.viewport(0,0,canvas.width,canvas.height)
   local tw, th = canvas.text_size("Hello World")
-  canvas.text((w-tw)/2, (h-th)/2, "Hello World", {1,1,1,1})
+  canvas.rect((320-tw)/2, (240-th)/2, tw+10, th+6, {0,0,0,0.6}, true)
 end
 )", __FILE__);
 
@@ -624,15 +696,17 @@ end
     lua_pushcclosure(L, l_canvas_rect, 2);
     lua_setfield(L, -2, "rect");
     LuaBindingDocs::get().registerDoc("canvas.rect", "rect(x, y, w, h, color, filled, thickness)", "Draw a rectangle", R"(
--- Full canvas example: framed rectangle at center
+-- Full canvas example: filled and framed rectangles
 function Config()
   return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-  local w = canvas.width()
-  local h = canvas.height()
+  canvas.clear({0.05,0.05,0.05,1})
+  canvas.viewport(0,0,canvas.width,canvas.height)
+  local w = canvas.width; local h = canvas.height
   canvas.rect(w/2 - 50, h/2 - 20, 100, 40, {0,0,1,1}, false, 2)
+  canvas.rect(10,10, 80, 40, {0.2,0.6,1,1}, true)
 end
 )", __FILE__);
     // line(x1,y1,x2,y2,color,thickness)
@@ -641,16 +715,17 @@ end
     lua_pushcclosure(L, l_canvas_line, 2);
     lua_setfield(L, -2, "line");
     LuaBindingDocs::get().registerDoc("canvas.line", "line(x1, y1, x2, y2, color, thickness)", "Draw a line between two points", R"(
--- Full canvas example: draw an X
+-- Full canvas example: draw an X using stroked lines
 function Config()
   return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-  local w = canvas.width()
-  local h = canvas.height()
-  canvas.line(0,0, w, h, {1,0,0,1}, 2)
-  canvas.line(0,h, w, 0, {1,0,0,1}, 2)
+  canvas.clear({0,0,0,1})
+  canvas.viewport(0,0,canvas.width,canvas.height)
+  local w = canvas.width; local h = canvas.height
+  canvas.line(0,0, w, h, {1,0,0,1}, 3)
+  canvas.line(0,h, w, 0, {1,0,0,1}, 3)
 end
 )", __FILE__);
 
@@ -661,16 +736,17 @@ end
     lua_pushcclosure(L, l_canvas_poly, 2);
     lua_setfield(L, -2, "poly");
     LuaBindingDocs::get().registerDoc("canvas.poly", "poly(points_table, color, filled)", "Draw polygon from point table", R"(
--- Full canvas example: triangle at center
+-- Full canvas example: filled and stroked polygon
 function Config()
   return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-  local w = canvas.width()
-  local h = canvas.height()
-  local cx, cy = w/2, h/2
+  canvas.clear({0.08,0.08,0.08,1})
+  canvas.viewport(0,0,canvas.width,canvas.height)
+  local cx, cy = canvas.width/2, canvas.height/2
   canvas.poly({{cx-30,cy+20},{cx,cy-30},{cx+30,cy+20}}, {0.5,0.8,0.2,1}, true)
+  canvas.poly({{20,20},{80,40},{60,100},{10,80}}, {1,0.5,0,1}, false)
 end
 )", __FILE__);
 
@@ -680,16 +756,18 @@ end
         lua_pushcclosure(L, l_canvas_triangle, 2);
         lua_setfield(L, -2, "triangle");
         LuaBindingDocs::get().registerDoc("canvas.triangle", "triangle(x1,y1,x2,y2,x3,y3,color,filled,thickness)", "Draw a triangle (filled or stroked)", R"(
--- Full canvas example: centered triangle
+-- Full canvas example: filled and stroked triangle
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    local w = canvas.width()
-    local h = canvas.height()
+    canvas.clear({0.12,0.12,0.12,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
+    local w = canvas.width; local h = canvas.height
     local cx, cy = w/2, h/2
     canvas.triangle(cx-40, cy+30, cx, cy-30, cx+40, cy+30, {0.2,0.6,1,1}, true)
+    canvas.triangle(10,10, 60,20, 40,70, {1,1,0,1}, false, 3)
 end
 )", __FILE__);
 
@@ -698,16 +776,16 @@ end
         lua_pushnumber(L, origin.y);
         lua_pushcclosure(L, l_canvas_rounded_rect, 2);
         lua_setfield(L, -2, "rounded_rect");
-        LuaBindingDocs::get().registerDoc("canvas.rounded_rect", "rounded_rect(x,y,w,h,rounding,color,filled,thickness)", "Draw a rectangle with rounded corners", R"(
--- Full canvas example: rounded frame
+        LuaBindingDocs::get().registerDoc("canvas.rounded_rect", "rounded_rect(x,y,w,h,rounding,color,filled,thickness)", "Draw a rectangle with rounded corners (rounded corners approximated)", R"(
+-- Full canvas example: rounded frame (approximate)
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    local w = canvas.width()
-    local h = canvas.height()
-    canvas.rounded_rect(10,10, w-20, h-20, 8, {0,0,0,0.6}, false, 3)
+    canvas.clear({0.1,0.1,0.1,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
+    canvas.rounded_rect(10,10, canvas.width-20, canvas.height-20, 8, {0,0,0,0.6}, false, 3)
 end
 )", __FILE__);
 
@@ -717,15 +795,15 @@ end
         lua_pushcclosure(L, l_canvas_bezier, 2);
         lua_setfield(L, -2, "bezier");
         LuaBindingDocs::get().registerDoc("canvas.bezier", "bezier(p1x,p1y,p2x,p2y,p3x,p3y,p4x,p4y,color,thickness,segments)", "Draw a cubic Bezier curve", R"(
--- Full canvas example: bezier curve
+-- Full canvas example: stroked Bezier curve
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    local w = canvas.width()
-    local h = canvas.height()
-    canvas.bezier(20,h-20, 120,20, 200,h-20, 300,20, {1,0.5,0,1}, 2, 32)
+    canvas.clear({0.12,0.12,0.12,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
+    canvas.bezier(20,canvas.height-20, 120,20, 200,canvas.height-20, 300,20, {1,0.5,0,1}, 3, 48)
 end
 )", __FILE__);
 
@@ -738,9 +816,10 @@ function Config()
 end
 
 function Render(dt)
+    canvas.clear({0.1,0.1,0.1,1})
+    canvas.viewport(0,0,canvas.width,canvas.height)
     local tw, th = canvas.text_size("Hello World")
     canvas.rect(5,5, tw+10, th+6, {0,0,0,0.5}, true)
-    canvas.text(10,8, "Hello World", {1,1,1,1})
 end
 )", __FILE__);
 
@@ -751,13 +830,48 @@ end
     lua_setfield(L, -2, "push_clip");
     lua_pushcfunction(L, l_canvas_pop_clip);
     lua_setfield(L, -2, "pop_clip");
-    LuaBindingDocs::get().registerDoc("canvas.push_clip", "push_clip(x, y, w, h)", "Push a scissor clip region relative to the canvas", "canvas.push_clip(0,0,100,100)", __FILE__);
-    LuaBindingDocs::get().registerDoc("canvas.pop_clip", "pop_clip()", "Pop last scissor clip", "canvas.pop_clip()", __FILE__);
+    LuaBindingDocs::get().registerDoc("canvas.push_clip", "push_clip(x, y, w, h)", "Push a scissor clip region relative to the canvas", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.push_clip(50, 50, 220, 140)
+    canvas.rect(0, 0, canvas.width, canvas.height, {0, 1, 0, 1}, true)
+    canvas.pop_clip()
+end
+)", __FILE__);
+    LuaBindingDocs::get().registerDoc("canvas.pop_clip", "pop_clip()", "Pop last scissor clip", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.push_clip(50, 50, 220, 140)
+    canvas.circle(160, 120, 80, {1, 0, 0, 1}, true)
+    canvas.pop_clip()
+end
+)", __FILE__);
 
     // image (stub)
     lua_pushcfunction(L, l_canvas_image);
     lua_setfield(L, -2, "image");
-    LuaBindingDocs::get().registerDoc("canvas.image", "image(keyOrUrl, x, y, w, h)", "Render an image by key or URL (stubbed in this environment)", "canvas.image('some_key', 10, 10, 64, 64)", __FILE__);
+    LuaBindingDocs::get().registerDoc("canvas.image", "image(keyOrUrl, x, y, w, h)", "Render an image by key or URL (stubbed in this environment)", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.15, 0.15, 0.15, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.image('my_image_key', 10, 10, 64, 64)
+    canvas.rect(10, 10, 64, 64, {1, 1, 1, 0.3}, false, 1)
+end
+)", __FILE__);
 
     lua_setglobal(L, "canvas");
 
@@ -820,31 +934,16 @@ static void ensureQuad()
 
 
 
-static int l_canvas_begin_gl(lua_State *L)
-{
-    // upvalues: textureId, width, height
-    GLuint tex = (GLuint)lua_tointeger(L, lua_upvalueindex(1));
-    int w = (int)lua_tointeger(L, lua_upvalueindex(2));
-    int h = (int)lua_tointeger(L, lua_upvalueindex(3));
-    // Bind the texture-backed framebuffer by binding the texture to the framebuffer 0 via glBindTexture
-    // The caller (MarkdownText) binds the FBO before calling Render; nothing to do here currently.
-    // Provide viewport convenience
-    glViewport(0, 0, w, h);
-    return 0;
-}
-
-static int l_canvas_end_gl(lua_State *L)
-{
-    // restore default viewport is left to the caller; nothing to do here
-    return 0;
-}
-
+// canvas.clear({r,g,b,a}) — accepts a color table
 static int l_canvas_clear_gl(lua_State *L)
 {
-    float r = (float)luaL_optnumber(L,1,0.0);
-    float g = (float)luaL_optnumber(L,2,0.0);
-    float b = (float)luaL_optnumber(L,3,0.0);
-    float a = (float)luaL_optnumber(L,4,1.0);
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+    if (lua_istable(L, 1)) {
+        lua_rawgeti(L, 1, 1); r = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, 1, 2); g = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, 1, 3); b = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, 1, 4); a = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    }
     glClearColor(r,g,b,a);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     // increment draw_count
@@ -853,6 +952,232 @@ static int l_canvas_clear_gl(lua_State *L)
         lua_getfield(L, -1, "draw_count"); int c = (int)lua_tointeger(L, -1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count");
     }
     lua_pop(L,1);
+    return 0;
+}
+
+// canvas.viewport(x,y,w,h) — set OpenGL viewport
+static int l_canvas_viewport_gl(lua_State *L)
+{
+    int x = (int)luaL_checkinteger(L, 1);
+    int y = (int)luaL_checkinteger(L, 2);
+    int w = (int)luaL_checkinteger(L, 3);
+    int h = (int)luaL_checkinteger(L, 4);
+    glViewport(x, y, w, h);
+    return 0;
+}
+
+// Helper: push a 4x4 matrix (16 floats) as a flat Lua table
+static void pushMatrix4(lua_State *L, const float m[16])
+{
+    lua_createtable(L, 16, 0);
+    for (int i = 0; i < 16; ++i) {
+        lua_pushnumber(L, m[i]);
+        lua_rawseti(L, -2, i + 1);
+    }
+}
+
+// Helper: read a flat 16-element Lua table into a float[16]
+static bool readMatrix4(lua_State *L, int idx, float out[16])
+{
+    if (!lua_istable(L, idx)) return false;
+    for (int i = 0; i < 16; ++i) {
+        lua_rawgeti(L, idx, i + 1);
+        out[i] = (float)lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+// canvas.viewMatrix(mat) — set the view matrix uniform on the currently bound shader
+static int l_canvas_view_matrix(lua_State *L)
+{
+    float m[16];
+    if (!readMatrix4(L, 1, m)) return luaL_error(L, "viewMatrix expects a table of 16 floats");
+    // Find uniform in currently bound program
+    GLint prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+    if (prog) {
+        GLint loc = glGetUniformLocation((GLuint)prog, "uView");
+        if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, m);
+    }
+    return 0;
+}
+
+// canvas.projectionMatrix(mat) — set the projection matrix uniform on the currently bound shader
+static int l_canvas_projection_matrix(lua_State *L)
+{
+    float m[16];
+    if (!readMatrix4(L, 1, m)) return luaL_error(L, "projectionMatrix expects a table of 16 floats");
+    GLint prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+    if (prog) {
+        GLint loc = glGetUniformLocation((GLuint)prog, "uProjection");
+        if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, m);
+    }
+    return 0;
+}
+
+// canvas.lookAt(eye, target, up) — returns a 4x4 view matrix table
+static int l_canvas_look_at(lua_State *L)
+{
+    // Each argument is a table {x,y,z}
+    auto readVec3 = [](lua_State *L, int idx, float out[3]) {
+        lua_rawgeti(L, idx, 1); out[0] = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, idx, 2); out[1] = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+        lua_rawgeti(L, idx, 3); out[2] = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    };
+    float eye[3], target[3], up[3];
+    readVec3(L, 1, eye);
+    readVec3(L, 2, target);
+    readVec3(L, 3, up);
+
+    // Compute lookAt matrix (column-major, OpenGL convention)
+    float f[3] = { target[0]-eye[0], target[1]-eye[1], target[2]-eye[2] };
+    float flen = sqrtf(f[0]*f[0]+f[1]*f[1]+f[2]*f[2]);
+    if (flen > 1e-8f) { f[0]/=flen; f[1]/=flen; f[2]/=flen; }
+
+    // s = f x up
+    float s[3] = { f[1]*up[2]-f[2]*up[1], f[2]*up[0]-f[0]*up[2], f[0]*up[1]-f[1]*up[0] };
+    float slen = sqrtf(s[0]*s[0]+s[1]*s[1]+s[2]*s[2]);
+    if (slen > 1e-8f) { s[0]/=slen; s[1]/=slen; s[2]/=slen; }
+
+    // u = s x f
+    float u[3] = { s[1]*f[2]-s[2]*f[1], s[2]*f[0]-s[0]*f[2], s[0]*f[1]-s[1]*f[0] };
+
+    float m[16] = {
+        s[0],  u[0], -f[0], 0,
+        s[1],  u[1], -f[1], 0,
+        s[2],  u[2], -f[2], 0,
+        -(s[0]*eye[0]+s[1]*eye[1]+s[2]*eye[2]),
+        -(u[0]*eye[0]+u[1]*eye[1]+u[2]*eye[2]),
+         (f[0]*eye[0]+f[1]*eye[1]+f[2]*eye[2]),
+        1
+    };
+    pushMatrix4(L, m);
+    return 1;
+}
+
+// canvas.ortho(left, right, bottom, top, near, far) — returns a 4x4 orthographic projection matrix
+static int l_canvas_ortho(lua_State *L)
+{
+    float l = (float)luaL_checknumber(L, 1);
+    float r = (float)luaL_checknumber(L, 2);
+    float b = (float)luaL_checknumber(L, 3);
+    float t = (float)luaL_checknumber(L, 4);
+    float n = (float)luaL_checknumber(L, 5);
+    float f = (float)luaL_checknumber(L, 6);
+
+    float m[16] = {};
+    m[0]  = 2.0f / (r - l);
+    m[5]  = 2.0f / (t - b);
+    m[10] = -2.0f / (f - n);
+    m[12] = -(r + l) / (r - l);
+    m[13] = -(t + b) / (t - b);
+    m[14] = -(f + n) / (f - n);
+    m[15] = 1.0f;
+    pushMatrix4(L, m);
+    return 1;
+}
+
+// canvas.perspective(fovDeg, aspect, near, far) — returns a 4x4 perspective projection matrix
+static int l_canvas_perspective(lua_State *L)
+{
+    float fovDeg = (float)luaL_checknumber(L, 1);
+    float aspect = (float)luaL_checknumber(L, 2);
+    float nearP  = (float)luaL_checknumber(L, 3);
+    float farP   = (float)luaL_checknumber(L, 4);
+
+    float fovRad = fovDeg * (float)M_PI / 180.0f;
+    float tanHalf = tanf(fovRad / 2.0f);
+
+    float m[16] = {};
+    m[0]  = 1.0f / (aspect * tanHalf);
+    m[5]  = 1.0f / tanHalf;
+    m[10] = -(farP + nearP) / (farP - nearP);
+    m[11] = -1.0f;
+    m[14] = -(2.0f * farP * nearP) / (farP - nearP);
+    pushMatrix4(L, m);
+    return 1;
+}
+
+// canvas.createVertexBuffer(verts_table) — create a GL VBO from a flat table of floats, returns VBO id
+static int l_canvas_create_vertex_buffer(lua_State *L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int n = (int)lua_rawlen(L, 1);
+    std::vector<float> data(n);
+    for (int i = 0; i < n; ++i) {
+        lua_rawgeti(L, 1, i + 1);
+        data[i] = (float)lua_tonumber(L, -1);
+        lua_pop(L, 1);
+    }
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, n * sizeof(float), data.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    lua_pushinteger(L, (lua_Integer)vbo);
+    return 1;
+}
+
+// canvas.bindVertexBuffer(vbo) — bind a VBO and set up standard vertex attribs (vec2 pos + vec4 color, stride 6)
+static int l_canvas_bind_vertex_buffer(lua_State *L)
+{
+    GLuint vbo = (GLuint)luaL_checkinteger(L, 1);
+    // Ensure a VAO is bound — use a static shared VAO for user VBOs
+    static GLuint s_userVAO = 0;
+    if (s_userVAO == 0) glGenVertexArrays(1, &s_userVAO);
+    glBindVertexArray(s_userVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    GLsizei stride = 6 * sizeof(float); // vec2 pos + vec4 color
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, stride, (void*)(2 * sizeof(float)));
+    return 0;
+}
+
+// canvas.drawArrays(mode, first, count) — draw from the currently bound VBO
+static int l_canvas_draw_arrays(lua_State *L)
+{
+    const char *modeStr = luaL_checkstring(L, 1);
+    int first = (int)luaL_checkinteger(L, 2);
+    int count = (int)luaL_checkinteger(L, 3);
+    GLenum mode = GL_TRIANGLES;
+    if (strcmp(modeStr, "triangles") == 0) mode = GL_TRIANGLES;
+    else if (strcmp(modeStr, "triangle_strip") == 0) mode = GL_TRIANGLE_STRIP;
+    else if (strcmp(modeStr, "triangle_fan") == 0) mode = GL_TRIANGLE_FAN;
+    else if (strcmp(modeStr, "lines") == 0) mode = GL_LINES;
+    else if (strcmp(modeStr, "line_strip") == 0) mode = GL_LINE_STRIP;
+    else if (strcmp(modeStr, "points") == 0) mode = GL_POINTS;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(mode, first, count);
+    glDisable(GL_BLEND);
+
+    // increment draw_count
+    lua_getglobal(L, "canvas");
+    if (lua_istable(L, -1)){
+        lua_getfield(L, -1, "draw_count"); int c = (int)lua_tointeger(L, -1); lua_pop(L,1); c++; lua_pushinteger(L,c); lua_setfield(L,-2,"draw_count");
+    }
+    lua_pop(L,1);
+    return 0;
+}
+
+// canvas.setShaderUniformVec2(name, {x,y}) — set a vec2 uniform on the currently bound shader
+static int l_canvas_set_uniform_vec2(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    lua_rawgeti(L, 2, 1); float x = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    lua_rawgeti(L, 2, 2); float y = (float)lua_tonumber(L, -1); lua_pop(L, 1);
+    GLint prog = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+    if (prog) {
+        GLint loc = glGetUniformLocation((GLuint)prog, name);
+        if (loc >= 0) glUniform2f(loc, x, y);
+    }
     return 0;
 }
 
@@ -936,55 +1261,389 @@ void registerLuaGLCanvasBindings(lua_State *L, const std::string &embedID, unsig
     lua_pushinteger(L, 0);
     lua_setfield(L, -2, "draw_count");
 
-    // begin/end (no-op here, viewport handled by caller)
-    lua_pushinteger(L, (lua_Integer)textureId);
-    lua_pushinteger(L, width);
-    lua_pushinteger(L, height);
-    lua_pushcclosure(L, l_canvas_begin_gl, 3);
-    lua_setfield(L, -2, "begin");
-    lua_pushcfunction(L, l_canvas_end_gl);
-    lua_setfield(L, -2, "end");
-
     // clear
     lua_pushcfunction(L, l_canvas_clear_gl);
     lua_setfield(L, -2, "clear");
+    LuaBindingDocs::get().registerDoc("canvas.clear", "clear({r,g,b,a})", "Clear the canvas FBO with the given color table.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
 
-    // shader/upload/use/set_uniform
+function Render(dt)
+    canvas.clear({0.2, 0.1, 0.3, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.rect(60, 80, 200, 80, {1, 1, 1, 1}, true)
+end
+)", __FILE__);
+
+    // viewport
+    lua_pushcfunction(L, l_canvas_viewport_gl);
+    lua_setfield(L, -2, "viewport");
+    LuaBindingDocs::get().registerDoc("canvas.viewport", "viewport(x,y,w,h)", "Set the GL viewport rectangle.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0, 0, 0, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.rect(10, 10, 100, 60, {0, 1, 0, 1}, true)
+end
+)", __FILE__);
+
+    // view/projection matrix
+    lua_pushcfunction(L, l_canvas_view_matrix);
+    lua_setfield(L, -2, "viewMatrix");
+    LuaBindingDocs::get().registerDoc("canvas.viewMatrix", "viewMatrix(mat)", "Set the view matrix uniform (uView) on the current shader. mat is a flat table of 16 floats (column-major).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local view = canvas.lookAt({0,0,5}, {0,0,0}, {0,1,0})
+    canvas.viewMatrix(view)
+    canvas.rect(100, 80, 120, 80, {0.4, 0.7, 1, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_projection_matrix);
+    lua_setfield(L, -2, "projectionMatrix");
+    LuaBindingDocs::get().registerDoc("canvas.projectionMatrix", "projectionMatrix(mat)", "Set the projection matrix uniform (uProjection) on the current shader. mat is a flat table of 16 floats (column-major).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local proj = canvas.ortho(0, canvas.width, 0, canvas.height, 0.1, 100)
+    canvas.projectionMatrix(proj)
+    canvas.rect(40, 40, 240, 160, {0.8, 0.2, 0.4, 1}, true)
+end
+)", __FILE__);
+
+    // lookAt / ortho / perspective helpers
+    lua_pushcfunction(L, l_canvas_look_at);
+    lua_setfield(L, -2, "lookAt");
+    LuaBindingDocs::get().registerDoc("canvas.lookAt", "lookAt(eye, target, up) -> mat", "Compute a 4x4 lookAt view matrix. Arguments are {x,y,z} tables. Returns a flat table of 16 floats.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.05, 0.05, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local view = canvas.lookAt({0,0,5}, {0,0,0}, {0,1,0})
+    canvas.viewMatrix(view)
+    canvas.circle(160, 120, 40, {0, 1, 0.5, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_ortho);
+    lua_setfield(L, -2, "ortho");
+    LuaBindingDocs::get().registerDoc("canvas.ortho", "ortho(left,right,bottom,top,near,far) -> mat", "Compute a 4x4 orthographic projection matrix. Returns a flat table of 16 floats.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local proj = canvas.ortho(0, 320, 0, 240, 0.1, 100)
+    canvas.projectionMatrix(proj)
+    canvas.rect(60, 60, 200, 120, {0.2, 0.6, 1, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_perspective);
+    lua_setfield(L, -2, "perspective");
+    LuaBindingDocs::get().registerDoc("canvas.perspective", "perspective(fovDeg,aspect,near,far) -> mat", "Compute a 4x4 perspective projection matrix. Returns a flat table of 16 floats.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.08, 0.08, 0.12, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local proj = canvas.perspective(60, canvas.width / canvas.height, 0.1, 100)
+    canvas.projectionMatrix(proj)
+    canvas.triangle(160, 40, 60, 200, 260, 200, {1, 0.5, 0, 1}, true)
+end
+)", __FILE__);
+
+    // shader management
     lua_pushcfunction(L, l_canvas_upload_shader);
-    lua_setfield(L, -2, "upload_shader");
+    lua_setfield(L, -2, "createShader");
+    LuaBindingDocs::get().registerDoc("canvas.createShader", "createShader(vs, fs) -> prog", "Compile and link a shader program from vertex/fragment source strings.", R"(
+local vs_src = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs_src = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
+shader = nil
+vbo = nil
+
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    if not shader then
+        shader = canvas.createShader(vs_src, fs_src)
+        vbo = canvas.createVertexBuffer({
+            100,80,  1,0,0,1,
+            220,80,  0,1,0,1,
+            160,180, 0,0,1,1
+        })
+    end
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 3)
+end
+)", __FILE__);
     lua_pushcfunction(L, l_canvas_use_shader);
-    lua_setfield(L, -2, "use_shader");
+    lua_setfield(L, -2, "useShader");
+    LuaBindingDocs::get().registerDoc("canvas.useShader", "useShader(prog)", "Bind a shader program for subsequent draws.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0, 0, 0, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- useShader binds a compiled shader for subsequent draw calls
+    -- canvas.useShader(myProg)
+    canvas.rect(50, 50, 220, 140, {0.3, 0.6, 1, 1}, true)
+end
+)", __FILE__);
     lua_pushcfunction(L, l_canvas_set_uniform);
     lua_setfield(L, -2, "set_uniform");
+    LuaBindingDocs::get().registerDoc("canvas.set_uniform", "set_uniform(prog, name, value)", "Set a float uniform on the given program.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- canvas.set_uniform(prog, 'uTime', dt)
+    canvas.circle(160, 120, 50, {1, 0.8, 0.2, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_set_uniform_vec2);
+    lua_setfield(L, -2, "setShaderUniformVec2");
+    LuaBindingDocs::get().registerDoc("canvas.setShaderUniformVec2", "setShaderUniformVec2(name, {x,y})", "Set a vec2 uniform on the currently bound shader.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.rect(20, 20, 280, 200, {0.5, 1, 0.5, 1}, false, 3)
+end
+)", __FILE__);
+
+    // VBO management
+    lua_pushcfunction(L, l_canvas_create_vertex_buffer);
+    lua_setfield(L, -2, "createVertexBuffer");
+    LuaBindingDocs::get().registerDoc("canvas.createVertexBuffer", "createVertexBuffer(verts) -> vbo", "Create a GL VBO from a flat table of floats (x,y,r,g,b,a per vertex). Returns VBO id.", R"(
+vbo = nil
+shader = nil
+
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    if not vbo then
+        vbo = canvas.createVertexBuffer({
+            100,80,  1,0,0,1,
+            220,80,  0,1,0,1,
+            220,180, 0,0,1,1,
+            100,80,  1,0,0,1,
+            220,180, 0,0,1,1,
+            100,180, 1,1,0,1
+        })
+    end
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.rect(80, 60, 160, 120, {0.3, 0.3, 0.3, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_bind_vertex_buffer);
+    lua_setfield(L, -2, "bindVertexBuffer");
+    LuaBindingDocs::get().registerDoc("canvas.bindVertexBuffer", "bindVertexBuffer(vbo)", "Bind a VBO and set standard vertex attribs (vec2 pos + vec4 color, stride 6).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0, 0, 0, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- canvas.bindVertexBuffer(myVbo) -- binds VBO and sets attrib pointers
+    canvas.circle(160, 120, 60, {0.2, 0.8, 0.4, 1}, true)
+end
+)", __FILE__);
+    lua_pushcfunction(L, l_canvas_draw_arrays);
+    lua_setfield(L, -2, "drawArrays");
+    LuaBindingDocs::get().registerDoc("canvas.drawArrays", "drawArrays(mode, first, count)", "Draw primitives from the currently bound VBO. mode: 'triangles','triangle_strip','lines','line_strip','points'.", R"(
+shader = nil
+vbo = nil
+
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
+function Render(dt)
+    if not shader then
+        shader = canvas.createShader(vs, fs)
+        vbo = canvas.createVertexBuffer({
+            60,60,   1,0,0,1,
+            260,60,  0,1,0,1,
+            260,180, 0,0,1,1,
+            60,60,   1,0,0,1,
+            260,180, 0,0,1,1,
+            60,180,  1,1,0,1
+        })
+    end
+    canvas.clear({0.05, 0.05, 0.05, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
+end
+)", __FILE__);
 
     // texture helpers
     lua_pushcfunction(L, l_canvas_create_texture);
     lua_setfield(L, -2, "create_texture");
+    LuaBindingDocs::get().registerDoc("canvas.create_texture", "create_texture(bytes, w, h) -> tex", "Create an RGBA texture from raw bytes.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.15, 0.15, 0.15, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- local tex = canvas.create_texture(raw_rgba_bytes, 64, 64)
+    canvas.rect(20, 20, 280, 200, {0.4, 0.4, 0.6, 1}, true)
+end
+)", __FILE__);
     lua_pushcfunction(L, l_canvas_bind_texture);
     lua_setfield(L, -2, "bind_texture");
+    LuaBindingDocs::get().registerDoc("canvas.bind_texture", "bind_texture(unit, tex)", "Bind texture to texture unit.", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- canvas.bind_texture(0, myTexture)
+    canvas.rect(40, 40, 240, 160, {0.6, 0.3, 0.8, 1}, true)
+end
+)", __FILE__);
 
     // draw fullscreen helper
     lua_pushcfunction(L, l_canvas_draw_fullscreen);
     lua_setfield(L, -2, "draw_fullscreen");
+    LuaBindingDocs::get().registerDoc("canvas.draw_fullscreen", "draw_fullscreen(tex, shader)", "Draw a fullscreen textured quad (optionally supplying a shader).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
 
-    // expose size helpers (width/height)
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.15, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    -- canvas.draw_fullscreen(myTexture, myShader)
+    canvas.rect(0, 0, canvas.width, canvas.height, {0.2, 0.2, 0.3, 1}, true)
+end
+)", __FILE__);
+
+    // expose size as plain integer properties (canvas.width, canvas.height)
     lua_pushinteger(L, width);
-    lua_pushcclosure(L, l_canvas_width, 1);
     lua_setfield(L, -2, "width");
+    LuaBindingDocs::get().registerDoc("canvas.width", "width -> int", "Canvas width in pixels (read-only property).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
+
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local w = canvas.width
+    local h = canvas.height
+    canvas.rect(0, 0, w, h, {0.15, 0.15, 0.15, 1}, true)
+    canvas.circle(w/2, h/2, 40, {1, 0.5, 0, 1}, true)
+end
+)", __FILE__);
     lua_pushinteger(L, height);
-    lua_pushcclosure(L, l_canvas_height, 1);
     lua_setfield(L, -2, "height");
+    LuaBindingDocs::get().registerDoc("canvas.height", "height -> int", "Canvas height in pixels (read-only property).", R"(
+function Config()
+    return { type = "canvas", width = 320, height = 240 }
+end
 
-    // compile a default solid shader for this canvas and push as last upvalue
-    GLuint default_prog = compileShaderProgram(s_shape_vs_src, s_shape_fs_src);
-    if (default_prog)
-        PLOGI << "lua:canvas compiled default_prog=" << default_prog << " for embed=" << embedID;
-    else
-        PLOGW << "lua:canvas failed to compile default shader for embed=" << embedID;
+function Render(dt)
+    canvas.clear({0.1, 0.1, 0.1, 1})
+    canvas.viewport(0, 0, canvas.width, canvas.height)
+    local w = canvas.width
+    local h = canvas.height
+    canvas.rect(10, 10, w - 20, h - 20, {0.3, 0.7, 0.3, 1}, false, 2)
+end
+)", __FILE__);
 
-    // create per-embed canvas state and register GL-backed shape functions.
+    // compile a default solid shader only once per embed (cached in CanvasState)
     CanvasState *cs = ensureCanvasState(embedID, textureId, width, height);
-    cs->program = default_prog;
+    if (cs->program == 0) {
+        GLuint default_prog = compileShaderProgram(s_shape_vs_src, s_shape_fs_src);
+        if (default_prog)
+            PLOGI << "lua:canvas compiled default_prog=" << default_prog << " for embed=" << embedID;
+        else
+            PLOGW << "lua:canvas failed to compile default shader for embed=" << embedID;
+        cs->program = default_prog;
+    }
+    GLuint default_prog = cs->program;
 
     // register GL-backed shape functions. upvalues: textureId, width, height, program, canvasState
     lua_pushinteger(L, (lua_Integer)textureId);
@@ -1071,3 +1730,4 @@ void registerLuaGLCanvasBindings(lua_State *L, const std::string &embedID, unsig
     lua_setglobal(L, "canvas");
     LuaBindingDocsUtil::enforceTableHasDocs(L, "canvas");
 }
+

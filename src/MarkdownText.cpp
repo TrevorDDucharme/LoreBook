@@ -749,57 +749,12 @@ namespace ImGui
                                 dl->AddRect(origin, br, IM_COL32(255, 0, 0, 180), 0.0f, 0, 1.0f);
                             }
 
-                            // Create or get an FBO-backed texture for this embedID and bind it
-                            struct FBOInfo { GLuint fbo = 0; GLuint tex = 0; GLuint rbo = 0; int w = 0; int h = 0; std::chrono::steady_clock::time_point lastUsed; };
-                            static std::unordered_map<std::string, FBOInfo> s_fbos;
-                            FBOInfo &fi = s_fbos[embedID];
-                            fi.lastUsed = std::chrono::steady_clock::now();
-                            if (fi.tex == 0 || fi.w != width || fi.h != height)
-                            {
-                                // create or resize
-                                if (fi.fbo) { glDeleteFramebuffers(1, &fi.fbo); fi.fbo = 0; }
-                                if (fi.tex) { glDeleteTextures(1, &fi.tex); fi.tex = 0; }
-                                if (fi.rbo) { glDeleteRenderbuffers(1, &fi.rbo); fi.rbo = 0; }
-                                fi.w = width; fi.h = height;
-                                glGenFramebuffers(1, &fi.fbo);
-                                glBindFramebuffer(GL_FRAMEBUFFER, fi.fbo);
-                                glGenTextures(1, &fi.tex);
-                                glBindTexture(GL_TEXTURE_2D, fi.tex);
-                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fi.tex, 0);
-                                glGenRenderbuffers(1, &fi.rbo);
-                                glBindRenderbuffer(GL_RENDERBUFFER, fi.rbo);
-                                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
-                                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, fi.rbo);
-                                GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-                                if (status != GL_FRAMEBUFFER_COMPLETE) {
-                                    PLOGW << "FBO incomplete for embed=" << embedID << " status=" << status;
-                                }
-                                glBindFramebuffer(GL_FRAMEBUFFER, 0);
-                            }
-
-                            // Bind FBO and set viewport so Lua GL calls render into the texture
-                            glBindFramebuffer(GL_FRAMEBUFFER, fi.fbo);
-                            glViewport(0,0,width,height);
-                            PLOGI << "md:binding FBO embed=" << embedID << " fbo=" << fi.fbo << " tex=" << fi.tex << " size=" << fi.w << "x" << fi.h;
-                            // Clear the FBO to a visible color so we can detect whether rendering wrote into it
-                            glClearColor(0.2f, 0.0f, 0.2f, 1.0f);
-                            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-                            // register GL-backed canvas helpers
-                            registerLuaGLCanvasBindings(eng->L(), embedID, fi.tex, width, height);
+                            // Render canvas frame via engine (handles FBO creation, binding, GL canvas, flush)
                             float dt = ImGui::GetIO().DeltaTime;
-                            eng->callRender(dt);
-                            // Flush any pending canvas draws into the FBO (no-op until batching implemented)
-                            flushLuaCanvasForEmbed(eng->L(), embedID);
-
-                            // Unbind FBO and restore default framebuffer
-                            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                            unsigned int texID = eng->renderCanvasFrame(embedID, width, height, dt);
 
                             // Render the resulting texture into the ImGui child region
-                            ImGui::Image((ImTextureID)(intptr_t)fi.tex, ImVec2((float)width, (float)height));
+                            ImGui::Image((ImTextureID)(intptr_t)texID, ImVec2((float)width, (float)height));
 
                             // If the script produced a runtime error during Render(), display it here
                             if (!eng->lastError().empty())
@@ -819,16 +774,7 @@ namespace ImGui
 
                             // Inspect canvas.draw_count to detect whether Render actually issued draw calls
                             {
-                                lua_State *L = eng->L();
-                                int drawCount = 0;
-                                lua_getglobal(L, "canvas");
-                                if (lua_istable(L, -1))
-                                {
-                                    lua_getfield(L, -1, "draw_count");
-                                    drawCount = (int)lua_tointeger(L, -1);
-                                    lua_pop(L, 1);
-                                }
-                                lua_pop(L, 1);
+                                int drawCount = eng->canvasDrawCount();
 
                                 // show small status in the preview and also log for tracing
                                 ImGui::TextColored(ImVec4(0.6f,1.0f,0.6f,1.0f), "Canvas draw calls: %d", drawCount);

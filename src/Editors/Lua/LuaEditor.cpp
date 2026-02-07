@@ -1083,15 +1083,14 @@ void LuaEditor::previewTick()
         double now = ImGui::GetTime();
         double dt = now - previewLastTime; if (dt < 0.0) dt = 0.016;
         previewLastTime = now;
-        // ensure bindings match latest origin/size (re-register only if changed)
         lua_State *L = previewEngine->L();
         if (!L) { stopPreview(); return; }
 
-        // Re-register canvas with current origin/size so closures capture the correct draw coordinates
-        if (previewType == PreviewType::Canvas) registerLuaCanvasBindings(L, previewOrigin, previewWidth, previewHeight);
-
         if (previewType == PreviewType::Canvas) {
-            previewEngine->callRender((float)dt);
+            // Render canvas via FBO and display the texture in ImGui
+            unsigned int texID = previewEngine->renderCanvasFrame("preview", previewWidth, previewHeight, (float)dt);
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImGui::Image((ImTextureID)(intptr_t)texID, avail);
         } else if (previewType == PreviewType::UI) {
             // For UI preview, open a local ImGui area; the UI() function will call ui.* bindings
             previewEngine->callUI();
