@@ -741,55 +741,17 @@ namespace ImGui
                             ImVec2 contentMin = ImGui::GetWindowContentRegionMin(); // relative to window
                             ImVec2 origin = ImVec2(winPos.x + contentMin.x, winPos.y + contentMin.y);
 
-                            // diagnostic overlay: draw a thin red rectangle around the canvas so we can
-                            // verify the canvas region and clipping behavior
-                            {
-                                ImVec2 br = ImVec2(origin.x + (float)width, origin.y + (float)height);
-                                ImDrawList *dl = ImGui::GetWindowDrawList();
-                                dl->AddRect(origin, br, IM_COL32(255, 0, 0, 180), 0.0f, 0, 1.0f);
-                            }
 
                             // Render canvas frame via engine (handles FBO creation, binding, GL canvas, flush)
                             float dt = ImGui::GetIO().DeltaTime;
                             unsigned int texID = eng->renderCanvasFrame(embedID, width, height, dt);
 
                             // Render the resulting texture into the ImGui child region
-                            ImGui::Image((ImTextureID)(intptr_t)texID, ImVec2((float)width, (float)height));
+                            ImVec2 avail = ImGui::GetContentRegionAvail();
+                            ImGui::Image((ImTextureID)(intptr_t)texID, avail, ImVec2(0,1), ImVec2(1,0));
 
-                            // If the script produced a runtime error during Render(), display it here
-                            if (!eng->lastError().empty())
-                            {
-                                std::string rerr = eng->lastError();
-                                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Runtime error: %s", scriptName.c_str());
-                                ImGui::TextWrapped("%s", rerr.c_str());
-                                if (ImGui::SmallButton("Copy Error")) ImGui::SetClipboardText(rerr.c_str());
-
-                                static std::unordered_set<std::string> s_logged_runtime;
-                                std::string skey_rt = scriptName + "::" + embedID + ":runtime";
-                                if (s_logged_runtime.find(skey_rt) == s_logged_runtime.end()) {
-                                    PLOGE << "md:script '" << scriptName << "' embed=" << embedID << " runtime error: " << rerr;
-                                    s_logged_runtime.insert(skey_rt);
-                                }
-                            }
-
-                            // Inspect canvas.draw_count to detect whether Render actually issued draw calls
-                            {
-                                int drawCount = eng->canvasDrawCount();
-
-                                // show small status in the preview and also log for tracing
-                                ImGui::TextColored(ImVec4(0.6f,1.0f,0.6f,1.0f), "Canvas draw calls: %d", drawCount);
-                                PLOGI << "md:script '" << scriptName << "' embed=" << embedID << " drawCalls=" << drawCount;
-
-                                if (drawCount == 0)
-                                {
-                                    ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Canvas produced no draw calls — check Render() or script");
-                                    ImGui::SameLine();
-                                    if (ImGui::SmallButton("Open in Explorer"))
-                                        RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
-                                }
-                            }
-
-                            // invisible button covering the canvas to capture all input
+                            // IMMEDIATELY place invisible button covering the canvas to capture all input
+                            // (must be placed right after Image, before any other widgets that might interfere)
                             ImGui::SetCursorScreenPos(pos);
                             ImGui::InvisibleButton("canvas_click", ImVec2((float)width, (float)height));
                             ImGuiIO &io = ImGui::GetIO();
@@ -862,6 +824,38 @@ namespace ImGui
 
                             ImGui::EndChild();
                             ImGui::PopStyleVar();
+
+                            // Diagnostic information displayed below the canvas (outside child window to avoid clipping)
+                            // Runtime error display
+                            if (!eng->lastError().empty())
+                            {
+                                std::string rerr = eng->lastError();
+                                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Runtime error: %s", scriptName.c_str());
+                                ImGui::TextWrapped("%s", rerr.c_str());
+                                if (ImGui::SmallButton("Copy Error")) ImGui::SetClipboardText(rerr.c_str());
+
+                                static std::unordered_set<std::string> s_logged_runtime;
+                                std::string skey_rt = scriptName + "::" + embedID + ":runtime";
+                                if (s_logged_runtime.find(skey_rt) == s_logged_runtime.end()) {
+                                    PLOGE << "md:script '" << scriptName << "' embed=" << embedID << " runtime error: " << rerr;
+                                    s_logged_runtime.insert(skey_rt);
+                                }
+                            }
+
+                            // Draw call count diagnostic
+                            {
+                                int drawCount = eng->canvasDrawCount();
+                                ImGui::TextColored(ImVec4(0.6f,1.0f,0.6f,1.0f), "Canvas draw calls: %d", drawCount);
+                                PLOGI << "md:script '" << scriptName << "' embed=" << embedID << " drawCalls=" << drawCount;
+
+                                if (drawCount == 0)
+                                {
+                                    ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Canvas produced no draw calls — check Render() or script");
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("Open in Explorer"))
+                                        RequestOpenResourceExplorer(std::string("vault://Scripts/") + scriptName);
+                                }
+                            }
                         }
                         else if (cfg.type == ScriptConfig::Type::UI)
                         {

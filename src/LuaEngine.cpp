@@ -37,17 +37,31 @@ void LuaEngine::captureLuaError(const char *msg)
 
 void LuaEngine::setupSandbox()
 {
-    // Remove dangerous globals: io, os, loadfile, dofile, load
-    lua_pushnil(m_L);
-    lua_setglobal(m_L, "io");
-    lua_pushnil(m_L);
-    lua_setglobal(m_L, "os");
-    lua_pushnil(m_L);
-    lua_setglobal(m_L, "loadfile");
-    lua_pushnil(m_L);
-    lua_setglobal(m_L, "dofile");
-    lua_pushnil(m_L);
-    lua_setglobal(m_L, "load");
+    // ── Remove dangerous globals that can touch the filesystem or escape sandbox ──
+    // io library — full filesystem access
+    lua_pushnil(m_L); lua_setglobal(m_L, "io");
+    // os library — will be replaced with safe subset by registerLuaFSBindings
+    lua_pushnil(m_L); lua_setglobal(m_L, "os");
+    // loadfile / dofile — load Lua from disk paths
+    lua_pushnil(m_L); lua_setglobal(m_L, "loadfile");
+    lua_pushnil(m_L); lua_setglobal(m_L, "dofile");
+    // load — will be replaced with safe string-only version by registerLuaFSBindings
+    lua_pushnil(m_L); lua_setglobal(m_L, "load");
+    // require / package — loads .lua and native .so/.dll from disk search paths
+    lua_pushnil(m_L); lua_setglobal(m_L, "require");
+    lua_pushnil(m_L); lua_setglobal(m_L, "package");
+    // debug library — can manipulate upvalues, access registry, bypass metatables
+    lua_pushnil(m_L); lua_setglobal(m_L, "debug");
+    // collectgarbage — replace with safe no-arg wrapper to prevent DoS
+    lua_pushnil(m_L); lua_setglobal(m_L, "collectgarbage");
+    // string.dump — can dump function bytecode (info leak)
+    lua_getglobal(m_L, "string");
+    if (lua_istable(m_L, -1))
+    {
+        lua_pushnil(m_L);
+        lua_setfield(m_L, -2, "dump");
+    }
+    lua_pop(m_L, 1);
 
     // Replace print with a logger function that forwards to plog and captures output
     // push 'this' as lightuserdata upvalue for the closure

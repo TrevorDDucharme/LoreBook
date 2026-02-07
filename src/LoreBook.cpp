@@ -72,14 +72,6 @@ int main(int argc, char** argv)
     plog::init(plog::verbose, &consoleAppender);
     PLOGI << "plog initialized (verbose -> stderr)";
 
-    // Run Lua binding documentation checks early so we fail fast on missing docs.
-    try {
-        RunLuaDocChecks();
-    } catch (const std::exception &e) {
-        PLOGE << "Aborting startup due to undocumented Lua bindings: " << e.what();
-        return 1;
-    }
-
     try{
         if(!OpenCLContext::get().init()){
             PLOGE << "Failed to initialize OpenCL context!";
@@ -213,6 +205,14 @@ int main(int argc, char** argv)
     else
     {
         PLOGI << "Current font family set to Roboto";
+    }
+
+    // Run Lua binding documentation checks early so we fail fast on missing docs.
+    try {
+        RunLuaDocChecks();
+    } catch (const std::exception &e) {
+        PLOGE << "Aborting startup due to undocumented Lua bindings: " << e.what();
+        return 1;
     }
 
     // Vault state

@@ -3,6 +3,7 @@
 #include "Vault.hpp"
 #include "LuaVaultBindings.hpp"
 #include "LuaImGuiBindings.hpp"
+#include "LuaFSBindings.hpp"
 #include <plog/Log.h>
 #include <chrono>
 
@@ -36,6 +37,13 @@ LuaEngine* LuaScriptManager::getOrCreateEngine(const std::string &scriptPath, co
     }
 
     auto eng = std::make_unique<LuaEngine>();
+
+    // Register bindings BEFORE loading the script, since the script's
+    // top-level code may reference vault, ui, fs, os, require, etc.
+    registerLuaVaultBindings(eng->L(), m_vault);
+    registerLuaImGuiBindings(eng->L());
+    registerLuaFSBindings(eng->L(), m_vault);
+
     if (!eng->loadScript(code))
     {
         std::string err = eng->lastError();
@@ -44,9 +52,6 @@ LuaEngine* LuaScriptManager::getOrCreateEngine(const std::string &scriptPath, co
         m_lastErrors[key] = err;
         return nullptr;
     }
-    // Register basic bindings
-    registerLuaVaultBindings(eng->L(), m_vault);
-    registerLuaImGuiBindings(eng->L());
 
     LuaEngine* ePtr = eng.get();
     m_engines[key] = EngineInstance{std::move(eng), (float)steady_clock::now().time_since_epoch().count()};

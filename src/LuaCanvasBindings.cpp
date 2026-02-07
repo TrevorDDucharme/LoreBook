@@ -1421,44 +1421,166 @@ end
     lua_pushcfunction(L, l_canvas_use_shader);
     lua_setfield(L, -2, "useShader");
     LuaBindingDocs::get().registerDoc("canvas.useShader", "useShader(prog)", "Bind a shader program for subsequent draws.", R"(
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
+shader = nil
+vbo = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0, 0, 0, 1})
+    if not shader then
+        shader = canvas.createShader(vs, fs)
+        vbo = canvas.createVertexBuffer({
+            60,40,   0.2,0.5,1,1,
+            260,40,  0.2,0.5,1,1,
+            260,200, 0.2,0.5,1,1,
+            60,40,   0.2,0.5,1,1,
+            260,200, 0.2,0.5,1,1,
+            60,200,  0.2,0.5,1,1
+        })
+    end
+    canvas.clear({0.05, 0.05, 0.05, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- useShader binds a compiled shader for subsequent draw calls
-    -- canvas.useShader(myProg)
-    canvas.rect(50, 50, 220, 140, {0.3, 0.6, 1, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
 end
 )", __FILE__);
     lua_pushcfunction(L, l_canvas_set_uniform);
     lua_setfield(L, -2, "set_uniform");
     LuaBindingDocs::get().registerDoc("canvas.set_uniform", "set_uniform(prog, name, value)", "Set a float uniform on the given program.", R"(
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+uniform float uBrightness;
+void main(){
+    out_color = v_color * uBrightness;
+}
+]]
+
+shader = nil
+vbo = nil
+totalTime = 0
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
+    totalTime = totalTime + dt
+    if not shader then
+        shader = canvas.createShader(vs, fs)
+        vbo = canvas.createVertexBuffer({
+            100,60,  1,0.8,0.2,1,
+            220,60,  1,0.8,0.2,1,
+            160,180, 1,0.8,0.2,1
+        })
+    end
     canvas.clear({0.1, 0.1, 0.1, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- canvas.set_uniform(prog, 'uTime', dt)
-    canvas.circle(160, 120, 50, {1, 0.8, 0.2, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    -- Pulse brightness between 0.3 and 1.0 using set_uniform
+    local brightness = 0.65 + 0.35 * math.sin(totalTime * 3)
+    canvas.set_uniform(shader, "uBrightness", brightness)
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 3)
 end
 )", __FILE__);
     lua_pushcfunction(L, l_canvas_set_uniform_vec2);
     lua_setfield(L, -2, "setShaderUniformVec2");
     LuaBindingDocs::get().registerDoc("canvas.setShaderUniformVec2", "setShaderUniformVec2(name, {x,y})", "Set a vec2 uniform on the currently bound shader.", R"(
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
+shader = nil
+vbo = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0.1, 0.1, 0.1, 1})
+    if not shader then
+        shader = canvas.createShader(vs, fs)
+        -- Diamond shape via 4 triangles
+        local cx, cy = 160, 120
+        local sz = 60
+        vbo = canvas.createVertexBuffer({
+            cx,cy-sz,     0.5,1,0.5,1,
+            cx+sz,cy,     0.3,0.8,0.3,1,
+            cx,cy,        0.4,0.9,0.4,1,
+            cx+sz,cy,     0.3,0.8,0.3,1,
+            cx,cy+sz,     0.5,1,0.5,1,
+            cx,cy,        0.4,0.9,0.4,1,
+            cx,cy+sz,     0.5,1,0.5,1,
+            cx-sz,cy,     0.3,0.8,0.3,1,
+            cx,cy,        0.4,0.9,0.4,1,
+            cx-sz,cy,     0.3,0.8,0.3,1,
+            cx,cy-sz,     0.5,1,0.5,1,
+            cx,cy,        0.4,0.9,0.4,1
+        })
+    end
+    canvas.clear({0.05, 0.05, 0.08, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
-    canvas.rect(20, 20, 280, 200, {0.5, 1, 0.5, 1}, false, 3)
+    canvas.useShader(shader)
+    -- setShaderUniformVec2 passes canvas size so the shader can map pixel coords to NDC
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 12)
 end
 )", __FILE__);
 
@@ -1466,8 +1588,28 @@ end
     lua_pushcfunction(L, l_canvas_create_vertex_buffer);
     lua_setfield(L, -2, "createVertexBuffer");
     LuaBindingDocs::get().registerDoc("canvas.createVertexBuffer", "createVertexBuffer(verts) -> vbo", "Create a GL VBO from a flat table of floats (x,y,r,g,b,a per vertex). Returns VBO id.", R"(
-vbo = nil
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
 shader = nil
+vbo = nil
 
 function Config()
     return { type = "canvas", width = 320, height = 240 }
@@ -1475,32 +1617,79 @@ end
 
 function Render(dt)
     if not vbo then
+        shader = canvas.createShader(vs, fs)
+        -- Two triangles forming a color-gradient rectangle
         vbo = canvas.createVertexBuffer({
-            100,80,  1,0,0,1,
-            220,80,  0,1,0,1,
-            220,180, 0,0,1,1,
-            100,80,  1,0,0,1,
-            220,180, 0,0,1,1,
-            100,180, 1,1,0,1
+            80,60,   1,0,0,1,   -- red
+            240,60,  0,1,0,1,   -- green
+            240,180, 0,0,1,1,   -- blue
+            80,60,   1,0,0,1,   -- red
+            240,180, 0,0,1,1,   -- blue
+            80,180,  1,1,0,1    -- yellow
         })
     end
     canvas.clear({0.1, 0.1, 0.1, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    canvas.rect(80, 60, 160, 120, {0.3, 0.3, 0.3, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
 end
 )", __FILE__);
     lua_pushcfunction(L, l_canvas_bind_vertex_buffer);
     lua_setfield(L, -2, "bindVertexBuffer");
     LuaBindingDocs::get().registerDoc("canvas.bindVertexBuffer", "bindVertexBuffer(vbo)", "Bind a VBO and set standard vertex attribs (vec2 pos + vec4 color, stride 6).", R"(
+local vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec4 v_color;
+uniform vec2 uSize;
+void main(){
+    v_color = in_color;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local fs = [[
+#version 330 core
+in vec4 v_color;
+out vec4 out_color;
+void main(){ out_color = v_color; }
+]]
+
+shader = nil
+vbo1 = nil
+vbo2 = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0, 0, 0, 1})
+    if not shader then
+        shader = canvas.createShader(vs, fs)
+        vbo1 = canvas.createVertexBuffer({
+            40,40,   1,0,0,1,
+            160,40,  1,0.5,0,1,
+            100,140, 1,0,0.5,1
+        })
+        vbo2 = canvas.createVertexBuffer({
+            160,100, 0,0.5,1,1,
+            280,100, 0,1,0.5,1,
+            220,200, 0.5,0,1,1
+        })
+    end
+    canvas.clear({0.08, 0.08, 0.08, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- canvas.bindVertexBuffer(myVbo) -- binds VBO and sets attrib pointers
-    canvas.circle(160, 120, 60, {0.2, 0.8, 0.4, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    -- bindVertexBuffer switches which VBO is active for drawing
+    canvas.bindVertexBuffer(vbo1)
+    canvas.drawArrays("triangles", 0, 3)
+    canvas.bindVertexBuffer(vbo2)
+    canvas.drawArrays("triangles", 0, 3)
 end
 )", __FILE__);
     lua_pushcfunction(L, l_canvas_draw_arrays);
@@ -1558,29 +1747,133 @@ end
     lua_pushcfunction(L, l_canvas_create_texture);
     lua_setfield(L, -2, "create_texture");
     LuaBindingDocs::get().registerDoc("canvas.create_texture", "create_texture(bytes, w, h) -> tex", "Create an RGBA texture from raw bytes.", R"(
+local tex_vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec2 v_uv;
+uniform vec2 uSize;
+void main(){
+    v_uv = in_color.xy;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local tex_fs = [[
+#version 330 core
+in vec2 v_uv;
+out vec4 out_color;
+uniform sampler2D uTex;
+void main(){ out_color = texture(uTex, v_uv); }
+]]
+
+shader = nil
+vbo = nil
+tex = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0.15, 0.15, 0.15, 1})
+    if not tex then
+        -- Build a 4x4 checkerboard RGBA texture
+        local w, h = 4, 4
+        local bytes = {}
+        for y = 0, h-1 do
+            for x = 0, w-1 do
+                if (x + y) % 2 == 0 then
+                    bytes[#bytes+1] = string.char(255,100,50,255)
+                else
+                    bytes[#bytes+1] = string.char(50,100,255,255)
+                end
+            end
+        end
+        tex = canvas.create_texture(table.concat(bytes), w, h)
+        shader = canvas.createShader(tex_vs, tex_fs)
+        -- Quad using UV in color channels
+        vbo = canvas.createVertexBuffer({
+            60,40,   0,0,0,0,
+            260,40,  1,0,0,0,
+            260,200, 1,1,0,0,
+            60,40,   0,0,0,0,
+            260,200, 1,1,0,0,
+            60,200,  0,1,0,0
+        })
+    end
+    canvas.clear({0.1, 0.1, 0.1, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- local tex = canvas.create_texture(raw_rgba_bytes, 64, 64)
-    canvas.rect(20, 20, 280, 200, {0.4, 0.4, 0.6, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    canvas.bind_texture(0, tex)
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
 end
 )", __FILE__);
     lua_pushcfunction(L, l_canvas_bind_texture);
     lua_setfield(L, -2, "bind_texture");
     LuaBindingDocs::get().registerDoc("canvas.bind_texture", "bind_texture(unit, tex)", "Bind texture to texture unit.", R"(
+local tex_vs = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec4 in_color;
+out vec2 v_uv;
+uniform vec2 uSize;
+void main(){
+    v_uv = in_color.xy;
+    vec2 p = in_pos / uSize * 2.0 - 1.0;
+    gl_Position = vec4(p, 0, 1);
+}
+]]
+
+local tex_fs = [[
+#version 330 core
+in vec2 v_uv;
+out vec4 out_color;
+uniform sampler2D uTex;
+void main(){ out_color = texture(uTex, v_uv); }
+]]
+
+shader = nil
+vbo = nil
+tex = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0.1, 0.1, 0.1, 1})
+    if not tex then
+        -- 8x8 gradient texture
+        local w, h = 8, 8
+        local bytes = {}
+        for y = 0, h-1 do
+            for x = 0, w-1 do
+                local r = math.floor(x / (w-1) * 255)
+                local g = math.floor(y / (h-1) * 255)
+                bytes[#bytes+1] = string.char(r, g, 128, 255)
+            end
+        end
+        tex = canvas.create_texture(table.concat(bytes), w, h)
+        shader = canvas.createShader(tex_vs, tex_fs)
+        vbo = canvas.createVertexBuffer({
+            80,50,   0,0,0,0,
+            240,50,  1,0,0,0,
+            240,190, 1,1,0,0,
+            80,50,   0,0,0,0,
+            240,190, 1,1,0,0,
+            80,190,  0,1,0,0
+        })
+    end
+    canvas.clear({0.08, 0.08, 0.08, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- canvas.bind_texture(0, myTexture)
-    canvas.rect(40, 40, 240, 160, {0.6, 0.3, 0.8, 1}, true)
+    canvas.useShader(shader)
+    canvas.setShaderUniformVec2("uSize", {canvas.width, canvas.height})
+    -- bind_texture attaches a texture to the given texture unit
+    canvas.bind_texture(0, tex)
+    canvas.bindVertexBuffer(vbo)
+    canvas.drawArrays("triangles", 0, 6)
 end
 )", __FILE__);
 
@@ -1588,15 +1881,54 @@ end
     lua_pushcfunction(L, l_canvas_draw_fullscreen);
     lua_setfield(L, -2, "draw_fullscreen");
     LuaBindingDocs::get().registerDoc("canvas.draw_fullscreen", "draw_fullscreen(tex, shader)", "Draw a fullscreen textured quad (optionally supplying a shader).", R"(
+local fs_shader_src = [[
+#version 330 core
+in vec2 v_uv;
+out vec4 out_color;
+uniform sampler2D uTex;
+void main(){
+    vec4 c = texture(uTex, v_uv);
+    out_color = vec4(c.rgb * 1.2, 1.0);
+}
+]]
+
+local fs_vs_src = [[
+#version 330 core
+layout(location=0) in vec2 in_pos;
+layout(location=1) in vec2 in_uv;
+out vec2 v_uv;
+void main(){
+    v_uv = in_uv;
+    gl_Position = vec4(in_pos, 0, 1);
+}
+]]
+
+tex = nil
+shader = nil
+
 function Config()
     return { type = "canvas", width = 320, height = 240 }
 end
 
 function Render(dt)
-    canvas.clear({0.1, 0.1, 0.15, 1})
+    if not tex then
+        -- Build a small colored gradient texture
+        local w, h = 8, 8
+        local bytes = {}
+        for y = 0, h-1 do
+            for x = 0, w-1 do
+                local r = math.floor(x / (w-1) * 200 + 55)
+                local b = math.floor(y / (h-1) * 200 + 55)
+                bytes[#bytes+1] = string.char(r, 80, b, 255)
+            end
+        end
+        tex = canvas.create_texture(table.concat(bytes), w, h)
+        shader = canvas.createShader(fs_vs_src, fs_shader_src)
+    end
+    canvas.clear({0, 0, 0, 1})
     canvas.viewport(0, 0, canvas.width, canvas.height)
-    -- canvas.draw_fullscreen(myTexture, myShader)
-    canvas.rect(0, 0, canvas.width, canvas.height, {0.2, 0.2, 0.3, 1}, true)
+    -- draw_fullscreen renders a fullscreen quad with the texture and optional shader
+    canvas.draw_fullscreen(tex, shader)
 end
 )", __FILE__);
 

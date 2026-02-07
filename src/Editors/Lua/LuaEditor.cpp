@@ -13,6 +13,7 @@
 #include <LuaEngine.hpp>
 #include <LuaVaultBindings.hpp>
 #include <LuaImGuiBindings.hpp>
+#include <LuaFSBindings.hpp>
 #include <FileBackends/VaultFileBackend.hpp>
 #include <LuaCanvasBindings.hpp>
 #include <LuaBindingDocs.hpp>
@@ -776,17 +777,12 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
     if (!t->liveEngine || t->editorState.isDirty)
     {
         t->liveEngine = std::make_unique<LuaEngine>();
-        if (!t->liveEngine->loadScript(src))
-        {
-            std::string err = t->liveEngine->lastError();
-            return std::string("(load error) ") + err;
-        }
-        // Register helpful bindings for console evaluation
+        // Register bindings BEFORE loading the script, since top-level code may reference os, vault, etc.
         lua_State *L = t->liveEngine->L();
+        Vault *fsVault = nullptr;
         if (L)
         {
             registerLuaImGuiBindings(L);
-            // If file backend is a vault backend, register vault bindings so scripts can access vault
             if (fileBackend)
             {
                 auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
@@ -794,9 +790,18 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
                 {
                     auto vaultPtr = vb->getVault();
                     if (vaultPtr)
+                    {
                         registerLuaVaultBindings(L, vaultPtr.get());
+                        fsVault = vaultPtr.get();
+                    }
                 }
             }
+            registerLuaFSBindings(L, fsVault);
+        }
+        if (!t->liveEngine->loadScript(src))
+        {
+            std::string err = t->liveEngine->lastError();
+            return std::string("(load error) ") + err;
         }
     }
 
@@ -904,13 +909,18 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
         registerLuaCanvasBindings(L, ImVec2(0,0), 320, 240);
 
         // If file backend is a VaultFileBackend, also register vault bindings so examples can access vault (and possibly modify it)
+        Vault *fsVault2 = nullptr;
         if (fileBackend) {
             auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
             if (vb) {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+                if (vaultPtr) {
+                    registerLuaVaultBindings(L, vaultPtr.get());
+                    fsVault2 = vaultPtr.get();
+                }
             }
         }
+        registerLuaFSBindings(L, fsVault2);
 
         // Snapshot ImGui state so we can restore on errors (save CurrentWindow only)
         ImGuiErrorRecoveryState errState;
@@ -1002,13 +1012,18 @@ ScriptConfig LuaEditor::detectSnippetConfig(const std::string &code)
         if (!L) return out;
         registerLuaCanvasBindings(L, ImVec2(0,0), 320, 240);
         registerLuaImGuiBindings(L);
+        Vault *cfgVault = nullptr;
         if (fileBackend) {
             auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
             if (vb) {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+                if (vaultPtr) {
+                    registerLuaVaultBindings(L, vaultPtr.get());
+                    cfgVault = vaultPtr.get();
+                }
             }
         }
+        registerLuaFSBindings(L, cfgVault);
         if (!eng.loadScript(code)) return out;
         out = eng.callConfig();
         return out;
@@ -1029,13 +1044,18 @@ bool LuaEditor::startPreview(const std::string &code, ImVec2 origin, int width, 
         // Register bindings (initially with provided dims)
         registerLuaCanvasBindings(L, origin, width, height);
         registerLuaImGuiBindings(L);
+        Vault *pvVault = nullptr;
         if (fileBackend) {
             auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
             if (vb) {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+                if (vaultPtr) {
+                    registerLuaVaultBindings(L, vaultPtr.get());
+                    pvVault = vaultPtr.get();
+                }
             }
         }
+        registerLuaFSBindings(L, pvVault);
 
         if (!previewEngine->loadScript(code)) {
             previewOutput = previewEngine->lastError();
@@ -1120,13 +1140,18 @@ std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin,
         registerLuaCanvasBindings(L, origin, width, height);
         registerLuaImGuiBindings(L);
 
+        Vault *snippetVault = nullptr;
         if (fileBackend) {
             auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
             if (vb) {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+                if (vaultPtr) {
+                    registerLuaVaultBindings(L, vaultPtr.get());
+                    snippetVault = vaultPtr.get();
+                }
             }
         }
+        registerLuaFSBindings(L, snippetVault);
 
         // Setup ImGui error-recovery state (so we can recover on errors) and temporarily disable asserts/tooltips
         ImGuiErrorRecoveryState errState;
@@ -1491,6 +1516,7 @@ void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool 
             registerLuaCanvasBindings(L, ImVec2(0,0), 300, 200);
 
             // If the file backend is a VaultFileBackend, register vault bindings too
+            Vault *acVault = nullptr;
             if (fileBackend)
             {
                 auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
@@ -1498,9 +1524,13 @@ void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool 
                 {
                     auto vaultPtr = vb->getVault();
                     if (vaultPtr)
+                    {
                         registerLuaVaultBindings(L, vaultPtr.get());
+                        acVault = vaultPtr.get();
+                    }
                 }
             }
+            registerLuaFSBindings(L, acVault);
 
             // If this is a qualified access (e.g. `canvas.draw` where objectName == "canvas" and prefix == "draw"),
             // enumerate members of that table instead of top-level globals.
@@ -1817,7 +1847,15 @@ void LuaEditor::drawClassInvestigator()
                                     auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
                                     if (vb) {
                                         auto vaultPtr = vb->getVault();
-                                        if (vaultPtr) registerLuaVaultBindings(pvL, vaultPtr.get());
+                                        if (vaultPtr) {
+                                            registerLuaVaultBindings(pvL, vaultPtr.get());
+                                            // Also register FS bindings if not already present
+                                            lua_getglobal(pvL, "fs");
+                                            bool hasFsGlobal = !lua_isnil(pvL, -1);
+                                            lua_pop(pvL, 1);
+                                            if (!hasFsGlobal)
+                                                registerLuaFSBindings(pvL, vaultPtr.get());
+                                        }
                                     }
                                 }
                             }
