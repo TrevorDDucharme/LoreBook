@@ -373,6 +373,8 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("Character Editor", dock_main_id);
             ImGui::DockBuilderDockWindow("Script Editor", dock_main_id);
             ImGui::DockBuilderDockWindow("Resource Explorer", dock_main_id);
+            ImGui::DockBuilderDockWindow("API Docs", dock_main_id);
+            
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
         }
@@ -463,6 +465,7 @@ int main(int argc, char** argv)
         }
 
         // Create Vault modal (moved out of menu to avoid menu/pop-up parenting issues)
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Create Vault", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Choose directory and filename for the new vault");
             ImGui::Separator();
@@ -524,6 +527,7 @@ int main(int argc, char** argv)
         }
 
         // Open Vault modal
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Open Vault", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Choose directory and filename for the vault to open");
             ImGui::Separator();
@@ -651,6 +655,7 @@ int main(int argc, char** argv)
             remoteTestStatusBuf[0] = '\0';
             remoteTestOk = false;
         }
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Open Remote Vault", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Connect to a remote MySQL vault");
             ImGui::Separator();
@@ -714,6 +719,7 @@ int main(int argc, char** argv)
 
         // Upload / Sync to Remote modal
         if(vault && showSyncModal){ ImGui::OpenPopup("Upload / Sync to Remote"); showSyncModal = false; }
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Upload / Sync to Remote", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Upload or synchronize local vault to a remote MySQL vault");
             ImGui::Separator();
@@ -963,6 +969,7 @@ int main(int argc, char** argv)
 
         // Auth modals: Create Admin (required when no users) and Login (block until authenticated)
         if (showCreateAdminModal && vault) { ImGui::OpenPopup("Create Admin"); showCreateAdminModal = false; }
+        CenterNextPopupOnMainViewport();
         if (ImGui::BeginPopupModal("Create Admin", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
             ImGui::Text("Create the vault administrator (required)");
             ImGui::Separator();
@@ -1038,6 +1045,7 @@ int main(int argc, char** argv)
             ImGui::SetNextWindowSize(ImVec2(700,520), ImGuiCond_FirstUseEver);
             settingsModalInit = false;
         }
+        CenterNextPopupOnMainViewport();
         if(ImGui::BeginPopupModal("Settings", nullptr, 0)){
             if(ImGui::BeginTabBar("SettingsTabs")){
                 if(ImGui::BeginTabItem("User Settings")){
@@ -1188,6 +1196,7 @@ int main(int argc, char** argv)
             ImGui::Separator();
 
             // Reset Password modal (admin triggers)
+            CenterNextPopupOnMainViewport();
             if(ImGui::BeginPopupModal("Reset Password", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
                 ImGui::Text("Set a new password for this user");
                 ImGui::Separator();
@@ -1209,6 +1218,7 @@ int main(int argc, char** argv)
             }
 
             // Delete User confirmation
+            CenterNextPopupOnMainViewport();
             if(ImGui::BeginPopupModal("Delete User", nullptr, ImGuiWindowFlags_AlwaysAutoResize)){
                 ImGui::Text("Delete this user? This will remove the user and their permissions."); ImGui::Separator();
                 if(ImGui::Button("Delete")){

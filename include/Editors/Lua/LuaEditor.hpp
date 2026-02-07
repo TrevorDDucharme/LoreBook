@@ -201,7 +201,6 @@ namespace Lua
         // Preview helper state (used for canvas/ui preview area in the docs viewer)
         std::string previewCode;                // editable snippet for preview
         std::string previewOutput;              // output or error from last preview run
-        bool previewLive = false;               // if true, re-run on change (manual Run Preview recommended)
         bool previewRunConfirmOpen = false;     // confirmation modal for preview
         bool previewExecuteRequested = false;   // set when the user requested a preview run
 

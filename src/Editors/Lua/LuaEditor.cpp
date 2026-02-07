@@ -804,6 +804,18 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
     lua_State *L = eng ? eng->L() : nullptr;
     if (!L) return std::string("(no lua state)");
 
+    // Ensure vault bindings are present in the live engine if a vault is available
+    lua_getglobal(L, "vault");
+    bool hasVaultGlobal = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    if (!hasVaultGlobal && fileBackend) {
+        auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+        if (vb) {
+            auto vaultPtr = vb->getVault();
+            if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+        }
+    }
+
     // Try to evaluate as expression: 'return <code>' first
     std::string expr = std::string("return ") + code;
     lua_settop(L, 0);
@@ -1567,6 +1579,9 @@ void LuaEditor::drawClassInvestigator()
     static std::string lastExampleOutput;
 
     ImGui::SetNextWindowSize(ImVec2(620, 480), ImGuiCond_Appearing);
+    // Force the API Docs to appear in the main document dock by default and use the main viewport
+    ImGui::SetNextWindowDockID(ImGui::GetID("MyDockSpace"), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGuiWindowFlags flags = ImGuiWindowFlags_None; // Allow docking by default
     if (!ImGui::Begin("API Docs", &showDocViewer, flags)) { ImGui::End(); return; }
 
@@ -1670,13 +1685,40 @@ void LuaEditor::drawClassInvestigator()
             ImGui::TextDisabled("Example (editable):");
             // Prefill previewCode when selection changes
             static int prevSelected = -2; // impossible initial value
-            if (selected != prevSelected) { previewCode = e.example; previewOutput.clear(); prevSelected = selected; }
+            if (selected != prevSelected) {
+                // Stop any running preview when switching examples/docs to avoid stale previews
+                if (previewRunning) stopPreview();
+                previewExecuteRequested = false;
+                previewCode = e.example;
+                previewOutput.clear();
+                lastExampleOutput.clear();
+                prevSelected = selected;
+            }
+            // When the user edits the example we may need to re-run Config() detection
+            bool detectionDirty = false;
 
             ImGui::BeginChild("ExampleEdit", ImVec2(0, 120), true);
             ImGui::PushItemWidth(-1);
-            ImGui::InputTextMultiline("##PreviewCode", &previewCode, ImVec2(-1, -1));
+            bool edited = ImGui::InputTextMultiline("##PreviewCode", &previewCode, ImVec2(-1, -1));
             ImGui::PopItemWidth();
             ImGui::EndChild();
+
+            // Live-update behavior: when the example is edited, update previews.
+            if (edited)
+            {
+                // If a persistent preview is running, restart it with the new code so changes appear immediately.
+                if (previewRunning)
+                {
+                    startPreview(previewCode, previewOrigin, previewWidth, previewHeight);
+                }
+                else
+                {
+                    // Request a one-shot preview run for the edited code (will be executed when the preview area is rendered).
+                    previewExecuteRequested = true;
+                }
+                // Mark detection dirty so we re-run Config() detection below (statics declared later)
+                detectionDirty = true;
+            }
 
             ImGui::BeginGroup();
             if (ImGui::Button("Copy Example")) ImGui::SetClipboardText(previewCode.c_str());
@@ -1688,7 +1730,7 @@ void LuaEditor::drawClassInvestigator()
             static int _lastDetectSel = -1;
             static ScriptConfig _cachedCfg;
             bool hasConfig = false;
-            if (selected != _lastDetectSel) { _cachedCfg = detectSnippetConfig(previewCode); _lastDetectSel = selected; }
+            if (selected != _lastDetectSel || detectionDirty) { _cachedCfg = detectSnippetConfig(previewCode); _lastDetectSel = selected; }
             if (_cachedCfg.type != ScriptConfig::Type::None) hasConfig = true;
 
             if (hasConfig)
@@ -1702,7 +1744,6 @@ void LuaEditor::drawClassInvestigator()
                 {
                     if (ImGui::Button("Stop Preview")) { stopPreview(); }
                 }
-                ImGui::SameLine(); ImGui::Checkbox("Live Preview", &previewLive);
             }
             else
             {
@@ -1712,6 +1753,13 @@ void LuaEditor::drawClassInvestigator()
             ImGui::EndGroup();
 
             // Run Example confirmation modal (full app run)
+            // Ensure this important confirmation is centered on the main viewport
+            {
+                ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+                ImVec2 center = main_viewport->GetCenter();
+                ImGui::SetNextWindowViewport(main_viewport->ID);
+                ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            }
             if (ImGui::BeginPopupModal("Run Example Confirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
             {
                 ImGui::TextWrapped("Warning: Running examples may modify your vault or other application state (e.g., via `vault.*` bindings). Only run examples from trusted sources. Continue?");
@@ -1723,6 +1771,13 @@ void LuaEditor::drawClassInvestigator()
             }
 
             // Preview confirmation modal (local preview run inside child)
+            // Ensure this confirmation is centered on the main viewport as well
+            {
+                ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+                ImVec2 center = main_viewport->GetCenter();
+                ImGui::SetNextWindowViewport(main_viewport->ID);
+                ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            }
             if (ImGui::BeginPopupModal("Run Preview Confirmation", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
             {
                 ImGui::TextWrapped("Preview runs code inside a local preview area and may still execute bindings that modify state (e.g., `vault.*`). Only run previews for trusted snippets. Continue?");
@@ -1740,37 +1795,68 @@ void LuaEditor::drawClassInvestigator()
                 ImGui::EndPopup();
             }
 
-                    // Preview area for canvas/ui modules
-            auto pos = ImGui::GetCursorScreenPos();
-            ImGui::Separator();
-            ImGui::TextDisabled("Preview:");
-            ImGui::BeginChild("PreviewArea", ImVec2(360, 240), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NavFlattened);
-            ImVec2 childOrigin = ImGui::GetCursorScreenPos();
-            ImVec2 childSize = ImGui::GetContentRegionAvail();
+                    // Preview area for canvas/ui modules (only for examples that provide a Config())
+                    if (hasConfig)
+                    {
+                        auto pos = ImGui::GetCursorScreenPos();
+                        ImGui::Separator();
+                        ImGui::TextDisabled("Preview:");
+                        ImGui::BeginChild("PreviewArea", ImVec2(360, 240), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NavFlattened);
+                        ImVec2 childOrigin = ImGui::GetCursorScreenPos();
+                        ImVec2 childSize = ImGui::GetContentRegionAvail();
 
-            // If a persistent preview is running we need to tick it each frame so Render/UI is invoked
-            if (previewRunning && previewEngine)
-            {
-                // Update preview origin/size in case the child moved
-                previewOrigin = childOrigin;
-                previewWidth = (int)childSize.x;
-                previewHeight = (int)childSize.y;
-                previewTick();
-            }
+                        // If a persistent preview is running we need to tick it each frame so Render/UI is invoked
+                        if (previewRunning && previewEngine)
+                        {
+                            // Ensure preview engine has vault bindings if a vault was opened after the preview started
+                            lua_State *pvL = previewEngine->L();
+                            if (pvL) {
+                                lua_getglobal(pvL, "vault");
+                                bool pvHasVault = !lua_isnil(pvL, -1);
+                                lua_pop(pvL, 1);
+                                if (!pvHasVault && fileBackend) {
+                                    auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
+                                    if (vb) {
+                                        auto vaultPtr = vb->getVault();
+                                        if (vaultPtr) registerLuaVaultBindings(pvL, vaultPtr.get());
+                                    }
+                                }
+                            }
+                            // Update preview origin/size in case the child moved
+                            previewOrigin = childOrigin;
+                            previewWidth = (int)childSize.x;
+                            previewHeight = (int)childSize.y;
+                            previewTick();
+                        }
 
-            // Execute a one-shot preview run if requested (for non-persistent examples or one-off preview)
-            if (previewExecuteRequested && !previewRunning)
-            {
-                previewOutput = runPreviewSnippet(previewCode, childOrigin, (int)childSize.x, (int)childSize.y);
-                previewExecuteRequested = false; // reset
-            }
+                        // Execute a one-shot preview run if requested (for non-persistent examples or one-off preview)
+                        if (previewExecuteRequested && !previewRunning)
+                        {
+                            previewOutput = runPreviewSnippet(previewCode, childOrigin, (int)childSize.x, (int)childSize.y);
+                            previewExecuteRequested = false; // reset
+                        }
 
-            ImGui::EndChild();
+                        ImGui::EndChild();
 
-            if (!previewOutput.empty()) {
-                ImGui::Separator(); ImGui::TextDisabled("Preview Output:");
-                ImGui::BeginChild("PreviewOutput", ImVec2(0, 80), true);
-                ImGui::TextWrapped("%s", previewOutput.c_str());
+                        if (!previewOutput.empty()) {
+                            ImGui::Separator(); ImGui::TextDisabled("Preview Output:");
+                            ImGui::BeginChild("PreviewOutput", ImVec2(0, 80), true);
+                            ImGui::TextWrapped("%s", previewOutput.c_str());
+                            ImGui::EndChild();
+                        }
+                    }
+                    else
+                    {
+                        // For non-UI examples we don't show a preview area; clear previewOutput and any pending preview request
+                        previewOutput.clear();
+                        previewExecuteRequested = false;
+                    }
+
+            // If a non-UI / non-persistent example was run, show its stdout/returned output here
+            if (!lastExampleOutput.empty()) {
+                ImGui::Separator(); ImGui::TextDisabled("Example Output:");
+                ImGui::BeginChild("ExampleOutput", ImVec2(0, 80), true);
+                ImGui::TextWrapped("%s", lastExampleOutput.c_str());
                 ImGui::EndChild();
             }
         }

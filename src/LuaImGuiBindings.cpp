@@ -28,8 +28,29 @@ void registerLuaImGuiBindings(lua_State *L)
     lua_pushcfunction(L, l_ui_button); lua_setfield(L, -2, "button");
 
     // Documentation entries for ui bindings
-    LuaBindingDocs::get().registerDoc("ui.text", "text(s)", "Render a line of text in the UI", "-- Render a label and a button\nui.text('Hello from UI docs')\nif ui.button('Press me') then print('button pressed') end", __FILE__);
-    LuaBindingDocs::get().registerDoc("ui.button", "button(label) -> bool", "Render a button and return true if clicked", "-- Simple button example\nif ui.button('Click me') then print('clicked') end", __FILE__);
+        LuaBindingDocs::get().registerDoc("ui.text", "text(s)", "Render a line of text in the UI", R"(
+function Config()
+    return { type = "ui" }
+end
+
+function UI()
+    ui.text('Hello from UI docs')
+    if ui.button('Press me') then
+        print('button pressed')
+    end
+end
+)", __FILE__);
+        LuaBindingDocs::get().registerDoc("ui.button", "button(label) -> bool", "Render a button and return true if clicked", R"(
+function Config()
+    return { type = "ui" }
+end
+
+function UI()
+    if ui.button('Click me') then
+        print('clicked')
+    end
+end
+)", __FILE__);
 
     lua_setglobal(L, "ui");
 
