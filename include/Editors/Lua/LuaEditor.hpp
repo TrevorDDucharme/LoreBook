@@ -51,6 +51,21 @@ namespace Lua
         } type;
     };
 
+    // Extra cursor for multi-cursor editing (Ctrl+Alt+Click / Ctrl+Alt+Up/Down)
+    struct ExtraCursor
+    {
+        size_t line = 0;
+        size_t column = 0;
+    };
+
+    // Undo/Redo snapshot
+    struct UndoEntry
+    {
+        std::vector<std::string> lines;
+        size_t cursorLine = 0;
+        size_t cursorColumn = 0;
+    };
+
     struct EditorTab
     {
         std::filesystem::path filePath;
@@ -89,6 +104,16 @@ namespace Lua
         std::vector<CompletionItem> completionItems;
         bool showCompletions = false;
         int selectedCompletion = 0;
+        size_t completionOriginLine = 0;   // cursor line when completions were opened
+        size_t completionOriginColumn = 0; // cursor column when completions were opened
+
+        // Multi-cursor state
+        std::vector<ExtraCursor> extraCursors;
+
+        // Undo/redo state
+        std::vector<UndoEntry> undoStack;
+        std::vector<UndoEntry> redoStack;
+        static constexpr size_t maxUndoHistory = 200;
 
         // Live console state
         std::string liveConsoleInput;
@@ -139,6 +164,7 @@ namespace Lua
         void deleteSelection();
         void moveCursor(int deltaLine, int deltaColumn);
         void handleKeyboardInput();
+        void pushUndo(); // snapshot current state onto undo stack
         void updateCompletions();
         void updateFontMetrics();                                // Update character width and line height based on current font
         void updateLiveProgramStructure();                       // Update program structure with live content

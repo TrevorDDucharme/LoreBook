@@ -191,13 +191,29 @@ ImVec2 LuaEditor::drawEditor()
             }
         }
 
-        editorState.cursorLine = std::max(0, std::min(line, static_cast<int>(editorState.lines.size()) - 1));
-        editorState.cursorColumn = std::max(0, std::min(col, static_cast<int>(editorState.lines[editorState.cursorLine].length())));
-        editorState.hasSelection = false;
-        editorState.selectionStartLine = editorState.cursorLine;
-        editorState.selectionStartColumn = editorState.cursorColumn;
-        editorState.selectionEndLine = editorState.cursorLine;
-        editorState.selectionEndColumn = editorState.cursorColumn;
+        int clampedLine = std::max(0, std::min(line, static_cast<int>(editorState.lines.size()) - 1));
+        int clampedCol = std::max(0, std::min(col, static_cast<int>(editorState.lines[clampedLine].length())));
+
+        // Ctrl+Alt+Click: add an extra cursor instead of replacing the main one
+        ImGuiIO &clickIo = ImGui::GetIO();
+        if (clickIo.KeyCtrl && clickIo.KeyAlt)
+        {
+            ExtraCursor ec;
+            ec.line = static_cast<size_t>(clampedLine);
+            ec.column = static_cast<size_t>(clampedCol);
+            extraCursors.push_back(ec);
+        }
+        else
+        {
+            extraCursors.clear();
+            editorState.cursorLine = clampedLine;
+            editorState.cursorColumn = clampedCol;
+            editorState.hasSelection = false;
+            editorState.selectionStartLine = editorState.cursorLine;
+            editorState.selectionStartColumn = editorState.cursorColumn;
+            editorState.selectionEndLine = editorState.cursorLine;
+            editorState.selectionEndColumn = editorState.cursorColumn;
+        }
         editorState.needsScrollToCursor = true;
         editorState.hasFocus = true;
     }
@@ -500,8 +516,17 @@ void LuaEditor::deleteSelection()
 
     size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
     size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-    size_t endCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionEndColumn : editorState.selectionStartColumn;
+    size_t startCol, endCol;
+    if (startLine == endLine)
+    {
+        startCol = std::min(editorState.selectionStartColumn, editorState.selectionEndColumn);
+        endCol = std::max(editorState.selectionStartColumn, editorState.selectionEndColumn);
+    }
+    else
+    {
+        startCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionStartColumn : editorState.selectionEndColumn;
+        endCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionEndColumn : editorState.selectionStartColumn;
+    }
 
     if (startLine == endLine)
     {
@@ -537,13 +562,127 @@ void LuaEditor::moveCursor(int deltaLine, int deltaColumn)
     syncEditorToActiveTab();
 }
 
+void LuaEditor::pushUndo()
+{
+    UndoEntry entry;
+    entry.lines = editorState.lines;
+    entry.cursorLine = editorState.cursorLine;
+    entry.cursorColumn = editorState.cursorColumn;
+    undoStack.push_back(std::move(entry));
+    if (undoStack.size() > maxUndoHistory)
+        undoStack.erase(undoStack.begin());
+    redoStack.clear(); // new edit invalidates redo history
+}
+
 void LuaEditor::handleKeyboardInput()
 {
     ImGuiIO &io = ImGui::GetIO();
     if (!editorState.hasFocus) return;
 
+    // Capture keyboard so Tab/arrow keys don't navigate ImGui widgets
+    io.WantCaptureKeyboard = true;
+    io.WantTextInput = true;
+
+    // --- Clipboard shortcuts: Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A ---
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
+    {
+        // Select all
+        editorState.selectionStartLine = 0;
+        editorState.selectionStartColumn = 0;
+        editorState.selectionEndLine = editorState.lines.size() - 1;
+        editorState.selectionEndColumn = editorState.lines.back().length();
+        editorState.cursorLine = editorState.selectionEndLine;
+        editorState.cursorColumn = editorState.selectionEndColumn;
+        editorState.hasSelection = true;
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
+    {
+        // Copy selection to clipboard
+        if (editorState.hasSelection)
+        {
+            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionStartColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionEndColumn;
+            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionEndColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionStartColumn;
+            std::string selected;
+            if (sL == eL)
+            {
+                selected = editorState.lines[sL].substr(sC, eC - sC);
+            }
+            else
+            {
+                selected = editorState.lines[sL].substr(sC) + "\n";
+                for (size_t l = sL + 1; l < eL; ++l)
+                    selected += editorState.lines[l] + "\n";
+                selected += editorState.lines[eL].substr(0, eC);
+            }
+            ImGui::SetClipboardText(selected.c_str());
+        }
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
+    {
+        // Cut selection to clipboard (copy then delete)
+        if (editorState.hasSelection)
+        {
+            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
+            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionStartColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionEndColumn;
+            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
+                            ? editorState.selectionEndColumn
+                        : (editorState.selectionStartLine == editorState.selectionEndLine)
+                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
+                            : editorState.selectionStartColumn;
+            std::string selected;
+            if (sL == eL)
+            {
+                selected = editorState.lines[sL].substr(sC, eC - sC);
+            }
+            else
+            {
+                selected = editorState.lines[sL].substr(sC) + "\n";
+                for (size_t l = sL + 1; l < eL; ++l)
+                    selected += editorState.lines[l] + "\n";
+                selected += editorState.lines[eL].substr(0, eC);
+            }
+            ImGui::SetClipboardText(selected.c_str());
+            pushUndo();
+            deleteSelection();
+        }
+        return;
+    }
+
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
+    {
+        // Paste from clipboard
+        const char *clip = ImGui::GetClipboardText();
+        if (clip && clip[0] != '\0')
+        {
+            pushUndo();
+            if (editorState.hasSelection) deleteSelection();
+            insertTextAtCursor(std::string(clip));
+        }
+        return;
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Enter))
     {
+        pushUndo();
         if (showCompletions) showCompletions = false;
         if (editorState.hasSelection) deleteSelection();
         if (editorState.cursorLine >= editorState.lines.size()) editorState.lines.resize(editorState.cursorLine + 1);
@@ -563,6 +702,26 @@ void LuaEditor::handleKeyboardInput()
 
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace))
     {
+        pushUndo();
+        // Multi-cursor backspace: process extra cursors bottom-to-top
+        if (!extraCursors.empty())
+        {
+            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
+                return a.line > b.line || (a.line == b.line && a.column > b.column);
+            });
+            for (auto &ec : extraCursors)
+            {
+                if (ec.column > 0 && ec.line < editorState.lines.size())
+                {
+                    editorState.lines[ec.line].erase(ec.column - 1, 1);
+                    ec.column--;
+                    // Adjust main cursor if on same line and after this position
+                    if (ec.line == editorState.cursorLine && editorState.cursorColumn > ec.column)
+                        editorState.cursorColumn--;
+                }
+            }
+            editorState.isDirty = true;
+        }
         if (editorState.hasSelection) { deleteSelection(); }
         else if (editorState.cursorColumn > 0)
         {
@@ -575,12 +734,34 @@ void LuaEditor::handleKeyboardInput()
             editorState.lines[editorState.cursorLine - 1] += editorState.lines[editorState.cursorLine];
             editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine);
             editorState.cursorLine--; editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure(); scrollToCursorIfNeeded();
+            // Adjust extra cursor line indices after line removal
+            for (auto &ec : extraCursors)
+                if (ec.line > editorState.cursorLine) ec.line--;
         }
         if (showCompletions) { updateCompletions(); if (completionItems.empty()) showCompletions = false; }
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Delete))
     {
+        pushUndo();
+        // Multi-cursor delete: process extra cursors bottom-to-top
+        if (!extraCursors.empty())
+        {
+            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
+                return a.line > b.line || (a.line == b.line && a.column > b.column);
+            });
+            for (auto &ec : extraCursors)
+            {
+                if (ec.line < editorState.lines.size() && ec.column < editorState.lines[ec.line].length())
+                {
+                    editorState.lines[ec.line].erase(ec.column, 1);
+                    // Adjust main cursor if on same line and after this position
+                    if (ec.line == editorState.cursorLine && editorState.cursorColumn > ec.column)
+                        editorState.cursorColumn--;
+                }
+            }
+            editorState.isDirty = true;
+        }
         if (editorState.hasSelection) deleteSelection();
         else if (editorState.cursorLine < editorState.lines.size())
         {
@@ -594,30 +775,275 @@ void LuaEditor::handleKeyboardInput()
                 editorState.lines[editorState.cursorLine] += editorState.lines[editorState.cursorLine + 1];
                 editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine + 1);
                 editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure();
+                for (auto &ec : extraCursors)
+                    if (ec.line > editorState.cursorLine) ec.line--;
             }
         }
     }
 
-    // Arrows
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) { if (editorState.cursorColumn > 0) editorState.cursorColumn--; else if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = editorState.lines[editorState.cursorLine].length(); } editorState.hasSelection = false; if (showCompletions) showCompletions = false; }
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) { if (editorState.cursorLine < editorState.lines.size() && editorState.cursorColumn < editorState.lines[editorState.cursorLine].length()) editorState.cursorColumn++; else if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = 0; } editorState.hasSelection = false; if (showCompletions) showCompletions = false; }
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) { if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); } editorState.hasSelection = false; if (showCompletions) showCompletions = false; }
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) { if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); } editorState.hasSelection = false; if (showCompletions) showCompletions = false; }
+    // Escape clears extra cursors
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !extraCursors.empty())
+    {
+        extraCursors.clear();
+    }
+
+    // Ctrl+Alt+Up/Down: add extra cursor on adjacent line
+    if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+    {
+        // Add a cursor one line above the topmost cursor
+        size_t topLine = editorState.cursorLine;
+        for (const auto &ec : extraCursors)
+            if (ec.line < topLine) topLine = ec.line;
+        if (topLine > 0)
+        {
+            ExtraCursor ec;
+            ec.line = topLine - 1;
+            ec.column = std::min(editorState.cursorColumn, editorState.lines[ec.line].length());
+            extraCursors.push_back(ec);
+        }
+        return;
+    }
+    if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+    {
+        // Add a cursor one line below the bottommost cursor
+        size_t botLine = editorState.cursorLine;
+        for (const auto &ec : extraCursors)
+            if (ec.line > botLine) botLine = ec.line;
+        if (botLine + 1 < editorState.lines.size())
+        {
+            ExtraCursor ec;
+            ec.line = botLine + 1;
+            ec.column = std::min(editorState.cursorColumn, editorState.lines[ec.line].length());
+            extraCursors.push_back(ec);
+        }
+        return;
+    }
+
+    // When completion popup is open, Ctrl+Up/Down navigate the popup selection
+    if (showCompletions && io.KeyCtrl)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+        {
+            if (selectedCompletion > 0) selectedCompletion--;
+            return;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+        {
+            if (selectedCompletion < (int)completionItems.size() - 1) selectedCompletion++;
+            return;
+        }
+    }
+
+    // Arrows (always move the cursor; Shift extends selection)
+    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
+    {
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            if (editorState.cursorColumn > 0) editorState.cursorColumn--;
+            else if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = editorState.lines[editorState.cursorLine].length(); }
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            if (editorState.cursorColumn > 0) editorState.cursorColumn--;
+            else if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = editorState.lines[editorState.cursorLine].length(); }
+            editorState.hasSelection = false;
+        }
+        // Move extra cursors left too
+        for (auto &ec : extraCursors)
+        {
+            if (ec.column > 0) ec.column--;
+            else if (ec.line > 0) { ec.line--; ec.column = editorState.lines[ec.line].length(); }
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
+    {
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            if (editorState.cursorLine < editorState.lines.size() && editorState.cursorColumn < editorState.lines[editorState.cursorLine].length()) editorState.cursorColumn++;
+            else if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = 0; }
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            if (editorState.cursorLine < editorState.lines.size() && editorState.cursorColumn < editorState.lines[editorState.cursorLine].length()) editorState.cursorColumn++;
+            else if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = 0; }
+            editorState.hasSelection = false;
+        }
+        for (auto &ec : extraCursors)
+        {
+            if (ec.line < editorState.lines.size() && ec.column < editorState.lines[ec.line].length()) ec.column++;
+            else if (ec.line < editorState.lines.size()-1) { ec.line++; ec.column = 0; }
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
+    {
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
+            editorState.hasSelection = false;
+        }
+        for (auto &ec : extraCursors)
+        {
+            if (ec.line > 0) { ec.line--; ec.column = std::min(ec.column, editorState.lines[ec.line].length()); }
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
+    {
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
+            editorState.hasSelection = false;
+        }
+        for (auto &ec : extraCursors)
+        {
+            if (ec.line < editorState.lines.size()-1) { ec.line++; ec.column = std::min(ec.column, editorState.lines[ec.line].length()); }
+        }
+    }
+
+    // Close completion popup if cursor moved away from where it was triggered
+    if (showCompletions && editorState.cursorLine != completionOriginLine)
+    {
+        showCompletions = false;
+        completionItems.clear();
+    }
+
+    // Home key: move to start of line (Shift+Home extends selection)
+    if (ImGui::IsKeyPressed(ImGuiKey_Home))
+    {
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            editorState.cursorColumn = 0;
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            editorState.cursorColumn = 0;
+            editorState.hasSelection = false;
+        }
+        for (auto &ec : extraCursors) ec.column = 0;
+        editorState.needsScrollToCursor = true;
+    }
+
+    // End key: move to end of line (Shift+End extends selection)
+    if (ImGui::IsKeyPressed(ImGuiKey_End))
+    {
+        size_t lineLen = editorState.cursorLine < editorState.lines.size() ? editorState.lines[editorState.cursorLine].length() : 0;
+        if (io.KeyShift)
+        {
+            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
+            editorState.cursorColumn = lineLen;
+            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
+        }
+        else
+        {
+            editorState.cursorColumn = lineLen;
+            editorState.hasSelection = false;
+        }
+        for (auto &ec : extraCursors)
+            ec.column = ec.line < editorState.lines.size() ? editorState.lines[ec.line].length() : 0;
+        editorState.needsScrollToCursor = true;
+    }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !showCompletions)
     {
+        pushUndo();
         if (editorState.hasSelection) deleteSelection();
+        // Insert at extra cursors first (process bottom-to-top to keep line numbers valid)
+        std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
+            return a.line > b.line || (a.line == b.line && a.column > b.column);
+        });
+        for (auto &ec : extraCursors)
+        {
+            if (ec.line < editorState.lines.size())
+            {
+                editorState.lines[ec.line].insert(ec.column, "    ");
+                ec.column += 4;
+            }
+        }
         insertTextAtCursor("    ");
+        // Consume the event so ImGui doesn't move focus to another widget
+        io.InputQueueCharacters.clear();
         return;
     }
 
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveEditorToFile();
 
+    // Undo: Ctrl+Z
+    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z))
+    {
+        if (!undoStack.empty())
+        {
+            // Push current state to redo
+            UndoEntry redo;
+            redo.lines = editorState.lines;
+            redo.cursorLine = editorState.cursorLine;
+            redo.cursorColumn = editorState.cursorColumn;
+            redoStack.push_back(std::move(redo));
+
+            // Pop undo
+            const UndoEntry &u = undoStack.back();
+            editorState.lines = u.lines;
+            editorState.cursorLine = u.cursorLine;
+            editorState.cursorColumn = u.cursorColumn;
+            undoStack.pop_back();
+            editorState.hasSelection = false;
+            editorState.isDirty = true;
+            extraCursors.clear();
+            syncEditorToActiveTab();
+            updateSyntaxErrors();
+        }
+        return;
+    }
+
+    // Redo: Ctrl+Y or Ctrl+Shift+Z
+    if ((io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) ||
+        (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))
+    {
+        if (!redoStack.empty())
+        {
+            // Push current state to undo
+            UndoEntry u;
+            u.lines = editorState.lines;
+            u.cursorLine = editorState.cursorLine;
+            u.cursorColumn = editorState.cursorColumn;
+            undoStack.push_back(std::move(u));
+
+            // Pop redo
+            const UndoEntry &r = redoStack.back();
+            editorState.lines = r.lines;
+            editorState.cursorLine = r.cursorLine;
+            editorState.cursorColumn = r.cursorColumn;
+            redoStack.pop_back();
+            editorState.hasSelection = false;
+            editorState.isDirty = true;
+            extraCursors.clear();
+            syncEditorToActiveTab();
+            updateSyntaxErrors();
+        }
+        return;
+    }
+
     if (showCompletions)
     {
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab))
+        if (ImGui::IsKeyPressed(ImGuiKey_Tab) || ImGui::IsKeyPressed(ImGuiKey_Enter))
         {
-            if (selectedCompletion < completionItems.size())
+            if (selectedCompletion < (int)completionItems.size())
             {
                 const std::string &line = editorState.lines[editorState.cursorLine];
                 size_t wordStart = editorState.cursorColumn;
@@ -629,9 +1055,14 @@ void LuaEditor::handleKeyboardInput()
                 editorState.isDirty = true; updateLiveProgramStructure();
             }
             showCompletions = false;
+            io.InputQueueCharacters.clear();
+            return; // consume: don't also insert a newline/tab
         }
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) showCompletions = false;
     }
+
+    // Snapshot undo once before processing typed characters
+    if (io.InputQueueCharacters.Size > 0) pushUndo();
 
     for (int i = 0; i < io.InputQueueCharacters.Size; ++i)
     {
@@ -642,6 +1073,30 @@ void LuaEditor::handleKeyboardInput()
             std::string s(1, static_cast<char>(c));
             bool shouldAutoPair = false; std::string closing;
             switch (c) { case '(' : shouldAutoPair=true; closing=")"; break; case '{': shouldAutoPair=true; closing="}"; break; case '[': shouldAutoPair=true; closing="]"; break; case '"': shouldAutoPair=true; closing="\""; break; case '\'': shouldAutoPair=true; closing="'"; break; }
+
+            // Insert at extra cursors (process bottom-to-top to keep positions valid)
+            // Sort extra cursors bottom-to-top for safe insertion
+            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
+                return a.line > b.line || (a.line == b.line && a.column > b.column);
+            });
+            for (auto &ec : extraCursors)
+            {
+                if (ec.line < editorState.lines.size())
+                {
+                    std::string &eline = editorState.lines[ec.line];
+                    if (shouldAutoPair)
+                    {
+                        eline.insert(ec.column, s + closing);
+                        ec.column += 1; // place cursor between pair
+                    }
+                    else
+                    {
+                        eline.insert(ec.column, s);
+                        ec.column += 1;
+                    }
+                }
+            }
+
             if (shouldAutoPair)
             {
                 if (editorState.hasSelection) deleteSelection();
@@ -672,6 +1127,11 @@ void LuaEditor::updateCompletions()
     else { size_t wordStart = editorState.cursorColumn; while (wordStart>0 && (std::isalnum(line[wordStart-1])||line[wordStart-1]=='_')) wordStart--; if (wordStart==editorState.cursorColumn) return; prefix = line.substr(wordStart, editorState.cursorColumn-wordStart); }
     generateContextAwareCompletions(prefix, qualified, objectName);
     showCompletions = !completionItems.empty(); selectedCompletion = 0;
+    if (showCompletions)
+    {
+        completionOriginLine = editorState.cursorLine;
+        completionOriginColumn = editorState.cursorColumn;
+    }
 }
 
 void LuaEditor::updateSyntaxErrors()
@@ -1348,6 +1808,23 @@ void LuaEditor::drawCursor(ImDrawList *drawList, const ImVec2 &origin)
 {
     ImVec2 p = getCursorScreenPos(origin);
     drawList->AddLine(p, ImVec2(p.x, p.y + lineHeight), cursorColor, 2.0f);
+
+    // Draw extra cursors
+    ImFont *font = ImGui::GetFont();
+    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
+    for (const auto &ec : extraCursors)
+    {
+        float x = origin.x;
+        if (ec.line < editorState.lines.size() && font)
+        {
+            const std::string &ln = editorState.lines[ec.line];
+            size_t col = std::min(ec.column, ln.length());
+            if (col > 0)
+                x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, ln.substr(0, col).c_str()).x;
+        }
+        float y = origin.y + ec.line * lineHeight - editorState.scrollY + baselineOffset;
+        drawList->AddLine(ImVec2(x, y), ImVec2(x, y + lineHeight), cursorColor, 2.0f);
+    }
 }
 
 void LuaEditor::drawSelection(ImDrawList *drawList, const ImVec2 &origin)
@@ -1355,8 +1832,17 @@ void LuaEditor::drawSelection(ImDrawList *drawList, const ImVec2 &origin)
     if (!editorState.hasSelection) return;
     size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
     size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-    size_t endCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionEndColumn : editorState.selectionStartColumn;
+    size_t startCol, endCol;
+    if (startLine == endLine)
+    {
+        startCol = std::min(editorState.selectionStartColumn, editorState.selectionEndColumn);
+        endCol = std::max(editorState.selectionStartColumn, editorState.selectionEndColumn);
+    }
+    else
+    {
+        startCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionStartColumn : editorState.selectionEndColumn;
+        endCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionEndColumn : editorState.selectionStartColumn;
+    }
     ImFont *font = ImGui::GetFont();
     float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
     for (size_t ln = startLine; ln <= endLine; ++ln)
@@ -1390,7 +1876,7 @@ void LuaEditor::drawSyntaxErrors(ImDrawList *drawList, const ImVec2 &origin)
 
 void LuaEditor::drawCompletionPopup(const ImVec2 &textOrigin)
 {
-    if (completionItems.empty()) return;
+    if (!showCompletions || completionItems.empty()) return;
     ImVec2 cursor = getCursorScreenPos(textOrigin);
     ImVec2 pos = ImVec2(cursor.x, cursor.y + lineHeight);
     ImGui::SetNextWindowPos(pos); ImGui::SetNextWindowSize(ImVec2(300, std::min(200.0f, completionItems.size()*20.0f)));
