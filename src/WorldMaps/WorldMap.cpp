@@ -128,7 +128,7 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
         if (io.MouseWheel != 0.0f)
         {
             float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f / 1.1f);
-            mapZoom = std::clamp(mapZoom * factor, 1.0f, 128.0f);
+            mapZoom = std::clamp(mapZoom * factor, 1.0f, 100000.0f);
         }
     }
 
@@ -258,7 +258,8 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
     ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", mapCenterLon, mapCenterLat, mapZoom);
     ImGui::SameLine();
     ImGui::PushItemWidth(110);
-    ImGui::DragFloat("##MercatorZoom", &mapZoom, 0.1f, 1.0f, 128.0f, "Zoom: %.2f");
+    float mercDragSpeed = std::max(0.1f, mapZoom * 0.01f);
+    ImGui::DragFloat("##MercatorZoom", &mapZoom, mercDragSpeed, 1.0f, 100000.0f, "Zoom: %.2f");
     ImGui::PopItemWidth();
     ImGui::SameLine();
     if (ImGui::Button("Reset Camera"))
@@ -320,7 +321,7 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     float globeZoomFactor = 1.12f;     // per wheel tick
     // Allow camera to enter the sphere by permitting negative zoomLevel (distance from surface).
     // Keep a safe minimum to avoid the camera reaching the origin.
-    float globeMinZoom = -0.95f;
+    float globeMinZoom = -0.99f;
     float globeMaxZoom = 64.0f;
     GLuint globeTexture = 0;
 
@@ -391,7 +392,7 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     }
     if (globeMinZoomMap.find(id) == globeMinZoomMap.end())
     {
-        globeMinZoomMap[id] = -0.95f; // allow entering the sphere, but not reaching center
+        globeMinZoomMap[id] = -0.99f; // allow entering the sphere, but not reaching center
     }
     else
     {

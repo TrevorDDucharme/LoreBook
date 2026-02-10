@@ -49,17 +49,35 @@ public:
     }
 
     /// Overload for the globe view where zoomLevel is sphere distance
-    /// (smaller = closer).  Convert to an effective Mercator-like zoom.
+    /// from the surface (smaller = closer, negative = inside sphere).
+    /// Convert to an effective Mercator-like zoom based on the actual
+    /// visible angular extent on the sphere surface.
     static int computeDepthForGlobeZoom(float sphereZoom, float fovDeg,
                                         int screenPixels,
                                         int chunkRes = CHUNK_BASE_RES) {
-        // Approximate: at sphereZoom = 3.0 camera is ~3 radii from surface,
-        // seeing roughly the whole hemisphere.  Effective "zoom" increases as
-        // sphereZoom decreases.  Use a simple inverse relationship.
-        float effectiveZoom = 1.0f / std::max(sphereZoom + 1.0f, 0.1f) * 4.0f;
-        // Scale by FOV (narrower FOV = more zoom)
-        float fovScale = 45.0f / std::max(fovDeg, 10.0f);
-        effectiveZoom *= fovScale;
+        // Camera distance from sphere center (radius = 1).
+        // sphereZoom is surface distance, so center distance = 1 + sphereZoom.
+        float dist = 1.0f + std::max(sphereZoom, -0.99f);
+        dist = std::max(dist, 0.01f); // safety floor
+
+        // Horizon half-angle: how much of the sphere the camera can see.
+        // At dist=4 (far): acos(0.25) ≈ 75° — nearly a hemisphere.
+        // At dist=1.1 (close): acos(0.91) ≈ 24° — small patch.
+        // At dist=1.01 (very close): acos(0.99) ≈ 8° — tiny patch.
+        float horizonAngle = std::acos(std::min(1.0f, 1.0f / dist));
+
+        // FOV half-angle in radians.
+        float fovHalfRad = std::max(fovDeg, 10.0f) * 0.5f
+                           * static_cast<float>(M_PI) / 180.0f;
+
+        // The viewport shows whichever is smaller: the horizon cap or the FOV.
+        // When far, FOV limits the view; when close, the horizon shrinks below FOV.
+        float visibleHalf = std::min(horizonAngle, fovHalfRad);
+        visibleHalf = std::max(visibleHalf, 0.001f); // avoid division by zero
+
+        // Effective Mercator zoom: full world (π radians half) ÷ visible half.
+        float effectiveZoom = static_cast<float>(M_PI) / visibleHalf;
+
         return computeDepthForZoom(effectiveZoom, screenPixels, chunkRes);
     }
 

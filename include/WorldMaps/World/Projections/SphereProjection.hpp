@@ -16,7 +16,7 @@ public:
     // the surface in sphere radii (camPos = target * (1.0f + zoomLevel)). Values below -0.95 are clamped
     // to avoid placing the camera at or near the sphere center.
     void setViewCenterRadians(float lonRad, float latRad) { centerLon = lonRad; centerLat = latRad; }
-    void setZoomLevel(float z) { const float MIN_Z = -0.95f; zoomLevel = (z < MIN_Z) ? MIN_Z : z; }
+    void setZoomLevel(float z) { const float MIN_Z = -0.99f; zoomLevel = (z < MIN_Z) ? MIN_Z : z; }
     void setFov(float f) { fovY = f; }
     //caller must cleanup texture when done
     void project(World &world, int width, int height, GLuint& texture, std::string layerName="") override
