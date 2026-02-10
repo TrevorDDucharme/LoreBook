@@ -1284,10 +1284,11 @@ int main(int argc, char** argv)
         // Render Lua API docs window if requested
         Lua::LuaEditor::get().renderApiDocsIfOpen();
         if(worldMapOpen){
-            worldMap(worldMapOpen);
+            worldMap(worldMapOpen, vault ? vault.get() : nullptr);
         }
 
         // Floor Plan Editor
+        floorPlanEditor.setVault(vault ? vault.get() : nullptr);
         floorPlanEditor.render();
 
         // Character Editor - connect managers when vault is available and logged in

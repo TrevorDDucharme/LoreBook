@@ -3,6 +3,10 @@
 #include <imgui.h>
 #include <string>
 #include <functional>
+#include <vector>
+#include <cstdint>
+
+class Vault;
 
 // ============================================================
 // Tool types for floor plan editing
@@ -41,6 +45,9 @@ public:
     // Set the building to edit
     void setBuilding(Building* building);
     Building* getBuilding() { return m_building; }
+    
+    // Vault access (for saving/loading templates)
+    void setVault(Vault* vault) { m_vault = vault; }
     
     // Window visibility
     bool isOpen() const { return m_isOpen; }
@@ -135,6 +142,7 @@ private:
     
     // State
     Building* m_building = nullptr;
+    Vault* m_vault = nullptr;
     bool m_isOpen = false;
     FloorPlanTool m_currentTool = FloorPlanTool::Select;
     
@@ -163,6 +171,14 @@ private:
     
     // Temp building for when none is set
     Building m_tempBuilding;
+    
+    // Template save/load UI state
+    bool m_showSaveTemplateModal = false;
+    bool m_showLoadTemplateModal = false;
+    char m_templateName[128] = "";
+    char m_templateCategory[64] = "";
+    char m_templateTags[256] = "";
+    std::string m_templateStatusMsg;
     
     // Constants
     static constexpr float MIN_ZOOM = 5.0f;

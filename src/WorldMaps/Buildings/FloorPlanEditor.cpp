@@ -1,4 +1,6 @@
 #include <WorldMaps/Buildings/FloorPlanEditor.hpp>
+#include <WorldMaps/Buildings/FloorPlan.hpp>
+#include <Vault.hpp>
 #include <imgui_internal.h>
 #include <algorithm>
 #include <cmath>
@@ -97,6 +99,23 @@ void FloorPlanEditor::render()
                     }
                 }
                 ImGui::Separator();
+                if (ImGui::MenuItem("Save Floor as Template...", nullptr, false, m_vault != nullptr)) {
+                    if (Floor* f = bldg->getCurrentFloor()) {
+                        m_showSaveTemplateModal = true;
+                        // Pre-fill name from building name if available
+                        std::string defaultName = bldg->getName();
+                        if (defaultName.empty()) defaultName = "Untitled";
+                        snprintf(m_templateName, sizeof(m_templateName), "%s", defaultName.c_str());
+                        m_templateCategory[0] = '\0';
+                        m_templateTags[0] = '\0';
+                        m_templateStatusMsg.clear();
+                    }
+                }
+                if (ImGui::MenuItem("Load Template...", nullptr, false, m_vault != nullptr)) {
+                    m_showLoadTemplateModal = true;
+                    m_templateStatusMsg.clear();
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Reset View")) {
                     resetView();
                 }
@@ -136,6 +155,144 @@ void FloorPlanEditor::render()
         ImGui::BeginChild("Properties", ImVec2(propertiesWidth, 0), true);
         renderPropertiesPanel();
         ImGui::EndChild();
+        
+        // ------ Save Template Modal ------
+        if (m_showSaveTemplateModal) {
+            ImGui::OpenPopup("Save Floor as Template");
+            m_showSaveTemplateModal = false;
+        }
+        if (ImGui::BeginPopupModal("Save Floor as Template", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::InputText("Name", m_templateName, sizeof(m_templateName));
+            ImGui::InputText("Category", m_templateCategory, sizeof(m_templateCategory));
+            ImGui::InputText("Tags", m_templateTags, sizeof(m_templateTags));
+            ImGui::TextDisabled("(Tags: comma-separated, e.g. \"tavern, medieval, large\")");
+            
+            if (!m_templateStatusMsg.empty()) {
+                bool isError = m_templateStatusMsg.find("Failed") != std::string::npos 
+                            || m_templateStatusMsg.find("Error") != std::string::npos
+                            || m_templateStatusMsg.find("No ") != std::string::npos;
+                ImVec4 color = isError ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) : ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+                ImGui::TextColored(color, "%s", m_templateStatusMsg.c_str());
+            }
+            
+            ImGui::Spacing();
+            if (ImGui::Button("Save", ImVec2(120, 0))) {
+                if (!m_vault) {
+                    m_templateStatusMsg = "No vault connected.";
+                } else if (strlen(m_templateName) == 0) {
+                    m_templateStatusMsg = "No name specified.";
+                } else {
+                    Floor* f = bldg->getCurrentFloor();
+                    if (!f) {
+                        m_templateStatusMsg = "No floor selected.";
+                    } else {
+                        std::string json = FloorPlanJSON::serialize(f->plan);
+                        int64_t id = m_vault->saveFloorPlanTemplate(
+                            m_templateName, m_templateCategory, json, m_templateTags);
+                        if (id > 0) {
+                            m_templateStatusMsg = "Saved as template #" + std::to_string(id);
+                        } else {
+                            m_templateStatusMsg = "Failed to save (DB error, check log). JSON size=" + std::to_string(json.size());
+                        }
+                    }
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Close", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        
+        // ------ Load Template Modal ------
+        if (m_showLoadTemplateModal) {
+            ImGui::OpenPopup("Load Template");
+            m_showLoadTemplateModal = false;
+        }
+        if (ImGui::BeginPopupModal("Load Template", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static std::vector<FloorPlanTemplateInfo> templates;
+            static bool needsRefresh = true;
+            static char filterCategory[64] = "";
+            
+            if (needsRefresh && m_vault) {
+                templates = m_vault->listFloorPlanTemplates(filterCategory);
+                needsRefresh = false;
+            }
+            
+            ImGui::InputText("Filter Category", filterCategory, sizeof(filterCategory));
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh")) {
+                needsRefresh = true;
+            }
+            
+            if (!m_templateStatusMsg.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.2f, 1.0f), "%s", m_templateStatusMsg.c_str());
+            }
+            
+            ImGui::Separator();
+            ImGui::BeginChild("TemplateList", ImVec2(400, 300), true);
+            for (auto& t : templates) {
+                ImGui::PushID(static_cast<int>(t.id));
+                bool selected = false;
+                std::string label = t.name;
+                if (!t.category.empty()) label += "  [" + t.category + "]";
+                if (!t.tags.empty()) label += "  (" + t.tags + ")";
+                
+                if (ImGui::Selectable(label.c_str(), &selected, ImGuiSelectableFlags_AllowDoubleClick)) {
+                    if (ImGui::IsMouseDoubleClicked(0)) {
+                        // Load on double-click
+                        if (m_vault) {
+                            std::string json = m_vault->loadFloorPlanTemplate(t.id);
+                            if (!json.empty()) {
+                                Floor* f = bldg->getCurrentFloor();
+                                if (f) {
+                                    f->plan = FloorPlanJSON::deserialize(json);
+                                    clearSelection();
+                                    m_templateStatusMsg = "Loaded: " + t.name;
+                                }
+                            } else {
+                                m_templateStatusMsg = "Failed to load template.";
+                            }
+                        }
+                    }
+                }
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - 50);
+                if (ImGui::SmallButton("Load")) {
+                    if (m_vault) {
+                        std::string json = m_vault->loadFloorPlanTemplate(t.id);
+                        if (!json.empty()) {
+                            Floor* f = bldg->getCurrentFloor();
+                            if (f) {
+                                f->plan = FloorPlanJSON::deserialize(json);
+                                clearSelection();
+                                m_templateStatusMsg = "Loaded: " + t.name;
+                            }
+                        } else {
+                            m_templateStatusMsg = "Failed to load template.";
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Del")) {
+                    if (m_vault && m_vault->deleteFloorPlanTemplate(t.id)) {
+                        needsRefresh = true;
+                        m_templateStatusMsg = "Deleted: " + t.name;
+                    }
+                }
+                ImGui::PopID();
+            }
+            if (templates.empty()) {
+                ImGui::TextDisabled("No templates found.");
+            }
+            ImGui::EndChild();
+            
+            ImGui::Spacing();
+            if (ImGui::Button("Close", ImVec2(120, 0))) {
+                needsRefresh = true;  // refresh next time we open
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
     }
     ImGui::End();
 }

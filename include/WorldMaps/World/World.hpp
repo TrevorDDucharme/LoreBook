@@ -11,9 +11,12 @@
 #include <WorldMaps/Map/RiverLayer.hpp>
 #include <WorldMaps/Map/LatitudeLayer.hpp>
 #include <WorldMaps/Map/TectonicsLayer.hpp>
+#include <WorldMaps/Map/BuildingLayer.hpp>
 #include <memory>
 #include <stack>
 #include <stringUtils.hpp>
+
+class Vault;
 // #include <WorldMaps/World/Chunk.hpp>
 
 class World
@@ -93,6 +96,10 @@ public:
     int getWorldLatitudeResolution() const { return worldLatitudeResolution; }
     int getWorldLongitudeResolution() const { return worldLongitudeResolution; }
 
+    // Vault access — lets layers (e.g. BuildingLayer) load data from the DB
+    void setVault(Vault* v) { m_vault = v; }
+    Vault* getVault() const { return m_vault; }
+
 
     //Biome(count:2,colors:[{0,0,255},{0,255,0}]),Water(Level:1.3),Humidity,Temperature
     void parseConfig(const std::string &config)
@@ -146,6 +153,12 @@ public:
                 layer->parseParameters(layerParams);
                 addLayer(layerName, std::move(layer));
             }
+            else if (layerName == "buildings")
+            {
+                auto layer = std::make_unique<BuildingLayer>();
+                layer->parseParameters(layerParams);
+                addLayer(layerName, std::move(layer));
+            }
             // Add more layers as needed
         }     
     }
@@ -153,6 +166,7 @@ private:
 
     int worldLatitudeResolution=4096;
     int worldLongitudeResolution=4096;
+    Vault* m_vault = nullptr;
 
     std::unordered_map<std::string, std::unique_ptr<MapLayer>> layers;
     //    std::unordered_map<std::pair<int,int>, Chunk> chunks;

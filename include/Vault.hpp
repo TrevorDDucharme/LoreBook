@@ -7140,11 +7140,47 @@ inline std::vector<std::pair<int64_t, std::string>> Vault::getAllItemsForUser(in
 inline int64_t Vault::saveFloorPlanTemplate(const std::string& name, const std::string& category, 
                                             const std::string& templateJSON, const std::string& tags)
 {
-    if (!dbConnection) return -1;
+    if (dbBackend && dbBackend->isOpen())
+    {
+        // Ensure table exists on remote backend
+        std::string err;
+        dbBackend->execute("CREATE TABLE IF NOT EXISTS FloorPlanTemplates ("
+            "ID BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "Name TEXT NOT NULL, "
+            "Category TEXT, "
+            "TemplateJSON MEDIUMTEXT NOT NULL, "
+            "ThumbnailData LONGBLOB, "
+            "Tags TEXT, "
+            "CreatedAt BIGINT DEFAULT (UNIX_TIMESTAMP())"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;", &err);
+        auto stmt = dbBackend->prepare("INSERT INTO FloorPlanTemplates (Name, Category, TemplateJSON, Tags) VALUES (?, ?, ?, ?);", &err);
+        if (!stmt) { PLOGW << "saveFloorPlanTemplate prepare failed: " << err; return -1; }
+        stmt->bindString(1, name);
+        stmt->bindString(2, category);
+        stmt->bindString(3, templateJSON);
+        stmt->bindString(4, tags);
+        if (!stmt->execute()) { PLOGW << "saveFloorPlanTemplate execute failed"; return -1; }
+        return dbBackend->lastInsertId();
+    }
+
+    if (!dbConnection) { PLOGW << "saveFloorPlanTemplate: no dbConnection"; return -1; }
+    
+    // Ensure table exists (safety net for vaults created before this table was added)
+    const char* createSQL = "CREATE TABLE IF NOT EXISTS FloorPlanTemplates ("
+        "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "Name TEXT NOT NULL, "
+        "Category TEXT, "
+        "TemplateJSON TEXT NOT NULL, "
+        "ThumbnailData BLOB, "
+        "Tags TEXT, "
+        "CreatedAt INTEGER DEFAULT (strftime('%s','now'))"
+        ");";
+    sqlite3_exec(dbConnection, createSQL, nullptr, nullptr, nullptr);
     
     const char* sql = "INSERT INTO FloorPlanTemplates (Name, Category, TemplateJSON, Tags) VALUES (?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        PLOGW << "saveFloorPlanTemplate prepare failed: " << sqlite3_errmsg(dbConnection);
         return -1;
     }
     
@@ -7156,13 +7192,38 @@ inline int64_t Vault::saveFloorPlanTemplate(const std::string& name, const std::
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     
-    if (rc != SQLITE_DONE) return -1;
+    if (rc != SQLITE_DONE) {
+        PLOGW << "saveFloorPlanTemplate step failed: " << sqlite3_errmsg(dbConnection);
+        return -1;
+    }
     return sqlite3_last_insert_rowid(dbConnection);
 }
 
 inline std::vector<FloorPlanTemplateInfo> Vault::listFloorPlanTemplates(const std::string& category)
 {
     std::vector<FloorPlanTemplateInfo> result;
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string err;
+        std::string sql = category.empty()
+            ? "SELECT ID, Name, Category, Tags, CreatedAt FROM FloorPlanTemplates ORDER BY Name;"
+            : "SELECT ID, Name, Category, Tags, CreatedAt FROM FloorPlanTemplates WHERE Category = ? ORDER BY Name;";
+        auto stmt = dbBackend->prepare(sql, &err);
+        if (!stmt) return result;
+        if (!category.empty()) stmt->bindString(1, category);
+        auto rs = stmt->executeQuery();
+        while (rs && rs->next()) {
+            FloorPlanTemplateInfo info;
+            info.id = rs->getInt64(0);
+            info.name = rs->getString(1);
+            info.category = rs->getString(2);
+            info.tags = rs->getString(3);
+            info.createdAt = rs->getInt64(4);
+            result.push_back(info);
+        }
+        return result;
+    }
+
     if (!dbConnection) return result;
     
     std::string sql;
@@ -7200,6 +7261,17 @@ inline std::vector<FloorPlanTemplateInfo> Vault::listFloorPlanTemplates(const st
 
 inline std::string Vault::loadFloorPlanTemplate(int64_t templateID)
 {
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string err;
+        auto stmt = dbBackend->prepare("SELECT TemplateJSON FROM FloorPlanTemplates WHERE ID = ?;", &err);
+        if (!stmt) return "";
+        stmt->bindInt(1, templateID);
+        auto rs = stmt->executeQuery();
+        if (rs && rs->next()) return rs->getString(0);
+        return "";
+    }
+
     if (!dbConnection) return "";
     
     const char* sql = "SELECT TemplateJSON FROM FloorPlanTemplates WHERE ID = ?;";
@@ -7222,6 +7294,15 @@ inline std::string Vault::loadFloorPlanTemplate(int64_t templateID)
 
 inline bool Vault::deleteFloorPlanTemplate(int64_t templateID)
 {
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string err;
+        auto stmt = dbBackend->prepare("DELETE FROM FloorPlanTemplates WHERE ID = ?;", &err);
+        if (!stmt) return false;
+        stmt->bindInt(1, templateID);
+        return stmt->execute();
+    }
+
     if (!dbConnection) return false;
     
     const char* sql = "DELETE FROM FloorPlanTemplates WHERE ID = ?;";
@@ -7240,6 +7321,18 @@ inline bool Vault::deleteFloorPlanTemplate(int64_t templateID)
 inline bool Vault::updateFloorPlanTemplate(int64_t templateID, const std::string& name, 
                                            const std::string& category, const std::string& tags)
 {
+    if (dbBackend && dbBackend->isOpen())
+    {
+        std::string err;
+        auto stmt = dbBackend->prepare("UPDATE FloorPlanTemplates SET Name = ?, Category = ?, Tags = ? WHERE ID = ?;", &err);
+        if (!stmt) return false;
+        stmt->bindString(1, name);
+        stmt->bindString(2, category);
+        stmt->bindString(3, tags);
+        stmt->bindInt(4, templateID);
+        return stmt->execute();
+    }
+
     if (!dbConnection) return false;
     
     const char* sql = "UPDATE FloorPlanTemplates SET Name = ?, Category = ?, Tags = ? WHERE ID = ?;";

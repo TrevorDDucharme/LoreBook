@@ -452,7 +452,7 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     ImGui::PopItemWidth();
 }
 
-void worldMap(bool& m_isOpen)
+void worldMap(bool& m_isOpen, Vault* vault)
 {
     // Worldmap window
     if (ImGui::Begin("World Map", &m_isOpen, ImGuiWindowFlags_MenuBar))
@@ -470,8 +470,11 @@ void worldMap(bool& m_isOpen)
             world.addLayer("watertable", std::make_unique<WaterTableLayer>());
             world.addLayer("rivers", std::make_unique<RiverLayer>());
             world.addLayer("tectonics", std::make_unique<TectonicsLayer>());
+            world.addLayer("buildings", std::make_unique<BuildingLayer>());
             worldInitialized = true;
         }
+        // Keep vault pointer up to date (may change between frames)
+        world.setVault(vault);
         static ImVec2 texSize(512, 512);
         
 
