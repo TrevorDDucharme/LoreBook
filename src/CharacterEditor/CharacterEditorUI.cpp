@@ -3079,11 +3079,13 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                                 PLOGI << "Added attached part to render list (" 
                                       << attachedModel.meshGPUData.size() << " meshes)";
                                 
-                                // Update posed skeleton to use combined skeleton
+                                // Log combined skeleton info (don't overwrite m_posedSkeleton —
+                                // the base model must keep using its own skeleton for correct skinning.
+                                // Attached parts use combined skeleton via separate render path.)
                                 if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
-                                    m_posedSkeleton = m_partLibrary->getCombinedSkeleton().skeleton;
-                                    PLOGI << "Updated posed skeleton with combined skeleton (" 
-                                          << m_posedSkeleton.bones.size() << " bones)";
+                                    PLOGI << "Combined skeleton has " 
+                                          << m_partLibrary->getCombinedSkeleton().skeleton.bones.size() 
+                                          << " bones after attachment";
                                 }
                             } else {
                                 m_partImportError = "Failed to upload all meshes to GPU";
