@@ -74,18 +74,16 @@ public:
         if (layer && layer->supportsRegion())
         {
             ZoneScopedN("SphericalProjection Region Path");
-            // Compute approximate visible bounds on the sphere.
-            // The visible cap on a unit sphere, viewed from distance d from
-            // the center, extends to acos(1/d) from the sub-camera point.
-            float dist = 1.0f + std::max(zoomLevel, 0.01f);
-            float horizonAngle = std::acos(std::min(1.0f, 1.0f / dist)); // surface extent in radians
-            // Also consider FOV — at close range, FOV may be the limiter
-            float fovHalf = fovY * 0.5f;
-            float visibleHalfRad = std::min(horizonAngle, fovHalf * dist);
-            // Use the larger of horizon and a minimum to avoid under-coverage
-            visibleHalfRad = std::max(visibleHalfRad, horizonAngle);
-            float halfAngleDeg = visibleHalfRad * 180.0f / static_cast<float>(M_PI);
-            halfAngleDeg *= 1.1f; // small safety margin
+
+            // Compute the actual visible angular extent on the sphere using
+            // ray-sphere intersection geometry.  This gives us a tight bound
+            // that matches what the viewport can actually see.
+            float fovDeg = fovY * 180.0f / static_cast<float>(M_PI);
+            float visibleHalfRad = QuadTree::computeVisibleExtent(zoomLevel, fovDeg);
+            // 30% safety margin to cover perspective distortion at viewport edges
+            float halfAngleDeg = visibleHalfRad * 180.0f / static_cast<float>(M_PI) * 1.3f;
+            // Minimum to avoid degenerate regions
+            halfAngleDeg = std::max(halfAngleDeg, 0.1f);
 
             float centerLonDeg = centerLon * 180.0f / static_cast<float>(M_PI);
             float centerLatDeg = centerLat * 180.0f / static_cast<float>(M_PI);
@@ -97,9 +95,7 @@ public:
             float lonMinDeg = centerLonDeg - lonHalfDeg;
             float lonMaxDeg = centerLonDeg + lonHalfDeg;
 
-            // When the visible region wraps past ±180° lon or ±90° lat,
-            // extend to the full range rather than clamping (which would
-            // cut off the visible hemisphere).
+            // Clamp to valid ranges
             if (lonMinDeg < -180.0f || lonMaxDeg > 180.0f) {
                 lonMinDeg = -180.0f;
                 lonMaxDeg =  180.0f;
@@ -109,7 +105,6 @@ public:
                 latMaxDeg =  90.0f;
             }
 
-            float fovDeg = fovY * 180.0f / static_cast<float>(M_PI);
             int depth = QuadTree::computeDepthForGlobeZoom(
                 zoomLevel, fovDeg, std::max(width, height));
 

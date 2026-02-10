@@ -503,7 +503,15 @@ void globeMap(const char *label, ImVec2 texSize, World &world)
     ImGui::BeginChild("GlobeOverlay", ImVec2(texSize.x - 16, 56), false, ImGuiWindowFlags_NoDecoration);
     ImGui::Checkbox("Invert Y", &globeInvertY);
     ImGui::SameLine();
-    ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f", globeCenterLon, globeCenterLat, globeZoom);
+    {
+        float fovDegOverlay = globeFovDeg;
+        int depthOverlay = QuadTree::computeDepthForGlobeZoom(
+            globeZoom, fovDegOverlay, static_cast<int>(std::max(texSize.x, texSize.y)));
+        float extentDeg = QuadTree::computeVisibleExtent(globeZoom, fovDegOverlay)
+                          * 180.0f / static_cast<float>(M_PI);
+        ImGui::Text("Lon:%.1f Lat:%.1f Z:%.3f D:%d Ext:%.1f",
+                    globeCenterLon, globeCenterLat, globeZoom, depthOverlay, extentDeg);
+    }
 
     ImGui::SameLine();
     ImGui::PushItemWidth(110);

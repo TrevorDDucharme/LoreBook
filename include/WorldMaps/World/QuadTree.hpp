@@ -48,6 +48,43 @@ public:
         return std::clamp(d, 0, CHUNK_MAX_DEPTH);
     }
 
+    /// Compute the actual angular extent on the sphere surface that is
+    /// visible through the viewport, using ray-sphere intersection geometry.
+    ///
+    /// Returns the half-angle (radians) from the sub-camera point to the
+    /// farthest visible surface point.  This accounts for perspective:
+    /// at close range a wide-FOV ray barely grazes the sphere surface.
+    static float computeVisibleExtent(float sphereZoom, float fovDeg) {
+        float dist = 1.0f + std::max(sphereZoom, -0.99f);
+        dist = std::max(dist, 0.01f);
+
+        float fovHalfRad = std::max(fovDeg, 10.0f) * 0.5f
+                           * static_cast<float>(M_PI) / 180.0f;
+        float sinA = std::sin(fovHalfRad);
+        float cosA = std::cos(fovHalfRad);
+
+        float visibleHalf;
+        if (dist * sinA >= 1.0f) {
+            // FOV edge ray misses the sphere entirely — all visible
+            // surface lies within the horizon cap.
+            visibleHalf = std::acos(std::min(1.0f, 1.0f / dist));
+        } else {
+            // The FOV edge ray hits the sphere.  Compute the hit point's
+            // angular distance from the sub-camera point.
+            //
+            // For camera at distance d from center, ray at angle α from
+            // the look direction:
+            //   hit-z = d·sin²α + cosα·√(1 − d²·sin²α)
+            //   visible extent = acos(hit-z)
+            float dSin2 = dist * sinA * sinA;
+            float inner = 1.0f - dist * dist * sinA * sinA;
+            float z = dSin2 + cosA * std::sqrt(std::max(inner, 0.0f));
+            z = std::min(z, 1.0f); // floating-point safety near surface
+            visibleHalf = std::acos(z);
+        }
+        return std::max(visibleHalf, 0.001f);
+    }
+
     /// Overload for the globe view where zoomLevel is sphere distance
     /// from the surface (smaller = closer, negative = inside sphere).
     /// Convert to an effective Mercator-like zoom based on the actual
@@ -55,25 +92,7 @@ public:
     static int computeDepthForGlobeZoom(float sphereZoom, float fovDeg,
                                         int screenPixels,
                                         int chunkRes = CHUNK_BASE_RES) {
-        // Camera distance from sphere center (radius = 1).
-        // sphereZoom is surface distance, so center distance = 1 + sphereZoom.
-        float dist = 1.0f + std::max(sphereZoom, -0.99f);
-        dist = std::max(dist, 0.01f); // safety floor
-
-        // Horizon half-angle: how much of the sphere the camera can see.
-        // At dist=4 (far): acos(0.25) ≈ 75° — nearly a hemisphere.
-        // At dist=1.1 (close): acos(0.91) ≈ 24° — small patch.
-        // At dist=1.01 (very close): acos(0.99) ≈ 8° — tiny patch.
-        float horizonAngle = std::acos(std::min(1.0f, 1.0f / dist));
-
-        // FOV half-angle in radians.
-        float fovHalfRad = std::max(fovDeg, 10.0f) * 0.5f
-                           * static_cast<float>(M_PI) / 180.0f;
-
-        // The viewport shows whichever is smaller: the horizon cap or the FOV.
-        // When far, FOV limits the view; when close, the horizon shrinks below FOV.
-        float visibleHalf = std::min(horizonAngle, fovHalfRad);
-        visibleHalf = std::max(visibleHalf, 0.001f); // avoid division by zero
+        float visibleHalf = computeVisibleExtent(sphereZoom, fovDeg);
 
         // Effective Mercator zoom: full world (π radians half) ÷ visible half.
         float effectiveZoom = static_cast<float>(M_PI) / visibleHalf;
