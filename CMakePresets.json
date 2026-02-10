@@ -49,8 +49,7 @@
                 "CMAKE_SYSTEM_PROCESSOR": "x86_64",
                 "CMAKE_C_COMPILER": "x86_64-w64-mingw32-gcc",
                 "CMAKE_CXX_COMPILER": "x86_64-w64-mingw32-g++",
-                "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres",
-                "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg/patches/Windows/"
+                "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres"
             }
         }
     ]
