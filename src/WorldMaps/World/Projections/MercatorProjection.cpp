@@ -42,17 +42,23 @@ void MercatorProjection::project(World &world, int width, int height, GLuint &te
         float latMaxDeg = std::atan(std::sinh(mercYMax)) * 180.0f / static_cast<float>(M_PI);
         float latMinDeg = std::atan(std::sinh(mercYMin)) * 180.0f / static_cast<float>(M_PI);
 
-        // Clamp to valid bounds (wrapping not yet supported)
-        lonMinDeg = std::max(lonMinDeg, -180.0f);
-        lonMaxDeg = std::min(lonMaxDeg, 180.0f);
+        // When the visible region wraps past ±180° lon, extend to
+        // the full range rather than clamping (which creates black stripes).
+        if (lonMinDeg < -180.0f || lonMaxDeg > 180.0f) {
+            lonMinDeg = -180.0f;
+            lonMaxDeg =  180.0f;
+        }
         latMinDeg = std::clamp(latMinDeg, -85.0f, 85.0f);
         latMaxDeg = std::clamp(latMaxDeg, -85.0f, 85.0f);
 
         int depth = QuadTree::computeDepthForZoom(zoomLevel, std::max(width, height));
 
+        // getColorForRegion snaps bounds to chunk grid and returns actual
+        // buffer dimensions (regionW × regionH) that tile exactly.
+        int regionW = width, regionH = height;
         cl_mem regionBuf = world.getColorForRegion(
             layerName, lonMinDeg, lonMaxDeg, latMinDeg, latMaxDeg,
-            depth, width, height);
+            depth, regionW, regionH);
 
         if (regionBuf)
         {
@@ -60,7 +66,7 @@ void MercatorProjection::project(World &world, int width, int height, GLuint &te
             {
                 mercatorProjectRegion(
                     mercatorBuffer, regionBuf,
-                    width, height,
+                    regionW, regionH,
                     lonMinDeg, lonMaxDeg, latMinDeg, latMaxDeg,
                     width, height,
                     centerLonDeg, centerMercY, zoomLevel);

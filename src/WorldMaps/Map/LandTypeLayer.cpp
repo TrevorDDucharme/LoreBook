@@ -1,7 +1,9 @@
 #include <WorldMaps/Map/LandTypeLayer.hpp>
 #include <WorldMaps/World/World.hpp>
+#include <WorldMaps/World/LayerDelta.hpp>
 #include <tracy/Tracy.hpp>
 #include <plog/Log.h>
+#include <cmath>
 
 LandTypeLayer::~LandTypeLayer()
 {
@@ -302,4 +304,116 @@ void LandTypeLayer::landtypeColorMap(
     }
 
     OpenCLContext::get().releaseMem(propertiesBuf);
+}
+
+// ── Region-bounded generation ────────────────────────────────────
+
+cl_mem LandTypeLayer::sampleRegion(float lonMinRad, float lonMaxRad,
+                                    float latMinRad, float latMaxRad,
+                                    int resX, int resY,
+                                    const LayerDelta* delta)
+{
+    // LandType's "sample" is its color output
+    return getColorRegion(lonMinRad, lonMaxRad, latMinRad, latMaxRad,
+                          resX, resY, delta);
+}
+
+cl_mem LandTypeLayer::getColorRegion(float lonMinRad, float lonMaxRad,
+                                      float latMinRad, float latMaxRad,
+                                      int resX, int resY,
+                                      const LayerDelta* delta)
+{
+    ZoneScopedN("LandTypeLayer::getColorRegion");
+    if (!OpenCLContext::get().isReady()) return nullptr;
+
+    // Convert lon/lat bounds to theta/phi
+    float thetaMin = static_cast<float>(M_PI / 2.0) - latMaxRad;
+    float thetaMax = static_cast<float>(M_PI / 2.0) - latMinRad;
+    float phiMin = lonMinRad + static_cast<float>(M_PI);
+    float phiMax = lonMaxRad + static_cast<float>(M_PI);
+
+    // Per-channel noise parameters (same defaults as sample())
+    int nTypes = landtypeCount;
+    std::vector<float> freq(nTypes, 1.5f);
+    std::vector<float> lac(nTypes, 2.0f);
+    std::vector<int>   oct(nTypes, 8);
+    std::vector<float> pers(nTypes, 0.5f);
+    std::vector<unsigned int> seeds(nTypes, 12345u);
+    for (int i = 0; i < nTypes; ++i)
+        seeds[i] += i * 100;
+
+    // Generate multi-channel Perlin noise on GPU
+    cl_mem noiseBuf = nullptr;
+    perlinRegionChannels(noiseBuf, resY, resX,
+                          thetaMin, thetaMax, phiMin, phiMax,
+                          nTypes, freq, lac, oct, pers, seeds);
+    if (!noiseBuf) return nullptr;
+
+    // Read channel noise back to CPU
+    size_t pixelCount = static_cast<size_t>(resX) * resY;
+    size_t totalFloats = static_cast<size_t>(nTypes) * pixelCount;
+    std::vector<float> noiseData(totalFloats);
+    cl_int err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), noiseBuf,
+                                      CL_TRUE, 0, totalFloats * sizeof(float),
+                                      noiseData.data(), 0, nullptr, nullptr);
+    OpenCLContext::get().releaseMem(noiseBuf);
+    if (err != CL_SUCCESS) return nullptr;
+
+    // Compute RGBA color on CPU: exponential-softmax blend (mode=1)
+    const float sharpness = 20.0f;
+    const float minNormalizedForBlend = 0.05f;
+
+    std::vector<cl_float4> rgbaData(pixelCount);
+    for (size_t px = 0; px < pixelCount; ++px) {
+        // Find max noise value across channels for this pixel
+        float maxW = -1e30f;
+        int bestIdx = 0;
+        for (int b = 0; b < nTypes; ++b) {
+            float w = noiseData[b * pixelCount + px];
+            if (w > maxW) {
+                maxW = w;
+                bestIdx = b;
+            }
+        }
+
+        if (maxW <= 0.0f) {
+            // Fallback to best landtype
+            cl_float4 col = landtypes[bestIdx].color;
+            col.s[3] = 1.0f;
+            rgbaData[px] = col;
+        } else {
+            // Exponential weights
+            float accR = 0.0f, accG = 0.0f, accB = 0.0f, accA = 0.0f;
+            float sumExp = 0.0f;
+            for (int b = 0; b < nTypes; ++b) {
+                float w = noiseData[b * pixelCount + px];
+                if (w <= 0.0f) continue;
+                float wexp = std::exp(sharpness * (w - maxW));
+                const cl_float4& c = landtypes[b].color;
+                accR += c.s[0] * wexp;
+                accG += c.s[1] * wexp;
+                accB += c.s[2] * wexp;
+                accA += c.s[3] * wexp;
+                sumExp += wexp;
+            }
+
+            if (sumExp <= 0.0f || (1.0f / sumExp) < minNormalizedForBlend) {
+                cl_float4 col = landtypes[bestIdx].color;
+                col.s[3] = 1.0f;
+                rgbaData[px] = col;
+            } else {
+                rgbaData[px] = {accR / sumExp, accG / sumExp,
+                                accB / sumExp, 1.0f};
+            }
+        }
+    }
+
+    // Upload RGBA result to GPU
+    cl_mem colorBuf = OpenCLContext::get().createBuffer(
+        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+        pixelCount * sizeof(cl_float4), rgbaData.data(),
+        &err, "LandTypeLayer getColorRegion");
+    if (err != CL_SUCCESS || !colorBuf) return nullptr;
+
+    return colorBuf;
 }

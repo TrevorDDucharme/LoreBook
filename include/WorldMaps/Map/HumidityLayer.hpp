@@ -2,6 +2,8 @@
 #include <WorldMaps/Map/MapLayer.hpp>
 #include <WorldMaps/Map/LandTypeLayer.hpp>
 
+struct LayerDelta;
+
 class HumidityLayer : public MapLayer
 {
 public:
@@ -10,6 +12,19 @@ public:
     cl_mem sample() override;
 
     cl_mem getColor() override;
+
+    // ── Region support (dynamic resolution) ────────────
+    bool supportsRegion() const override { return true; }
+
+    cl_mem sampleRegion(float lonMinRad, float lonMaxRad,
+                        float latMinRad, float latMaxRad,
+                        int resX, int resY,
+                        const LayerDelta* delta = nullptr) override;
+
+    cl_mem getColorRegion(float lonMinRad, float lonMaxRad,
+                          float latMinRad, float latMaxRad,
+                          int resX, int resY,
+                          const LayerDelta* delta = nullptr) override;
 
 private:
     cl_mem getHumidityBuffer();

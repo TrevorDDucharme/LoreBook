@@ -1,5 +1,7 @@
 #include <WorldMaps/Map/WaterTableLayer.hpp>
 #include <WorldMaps/WorldMap.hpp>
+#include <WorldMaps/World/LayerDelta.hpp>
+#include <cmath>
 
 WaterTableLayer::~WaterTableLayer()
 {
@@ -195,4 +197,98 @@ void WaterTableLayer::waterTableWeightedScalarToColor(cl_mem& output,
     }
     OpenCLContext::get().releaseMem(paletteBuf);
     OpenCLContext::get().releaseMem(weightsBuf);
+}
+
+// ── Region-bounded generation ────────────────────────────────────
+
+cl_mem WaterTableLayer::sampleRegion(float lonMinRad, float lonMaxRad,
+                                      float latMinRad, float latMaxRad,
+                                      int resX, int resY,
+                                      const LayerDelta* delta)
+{
+    ZoneScopedN("WaterTableLayer::sampleRegion");
+    if (!OpenCLContext::get().isReady()) return nullptr;
+
+    // Get elevation data for this region from the elevation layer
+    MapLayer* elevLayer = parentWorld->getLayer("elevation");
+    if (!elevLayer) return nullptr;
+
+    cl_mem elevBuf = elevLayer->sampleRegion(lonMinRad, lonMaxRad,
+                                              latMinRad, latMaxRad,
+                                              resX, resY, nullptr);
+    if (!elevBuf) return nullptr;
+
+    // Read elevation data back to CPU
+    size_t count = static_cast<size_t>(resX) * resY;
+    std::vector<float> elevData(count);
+    cl_int err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), elevBuf,
+                                      CL_TRUE, 0, count * sizeof(float),
+                                      elevData.data(), 0, nullptr, nullptr);
+    OpenCLContext::get().releaseMem(elevBuf);
+    if (err != CL_SUCCESS) return nullptr;
+
+    // Compute water table on CPU: simple threshold
+    float level = water_table_level;
+    if (delta) {
+        level = delta->getParam("water_table_level", level);
+    }
+
+    std::vector<float> waterData(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (elevData[i] < level)
+            waterData[i] = (level - elevData[i]) / level;
+        else
+            waterData[i] = 0.0f;
+    }
+
+    // Upload result to GPU
+    cl_mem regionBuf = OpenCLContext::get().createBuffer(
+        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+        count * sizeof(float), waterData.data(),
+        &err, "WaterTableLayer sampleRegion");
+    if (err != CL_SUCCESS || !regionBuf) return nullptr;
+
+    // Apply per-sample deltas
+    if (delta && !delta->data.empty() &&
+        delta->resolution == resX && delta->resolution == resY) {
+        size_t deltaSize = delta->data.size() * sizeof(float);
+        cl_mem deltaBuf = OpenCLContext::get().createBuffer(
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            deltaSize, const_cast<float*>(delta->data.data()),
+            &err, "watertable delta upload");
+        if (err == CL_SUCCESS && deltaBuf) {
+            applyDeltaScalar(regionBuf, deltaBuf, resY, resX,
+                              static_cast<int>(delta->mode));
+            OpenCLContext::get().releaseMem(deltaBuf);
+        }
+    }
+
+    return regionBuf;
+}
+
+cl_mem WaterTableLayer::getColorRegion(float lonMinRad, float lonMaxRad,
+                                        float latMinRad, float latMaxRad,
+                                        int resX, int resY,
+                                        const LayerDelta* delta)
+{
+    ZoneScopedN("WaterTableLayer::getColorRegion");
+
+    cl_mem scalarBuf = sampleRegion(lonMinRad, lonMaxRad,
+                                     latMinRad, latMaxRad,
+                                     resX, resY, delta);
+    if (!scalarBuf) return nullptr;
+
+    static std::vector<cl_float4> waterRamp = {
+        MapLayer::rgba(0, 0, 0, 0),
+        MapLayer::rgba(0, 128, 128, 255),
+        MapLayer::rgba(0, 0, 255, 255)
+    };
+
+    // Use the custom weighted color function for water table colors
+    static std::vector<float> weights = {0.0f, 0.0f, 0.0f, 0.0f};
+    cl_mem colorBuf = nullptr;
+    waterTableWeightedScalarToColor(colorBuf, scalarBuf, resY, resX,
+        static_cast<int>(waterRamp.size()), waterRamp, weights);
+
+    return colorBuf;
 }

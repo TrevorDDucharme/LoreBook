@@ -1,6 +1,8 @@
 #pragma once
 #include <WorldMaps/Map/MapLayer.hpp>
 
+struct LayerDelta;
+
 class LandTypeLayer : public MapLayer
 {
 public:
@@ -30,6 +32,19 @@ public:
     // Accessors for humidity layer
     const std::vector<LandTypeProperties>& getLandtypes() const { return landtypes; }
     int getLandtypeCount() const { return landtypeCount; }
+
+    // ── Region support (dynamic resolution) ────────────
+    bool supportsRegion() const override { return true; }
+
+    cl_mem sampleRegion(float lonMinRad, float lonMaxRad,
+                        float latMinRad, float latMaxRad,
+                        int resX, int resY,
+                        const LayerDelta* delta = nullptr) override;
+
+    cl_mem getColorRegion(float lonMinRad, float lonMaxRad,
+                          float latMinRad, float latMaxRad,
+                          int resX, int resY,
+                          const LayerDelta* delta = nullptr) override;
 
 private:
     cl_mem outColor = nullptr;

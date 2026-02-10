@@ -726,6 +726,97 @@ static void perlinRegion(cl_mem& output,
     }
 }
 
+/// Multi-channel region-bounded Perlin noise on a sphere sub-region.
+/// Output layout: output[c * resLat * resLon + latIdx * resLon + lonIdx].
+static void perlinRegionChannels(cl_mem& output,
+                                  int resLat, int resLon,
+                                  float thetaMin, float thetaMax,
+                                  float phiMin,   float phiMax,
+                                  int channels,
+                                  const std::vector<float>& frequency,
+                                  const std::vector<float>& lacunarity,
+                                  const std::vector<int>& octaves,
+                                  const std::vector<float>& persistence,
+                                  const std::vector<unsigned int>& seed)
+{
+    ZoneScopedN("PerlinRegionChannels");
+    if (!OpenCLContext::get().isReady()) return;
+
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+    static cl_kernel gPerlinRegionChannelsKernel = nullptr;
+    try {
+        OpenCLContext::get().createProgram(gPerlinRegionProgram, "Kernels/PerlinRegion.cl");
+        OpenCLContext::get().createKernelFromProgram(gPerlinRegionChannelsKernel,
+                                                     gPerlinRegionProgram,
+                                                     "perlin_fbm_3d_sphere_region_channels");
+    } catch (const std::runtime_error &e) {
+        printf("Error initializing PerlinRegionChannels OpenCL: %s\n", e.what());
+        return;
+    }
+
+    {
+        ZoneScopedN("PerlinRegionChannels Buffer Alloc");
+        size_t total = (size_t)channels * resLat * resLon * sizeof(float);
+        size_t existing = 0;
+        if (output != nullptr) {
+            err = clGetMemObjectInfo(output, CL_MEM_SIZE, sizeof(existing), &existing, NULL);
+            if (err != CL_SUCCESS || existing < total) {
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+        if (output == nullptr) {
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total,
+                                                       nullptr, &err, "perlinRegionChannels output");
+            if (err != CL_SUCCESS || output == nullptr)
+                throw std::runtime_error("clCreateBuffer failed for perlinRegionChannels output");
+        }
+    }
+
+    // Upload per-channel parameter arrays
+    cl_mem freqBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        sizeof(float) * frequency.size(), (void*)frequency.data(), &err, "perlinRegionCh freqBuf");
+    cl_mem lacBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        sizeof(float) * lacunarity.size(), (void*)lacunarity.data(), &err, "perlinRegionCh lacBuf");
+    cl_mem octBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        sizeof(int) * octaves.size(), (void*)octaves.data(), &err, "perlinRegionCh octBuf");
+    cl_mem persBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        sizeof(float) * persistence.size(), (void*)persistence.data(), &err, "perlinRegionCh persBuf");
+    cl_mem seedBuf = OpenCLContext::get().createBuffer(CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+        sizeof(unsigned int) * seed.size(), (void*)seed.data(), &err, "perlinRegionCh seedBuf");
+
+    clSetKernelArg(gPerlinRegionChannelsKernel,  0, sizeof(cl_mem), &output);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  1, sizeof(int),    &resLat);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  2, sizeof(int),    &resLon);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  3, sizeof(float),  &thetaMin);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  4, sizeof(float),  &thetaMax);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  5, sizeof(float),  &phiMin);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  6, sizeof(float),  &phiMax);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  7, sizeof(int),    &channels);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  8, sizeof(cl_mem), &freqBuf);
+    clSetKernelArg(gPerlinRegionChannelsKernel,  9, sizeof(cl_mem), &lacBuf);
+    clSetKernelArg(gPerlinRegionChannelsKernel, 10, sizeof(cl_mem), &octBuf);
+    clSetKernelArg(gPerlinRegionChannelsKernel, 11, sizeof(cl_mem), &persBuf);
+    clSetKernelArg(gPerlinRegionChannelsKernel, 12, sizeof(cl_mem), &seedBuf);
+
+    size_t global[2] = { (size_t)resLat, (size_t)resLon };
+    {
+        ZoneScopedN("PerlinRegionChannels Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gPerlinRegionChannelsKernel, 2,
+                                      nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for perlinRegionChannels");
+    }
+
+    OpenCLContext::get().releaseMem(freqBuf);
+    OpenCLContext::get().releaseMem(lacBuf);
+    OpenCLContext::get().releaseMem(octBuf);
+    OpenCLContext::get().releaseMem(persBuf);
+    OpenCLContext::get().releaseMem(seedBuf);
+}
+
 /// Apply a delta buffer to a base buffer on the GPU.
 ///   mode 0 = Add, mode 1 = Set.
 static void applyDeltaScalar(cl_mem base, cl_mem delta,

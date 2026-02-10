@@ -1,10 +1,12 @@
 #include <WorldMaps/Map/TemperatureLayer.hpp>
 #include <WorldMaps/WorldMap.hpp>
+#include <WorldMaps/World/LayerDelta.hpp>
 #include <ctime>
+#include <cmath>
 
 TemperatureLayer::TemperatureLayer()
 {
-    seed = time(0);
+    seed_ = static_cast<unsigned int>(time(0));
 }
 
 TemperatureLayer::~TemperatureLayer()
@@ -51,19 +53,14 @@ cl_mem TemperatureLayer::getTemperatureBuffer()
 
     if (temperatureBuffer == nullptr)
     {
-        float frequency = 1.5f;
-        float lacunarity = 2.0f;
-        int octaves = 4;
-        float persistence = 0.5f;
-        unsigned int seed = seed;
         tempMap(temperatureBuffer,
                 parentWorld->getWorldLatitudeResolution(),
                 parentWorld->getWorldLongitudeResolution(),
-                frequency,
-                lacunarity,
-                octaves,
-                persistence,
-                seed);
+                frequency_,
+                lacunarity_,
+                octaves_,
+                persistence_,
+                seed_);
     }
     return temperatureBuffer;
 }
@@ -142,4 +139,118 @@ void TemperatureLayer::tempMap(cl_mem &output,
         // ZoneScopedN("LandTypeLayer::landtypeColorMap enqueue kernel");
         err = clEnqueueNDRangeKernel(queue, kernel, 2, nullptr, global, nullptr, 0, nullptr, nullptr);
     }
+}
+
+// ── Region-bounded generation ────────────────────────────────────
+
+cl_mem TemperatureLayer::sampleRegion(float lonMinRad, float lonMaxRad,
+                                       float latMinRad, float latMaxRad,
+                                       int resX, int resY,
+                                       const LayerDelta* delta)
+{
+    ZoneScopedN("TemperatureLayer::sampleRegion");
+    if (!OpenCLContext::get().isReady()) return nullptr;
+
+    // Apply parameter overrides from delta
+    float freq = frequency_;
+    float lac  = lacunarity_;
+    int   oct  = octaves_;
+    float pers = persistence_;
+    unsigned int sd = seed_;
+    if (delta) {
+        freq = delta->getParam("frequency",   freq);
+        lac  = delta->getParam("lacunarity",  lac);
+        oct  = static_cast<int>(delta->getParam("octaves", static_cast<float>(oct)));
+        pers = delta->getParam("persistence", pers);
+        sd   = static_cast<unsigned int>(delta->getParam("seed", static_cast<float>(sd)));
+    }
+
+    // Convert lon/lat bounds to theta/phi
+    float thetaMin = static_cast<float>(M_PI / 2.0) - latMaxRad;
+    float thetaMax = static_cast<float>(M_PI / 2.0) - latMinRad;
+    float phiMin = lonMinRad + static_cast<float>(M_PI);
+    float phiMax = lonMaxRad + static_cast<float>(M_PI);
+
+    // Generate Perlin noise on GPU for this region
+    cl_mem noiseBuf = nullptr;
+    perlinRegion(noiseBuf, resY, resX,
+                 thetaMin, thetaMax, phiMin, phiMax,
+                 freq, lac, oct, pers, sd);
+    if (!noiseBuf) return nullptr;
+
+    // Read noise back to CPU
+    size_t count = static_cast<size_t>(resX) * resY;
+    std::vector<float> noiseData(count);
+    cl_int err = clEnqueueReadBuffer(OpenCLContext::get().getQueue(), noiseBuf,
+                                      CL_TRUE, 0, count * sizeof(float),
+                                      noiseData.data(), 0, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        OpenCLContext::get().releaseMem(noiseBuf);
+        return nullptr;
+    }
+    OpenCLContext::get().releaseMem(noiseBuf);
+
+    // Compute temperature on CPU: latFactor * 0.5 + noise * 0.5
+    // latFactor = 1.0 - |2 * latNorm - 1|, where latNorm ∈ [0,1] (north→south)
+    // latFactor is 0 at poles, 1 at equator
+    std::vector<float> tempData(count);
+    for (int row = 0; row < resY; ++row) {
+        float lat = latMaxRad - static_cast<float>(row) / std::max(resY - 1, 1)
+                                * (latMaxRad - latMinRad);
+        float latNorm = (static_cast<float>(M_PI / 2.0) - lat) / static_cast<float>(M_PI);
+        float latFactor = (1.0f - std::fabs(2.0f * latNorm - 1.0f)) * 0.5f;
+
+        for (int col = 0; col < resX; ++col) {
+            int idx = row * resX + col;
+            tempData[idx] = latFactor + noiseData[idx] * 0.5f;
+        }
+    }
+
+    // Upload result to GPU
+    cl_mem regionBuf = OpenCLContext::get().createBuffer(
+        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+        count * sizeof(float), tempData.data(),
+        &err, "TemperatureLayer sampleRegion");
+    if (err != CL_SUCCESS || !regionBuf) return nullptr;
+
+    // Apply per-sample deltas if present
+    if (delta && !delta->data.empty() &&
+        delta->resolution == resX && delta->resolution == resY) {
+        size_t deltaSize = delta->data.size() * sizeof(float);
+        cl_mem deltaBuf = OpenCLContext::get().createBuffer(
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            deltaSize, const_cast<float*>(delta->data.data()),
+            &err, "temperature delta upload");
+        if (err == CL_SUCCESS && deltaBuf) {
+            applyDeltaScalar(regionBuf, deltaBuf, resY, resX,
+                              static_cast<int>(delta->mode));
+            OpenCLContext::get().releaseMem(deltaBuf);
+        }
+    }
+
+    return regionBuf;
+}
+
+cl_mem TemperatureLayer::getColorRegion(float lonMinRad, float lonMaxRad,
+                                         float latMinRad, float latMaxRad,
+                                         int resX, int resY,
+                                         const LayerDelta* delta)
+{
+    ZoneScopedN("TemperatureLayer::getColorRegion");
+
+    cl_mem scalarBuf = sampleRegion(lonMinRad, lonMaxRad,
+                                     latMinRad, latMaxRad,
+                                     resX, resY, delta);
+    if (!scalarBuf) return nullptr;
+
+    static std::vector<cl_float4> tempRamp = {
+        MapLayer::rgba(0, 0, 255, 255/3),
+        MapLayer::rgba(255, 0, 0, 255/3)
+    };
+
+    cl_mem colorBuf = nullptr;
+    scalarToColor(colorBuf, scalarBuf, resY, resX,
+                  static_cast<int>(tempRamp.size()), tempRamp);
+
+    return colorBuf;
 }

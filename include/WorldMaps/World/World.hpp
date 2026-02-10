@@ -85,9 +85,9 @@ public:
     /// @param outH       Desired output buffer height in texels.
     /// @return A cl_mem RGBA float4 buffer (owned by this World, do not free).
     cl_mem getColorForRegion(const std::string& layerName,
-                             float lonMinDeg, float lonMaxDeg,
-                             float latMinDeg, float latMaxDeg,
-                             int depth, int outW, int outH)
+                             float& lonMinDeg, float& lonMaxDeg,
+                             float& latMinDeg, float& latMaxDeg,
+                             int depth, int& outW, int& outH)
     {
         ZoneScopedN("World::getColorForRegion");
 
@@ -103,12 +103,51 @@ public:
         }
 
         const float DEG2RAD = static_cast<float>(M_PI / 180.0);
+        const float RAD2DEG = static_cast<float>(180.0 / M_PI);
 
-        // Ensure quadtree nodes exist at the needed depth
+        depth = std::clamp(depth, 0, CHUNK_MAX_DEPTH);
+
+        // Snap requested bounds to chunk grid boundaries.
+        // This ensures each 32×32 chunk maps to exactly CHUNK_BASE_RES
+        // pixels in the assembled buffer, eliminating rounding gaps.
+        int cells = 1 << depth;
+        float lonRange = static_cast<float>(2.0 * M_PI);
+        float latRange = static_cast<float>(M_PI);
+        float cellW = lonRange / cells; // radians per chunk column
+        float cellH = latRange / cells; // radians per chunk row
+
         float lonMinRad = lonMinDeg * DEG2RAD;
         float lonMaxRad = lonMaxDeg * DEG2RAD;
         float latMinRad = latMinDeg * DEG2RAD;
         float latMaxRad = latMaxDeg * DEG2RAD;
+
+        int xMin = static_cast<int>(std::floor((lonMinRad + static_cast<float>(M_PI)) / cellW));
+        int xMax = static_cast<int>(std::floor((lonMaxRad + static_cast<float>(M_PI)) / cellW));
+        int yMin = static_cast<int>(std::floor((latMinRad + static_cast<float>(M_PI / 2.0)) / cellH));
+        int yMax = static_cast<int>(std::floor((latMaxRad + static_cast<float>(M_PI / 2.0)) / cellH));
+        xMin = std::clamp(xMin, 0, cells - 1);
+        xMax = std::clamp(xMax, 0, cells - 1);
+        yMin = std::clamp(yMin, 0, cells - 1);
+        yMax = std::clamp(yMax, 0, cells - 1);
+
+        int numChunksX = xMax - xMin + 1;
+        int numChunksY = yMax - yMin + 1;
+
+        // Update bounds to exact chunk grid boundaries
+        lonMinRad = static_cast<float>(-M_PI) + xMin * cellW;
+        lonMaxRad = static_cast<float>(-M_PI) + (xMax + 1) * cellW;
+        latMinRad = static_cast<float>(-M_PI / 2.0) + yMin * cellH;
+        latMaxRad = static_cast<float>(-M_PI / 2.0) + (yMax + 1) * cellH;
+
+        // Write snapped bounds back to caller (degrees)
+        lonMinDeg = lonMinRad * RAD2DEG;
+        lonMaxDeg = lonMaxRad * RAD2DEG;
+        latMinDeg = latMinRad * RAD2DEG;
+        latMaxDeg = latMaxRad * RAD2DEG;
+
+        // Output dimensions = exact chunk grid tiling
+        outW = numChunksX * CHUNK_BASE_RES;
+        outH = numChunksY * CHUNK_BASE_RES;
 
         quadTree_.ensureDepth(lonMinRad, lonMaxRad, latMinRad, latMaxRad, depth);
 
@@ -155,7 +194,8 @@ public:
             });
         }
 
-        // Assemble chunks into viewport buffer
+        // Assemble chunks into viewport buffer (bounds are now grid-snapped,
+        // so each chunk maps to exactly CHUNK_BASE_RES pixels)
         ChunkAssembler::assembleRGBA(
             entries, regionAssemblyBuffer_,
             outW, outH,
@@ -166,9 +206,9 @@ public:
 
     /// Get scalar sample data covering a specific world region.
     cl_mem getSampleForRegion(const std::string& layerName,
-                              float lonMinDeg, float lonMaxDeg,
-                              float latMinDeg, float latMaxDeg,
-                              int depth, int outW, int outH)
+                              float& lonMinDeg, float& lonMaxDeg,
+                              float& latMinDeg, float& latMaxDeg,
+                              int depth, int& outW, int& outH)
     {
         ZoneScopedN("World::getSampleForRegion");
         MapLayer* layer = getLayer(layerName);
@@ -178,10 +218,41 @@ public:
         if (!layer->supportsRegion()) return layer->sample();
 
         const float DEG2RAD = static_cast<float>(M_PI / 180.0);
+        const float RAD2DEG = static_cast<float>(180.0 / M_PI);
+
+        depth = std::clamp(depth, 0, CHUNK_MAX_DEPTH);
+
+        // Snap to chunk grid (same logic as getColorForRegion)
+        int cells = 1 << depth;
+        float lonRange = static_cast<float>(2.0 * M_PI);
+        float latRange = static_cast<float>(M_PI);
+        float cellW = lonRange / cells;
+        float cellH = latRange / cells;
+
         float lonMinRad = lonMinDeg * DEG2RAD;
         float lonMaxRad = lonMaxDeg * DEG2RAD;
         float latMinRad = latMinDeg * DEG2RAD;
         float latMaxRad = latMaxDeg * DEG2RAD;
+
+        int xMin = std::clamp(static_cast<int>(std::floor((lonMinRad + static_cast<float>(M_PI)) / cellW)), 0, cells - 1);
+        int xMax = std::clamp(static_cast<int>(std::floor((lonMaxRad + static_cast<float>(M_PI)) / cellW)), 0, cells - 1);
+        int yMin = std::clamp(static_cast<int>(std::floor((latMinRad + static_cast<float>(M_PI / 2.0)) / cellH)), 0, cells - 1);
+        int yMax = std::clamp(static_cast<int>(std::floor((latMaxRad + static_cast<float>(M_PI / 2.0)) / cellH)), 0, cells - 1);
+
+        lonMinRad = static_cast<float>(-M_PI) + xMin * cellW;
+        lonMaxRad = static_cast<float>(-M_PI) + (xMax + 1) * cellW;
+        latMinRad = static_cast<float>(-M_PI / 2.0) + yMin * cellH;
+        latMaxRad = static_cast<float>(-M_PI / 2.0) + (yMax + 1) * cellH;
+
+        lonMinDeg = lonMinRad * RAD2DEG;
+        lonMaxDeg = lonMaxRad * RAD2DEG;
+        latMinDeg = latMinRad * RAD2DEG;
+        latMaxDeg = latMaxRad * RAD2DEG;
+
+        int numChunksX = xMax - xMin + 1;
+        int numChunksY = yMax - yMin + 1;
+        outW = numChunksX * CHUNK_BASE_RES;
+        outH = numChunksY * CHUNK_BASE_RES;
 
         quadTree_.ensureDepth(lonMinRad, lonMaxRad, latMinRad, latMaxRad, depth);
         auto leaves = quadTree_.getLeavesInBounds(

@@ -74,30 +74,51 @@ public:
         if (layer && layer->supportsRegion())
         {
             ZoneScopedN("SphericalProjection Region Path");
-            // Compute approximate visible bounds on the sphere
+            // Compute approximate visible bounds on the sphere.
+            // The visible cap on a unit sphere, viewed from distance d from
+            // the center, extends to acos(1/d) from the sub-camera point.
             float dist = 1.0f + std::max(zoomLevel, 0.01f);
-            float limbAngle = std::asin(std::min(1.0f, 1.0f / dist));
-            float effectiveHalfAngle = std::min(fovY * 0.5f, limbAngle);
-            float halfAngleDeg = effectiveHalfAngle * 180.0f / static_cast<float>(M_PI);
-            halfAngleDeg *= 1.3f; // safety margin
+            float horizonAngle = std::acos(std::min(1.0f, 1.0f / dist)); // surface extent in radians
+            // Also consider FOV — at close range, FOV may be the limiter
+            float fovHalf = fovY * 0.5f;
+            float visibleHalfRad = std::min(horizonAngle, fovHalf * dist);
+            // Use the larger of horizon and a minimum to avoid under-coverage
+            visibleHalfRad = std::max(visibleHalfRad, horizonAngle);
+            float halfAngleDeg = visibleHalfRad * 180.0f / static_cast<float>(M_PI);
+            halfAngleDeg *= 1.1f; // small safety margin
 
             float centerLonDeg = centerLon * 180.0f / static_cast<float>(M_PI);
             float centerLatDeg = centerLat * 180.0f / static_cast<float>(M_PI);
             float cosLat = std::max(0.1f, std::cos(centerLat));
 
-            float latMinDeg = std::clamp(centerLatDeg - halfAngleDeg, -90.0f, 90.0f);
-            float latMaxDeg = std::clamp(centerLatDeg + halfAngleDeg, -90.0f, 90.0f);
+            float latMinDeg = centerLatDeg - halfAngleDeg;
+            float latMaxDeg = centerLatDeg + halfAngleDeg;
             float lonHalfDeg = halfAngleDeg / cosLat;
-            float lonMinDeg = std::max(centerLonDeg - lonHalfDeg, -180.0f);
-            float lonMaxDeg = std::min(centerLonDeg + lonHalfDeg, 180.0f);
+            float lonMinDeg = centerLonDeg - lonHalfDeg;
+            float lonMaxDeg = centerLonDeg + lonHalfDeg;
+
+            // When the visible region wraps past ±180° lon or ±90° lat,
+            // extend to the full range rather than clamping (which would
+            // cut off the visible hemisphere).
+            if (lonMinDeg < -180.0f || lonMaxDeg > 180.0f) {
+                lonMinDeg = -180.0f;
+                lonMaxDeg =  180.0f;
+            }
+            if (latMinDeg < -90.0f || latMaxDeg > 90.0f) {
+                latMinDeg = -90.0f;
+                latMaxDeg =  90.0f;
+            }
 
             float fovDeg = fovY * 180.0f / static_cast<float>(M_PI);
             int depth = QuadTree::computeDepthForGlobeZoom(
                 zoomLevel, fovDeg, std::max(width, height));
 
+            // getColorForRegion snaps bounds to chunk grid and returns
+            // actual buffer dimensions that tile exactly.
+            int regionW = width, regionH = height;
             cl_mem regionBuf = world.getColorForRegion(
                 layerName, lonMinDeg, lonMaxDeg, latMinDeg, latMaxDeg,
-                depth, width, height);
+                depth, regionW, regionH);
 
             if (regionBuf)
             {
@@ -105,7 +126,7 @@ public:
                 {
                     spherePerspectiveSampleRegion(
                         sphereBuffer, regionBuf,
-                        width, height,
+                        regionW, regionH,
                         lonMinDeg, lonMaxDeg, latMinDeg, latMaxDeg,
                         width, height,
                         camPosX, camPosY, camPosZ,
