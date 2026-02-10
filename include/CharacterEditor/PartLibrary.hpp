@@ -250,9 +250,11 @@ public:
     
     /**
      * @brief Add a part's skeleton to the combined skeleton
+     * @param partSocketBoneIndex Bone index in part skeleton whose socket should align with the host socket bone
      */
     void addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneIndex, 
-                                    const Transform& attachTransform);
+                                    const Transform& attachTransform,
+                                    uint32_t partSocketBoneIndex = UINT32_MAX);
     
     // ===== Serialization =====
     
@@ -298,13 +300,13 @@ private:
     static void writeString(std::vector<uint8_t>& buf, const std::string& str);
     static std::string readString(const uint8_t*& ptr, const uint8_t* end);
     static void writeFloat(std::vector<uint8_t>& buf, float f);
-    static float readFloat(const uint8_t*& ptr);
+    static float readFloat(const uint8_t*& ptr, const uint8_t* end);
     static void writeUint32(std::vector<uint8_t>& buf, uint32_t v);
-    static uint32_t readUint32(const uint8_t*& ptr);
+    static uint32_t readUint32(const uint8_t*& ptr, const uint8_t* end);
     static void writeVec3(std::vector<uint8_t>& buf, const glm::vec3& v);
-    static glm::vec3 readVec3(const uint8_t*& ptr);
+    static glm::vec3 readVec3(const uint8_t*& ptr, const uint8_t* end);
     static void writeQuat(std::vector<uint8_t>& buf, const glm::quat& q);
-    static glm::quat readQuat(const uint8_t*& ptr);
+    static glm::quat readQuat(const uint8_t*& ptr, const uint8_t* end);
 };
 
 } // namespace CharacterEditor

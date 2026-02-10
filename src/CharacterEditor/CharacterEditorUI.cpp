@@ -739,6 +739,11 @@ void CharacterEditorUI::renderMenuBar() {
                 toggleDebugView(DebugView::BoundingBox);
             }
             
+            bool ikChains = hasFlag(m_debugViews, DebugView::IKChains);
+            if (ImGui::MenuItem("IK Chains", nullptr, &ikChains)) {
+                toggleDebugView(DebugView::IKChains);
+            }
+            
             ImGui::Separator();
             ImGui::MenuItem("Grid", nullptr, &m_showGrid);
             ImGui::MenuItem("Gizmo", nullptr, &m_showGizmo);
@@ -813,6 +818,12 @@ void CharacterEditorUI::renderToolbar() {
     bool sockets = hasFlag(m_debugViews, DebugView::Sockets);
     if (ImGui::Checkbox("Sockets", &sockets)) {
         toggleDebugView(DebugView::Sockets);
+    }
+    
+    ImGui::SameLine();
+    bool ikChains = hasFlag(m_debugViews, DebugView::IKChains);
+    if (ImGui::Checkbox("IK Chains", &ikChains)) {
+        toggleDebugView(DebugView::IKChains);
     }
     
     ImGui::PopStyleVar();
@@ -1068,8 +1079,8 @@ void CharacterEditorUI::renderDebugOverlays() {
             renderSockets(model.loadResult.extractedSockets, skeletonToRender, modelMatrix);
         }
         
-        // Render IK targets
-        if (m_ikEnabled && hasFlag(m_debugViews, DebugView::IKChains)) {
+        // Render IK targets (always when IK is enabled)
+        if (m_ikEnabled && !m_ikTargets.empty()) {
             renderIKTargets(modelMatrix);
         }
         
@@ -1730,6 +1741,11 @@ void CharacterEditorUI::renderIKPanel() {
     ImGui::Separator();
     
     ImGui::Checkbox("Enable IK", &m_ikEnabled);
+    
+    // Auto-enable IK Chains debug view when IK is turned on
+    if (m_ikEnabled && !hasFlag(m_debugViews, DebugView::IKChains)) {
+        toggleDebugView(DebugView::IKChains);
+    }
     
     if (!m_ikEnabled) {
         ImGui::TextDisabled("IK disabled");
@@ -2903,7 +2919,8 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
             m_previewPart = m_partLibrary->loadPart(summary.dbID);
             if (m_previewPart) {
-                // Upload all meshes to GPU
+                // Release existing GPU resources before re-uploading
+                for (auto& g : m_previewPartGPUs) g.release();
                 m_previewPartGPUs.clear();
                 bool allUploaded = true;
                 for (const auto& mesh : m_previewPart->meshes) {
@@ -2922,6 +2939,7 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                           << " (" << m_previewPartGPUs.size() << " meshes)";
                 } else {
                     m_previewPart.reset();
+                    for (auto& g : m_previewPartGPUs) g.release();
                     m_previewPartGPUs.clear();
                 }
             }
@@ -2974,7 +2992,8 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
         if (ImGui::Button("Load Preview", ImVec2(-1, 0))) {
             m_previewPart = m_partLibrary->loadPart(selected.dbID);
             if (m_previewPart) {
-                // Upload all meshes to GPU
+                // Release existing GPU resources before re-uploading
+                for (auto& g : m_previewPartGPUs) g.release();
                 m_previewPartGPUs.clear();
                 bool allUploaded = true;
                 for (const auto& mesh : m_previewPart->meshes) {
@@ -2995,6 +3014,7 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                     m_partImportError.clear();
                 } else {
                     m_previewPart.reset();
+                    for (auto& g : m_previewPartGPUs) g.release();
                     m_previewPartGPUs.clear();
                 }
             } else {
@@ -3019,6 +3039,13 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                     auto partToAttach = m_partLibrary->loadPart(selected.dbID);
                     
                     if (partToAttach) {
+                        // Ensure combined skeleton is initialized with host skeleton
+                        if (m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+                            m_partLibrary->rebuildCombinedSkeleton(model.loadResult.skeleton);
+                            PLOGI << "Initialized combined skeleton with " 
+                                  << model.loadResult.skeleton.bones.size() << " host bones";
+                        }
+                        
                         auto result = m_partLibrary->attachPart(*partToAttach, socket, model.loadResult.skeleton);
                         
                         if (result.success) {
@@ -3033,35 +3060,42 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                             // Add ALL meshes from the part
                             attachedModel.loadResult.meshes = partToAttach->meshes;
                             
-                            // Remap vertex bone IDs from part skeleton indices to
-                            // combined skeleton indices so GPU skinning references
-                            // the correct bones.
-                            const auto& allAttachments = m_partLibrary->getActiveAttachments();
-                            if (!allAttachments.empty()) {
-                                const auto& lastAtt = allAttachments.back();
-                                if (!lastAtt.remappedBoneIndices.empty()) {
+                            // Remap vertex bone IDs from local part indices to combined skeleton indices
+                            const auto& attachments = m_partLibrary->getActiveAttachments();
+                            if (!attachments.empty()) {
+                                const auto& att = attachments.back();
+                                if (!att.remappedBoneIndices.empty()) {
                                     for (auto& mesh : attachedModel.loadResult.meshes) {
-                                        for (auto& vertex : mesh.vertices) {
-                                            for (int bi = 0; bi < 4; ++bi) {
-                                                int origID = vertex.boneIDs[bi];
-                                                if (origID >= 0 && static_cast<size_t>(origID) < lastAtt.remappedBoneIndices.size()) {
-                                                    vertex.boneIDs[bi] = static_cast<int>(lastAtt.remappedBoneIndices[origID]);
-                                                }
-                                            }
+                                        for (auto& v : mesh.vertices) {
+                                            auto remap = [&](int localIdx) -> int {
+                                                if (localIdx < 0) return -1;
+                                                if (static_cast<size_t>(localIdx) < att.remappedBoneIndices.size())
+                                                    return static_cast<int>(att.remappedBoneIndices[localIdx]);
+                                                return localIdx; // fallback: leave unchanged
+                                            };
+                                            v.boneIDs.x = remap(v.boneIDs.x);
+                                            v.boneIDs.y = remap(v.boneIDs.y);
+                                            v.boneIDs.z = remap(v.boneIDs.z);
+                                            v.boneIDs.w = remap(v.boneIDs.w);
                                         }
                                     }
+                                    PLOGI << "Remapped vertex bone IDs to combined skeleton indices";
                                 }
                             }
                             
-                            // Get skeleton from part (first mesh that has one)
-                            const Skeleton* partSkel = partToAttach->getSkeleton();
-                            if (partSkel) {
-                                attachedModel.loadResult.skeleton = *partSkel;
+                            // Use combined skeleton for attached parts
+                            if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+                                attachedModel.loadResult.skeleton = m_partLibrary->getCombinedSkeleton().skeleton;
+                            } else {
+                                const Skeleton* partSkel = partToAttach->getSkeleton();
+                                if (partSkel) {
+                                    attachedModel.loadResult.skeleton = *partSkel;
+                                }
                             }
                             
                             attachedModel.worldTransform = Transform();  // Identity - skeleton positions it
                             
-                            // Upload all meshes to GPU
+                            // Upload all meshes to GPU (with remapped bone IDs)
                             bool allUploaded = true;
                             for (const auto& mesh : attachedModel.loadResult.meshes) {
                                 MeshGPUData gpuData;
@@ -3079,13 +3113,11 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                                 PLOGI << "Added attached part to render list (" 
                                       << attachedModel.meshGPUData.size() << " meshes)";
                                 
-                                // Log combined skeleton info (don't overwrite m_posedSkeleton —
-                                // the base model must keep using its own skeleton for correct skinning.
-                                // Attached parts use combined skeleton via separate render path.)
+                                // Update posed skeleton to use combined skeleton
                                 if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
-                                    PLOGI << "Combined skeleton has " 
-                                          << m_partLibrary->getCombinedSkeleton().skeleton.bones.size() 
-                                          << " bones after attachment";
+                                    m_posedSkeleton = m_partLibrary->getCombinedSkeleton().skeleton;
+                                    PLOGI << "Updated posed skeleton with combined skeleton (" 
+                                          << m_posedSkeleton.bones.size() << " bones)";
                                 }
                             } else {
                                 m_partImportError = "Failed to upload all meshes to GPU";

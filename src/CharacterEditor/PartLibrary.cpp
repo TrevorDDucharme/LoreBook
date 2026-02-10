@@ -23,7 +23,7 @@ void PartLibrary::writeString(std::vector<uint8_t>& buf, const std::string& str)
 
 std::string PartLibrary::readString(const uint8_t*& ptr, const uint8_t* end) {
     if (ptr + 4 > end) return "";
-    uint32_t len = readUint32(ptr);
+    uint32_t len = readUint32(ptr, end);
     if (ptr + len > end) return "";
     std::string result(reinterpret_cast<const char*>(ptr), len);
     ptr += len;
@@ -35,7 +35,8 @@ void PartLibrary::writeFloat(std::vector<uint8_t>& buf, float f) {
     buf.insert(buf.end(), bytes, bytes + 4);
 }
 
-float PartLibrary::readFloat(const uint8_t*& ptr) {
+float PartLibrary::readFloat(const uint8_t*& ptr, const uint8_t* end) {
+    if (ptr + 4 > end) { ptr = end; return 0.0f; }
     float f;
     std::memcpy(&f, ptr, 4);
     ptr += 4;
@@ -49,8 +50,12 @@ void PartLibrary::writeUint32(std::vector<uint8_t>& buf, uint32_t v) {
     buf.push_back((v >> 24) & 0xFF);
 }
 
-uint32_t PartLibrary::readUint32(const uint8_t*& ptr) {
-    uint32_t v = ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24);
+uint32_t PartLibrary::readUint32(const uint8_t*& ptr, const uint8_t* end) {
+    if (ptr + 4 > end) { ptr = end; return 0; }
+    uint32_t v = static_cast<uint32_t>(ptr[0])
+              | (static_cast<uint32_t>(ptr[1]) << 8)
+              | (static_cast<uint32_t>(ptr[2]) << 16)
+              | (static_cast<uint32_t>(ptr[3]) << 24);
     ptr += 4;
     return v;
 }
@@ -61,11 +66,11 @@ void PartLibrary::writeVec3(std::vector<uint8_t>& buf, const glm::vec3& v) {
     writeFloat(buf, v.z);
 }
 
-glm::vec3 PartLibrary::readVec3(const uint8_t*& ptr) {
+glm::vec3 PartLibrary::readVec3(const uint8_t*& ptr, const uint8_t* end) {
     glm::vec3 v;
-    v.x = readFloat(ptr);
-    v.y = readFloat(ptr);
-    v.z = readFloat(ptr);
+    v.x = readFloat(ptr, end);
+    v.y = readFloat(ptr, end);
+    v.z = readFloat(ptr, end);
     return v;
 }
 
@@ -76,12 +81,12 @@ void PartLibrary::writeQuat(std::vector<uint8_t>& buf, const glm::quat& q) {
     writeFloat(buf, q.z);
 }
 
-glm::quat PartLibrary::readQuat(const uint8_t*& ptr) {
+glm::quat PartLibrary::readQuat(const uint8_t*& ptr, const uint8_t* end) {
     glm::quat q;
-    q.w = readFloat(ptr);
-    q.x = readFloat(ptr);
-    q.y = readFloat(ptr);
-    q.z = readFloat(ptr);
+    q.w = readFloat(ptr, end);
+    q.x = readFloat(ptr, end);
+    q.y = readFloat(ptr, end);
+    q.z = readFloat(ptr, end);
     return q;
 }
 
@@ -303,8 +308,8 @@ std::unique_ptr<Part> PartLibrary::deserializePart(const std::vector<uint8_t>& d
     const uint8_t* end = ptr + data.size();
     
     // Check magic and version
-    uint32_t magic = readUint32(ptr);
-    uint32_t version = readUint32(ptr);
+    uint32_t magic = readUint32(ptr, end);
+    uint32_t version = readUint32(ptr, end);
     
     if (magic != 0x50415254 || version != 1) {
         PLOGE << "Invalid part data: bad magic or version";
@@ -317,95 +322,139 @@ std::unique_ptr<Part> PartLibrary::deserializePart(const std::vector<uint8_t>& d
     part->id = readString(ptr, end);
     part->name = readString(ptr, end);
     part->category = readString(ptr, end);
-    part->primaryRole = static_cast<PartRole>(readUint32(ptr));
+    part->primaryRole = static_cast<PartRole>(readUint32(ptr, end));
     part->customRoleName = readString(ptr, end);
     
+    if (ptr >= end) {
+        PLOGE << "Part data truncated after basic info";
+        return part;
+    }
+    
     // Tags
-    uint32_t tagCount = readUint32(ptr);
+    uint32_t tagCount = readUint32(ptr, end);
+    if (tagCount > 1000) {
+        PLOGE << "Part data corrupt: tagCount=" << tagCount;
+        return part;
+    }
     for (uint32_t i = 0; i < tagCount && ptr < end; ++i) {
         part->tags.push_back(readString(ptr, end));
     }
     
     // Local transform
-    part->localTransform.position = readVec3(ptr);
-    part->localTransform.rotation = readQuat(ptr);
-    part->localTransform.scale = readVec3(ptr);
+    part->localTransform.position = readVec3(ptr, end);
+    part->localTransform.rotation = readQuat(ptr, end);
+    part->localTransform.scale = readVec3(ptr, end);
+    
+    if (ptr >= end) {
+        PLOGE << "Part data truncated after transform";
+        return part;
+    }
     
     // Meshes (support multiple)
-    uint32_t meshCount = readUint32(ptr);
+    uint32_t meshCount = readUint32(ptr, end);
+    if (meshCount > 256) {
+        PLOGE << "Part data corrupt: meshCount=" << meshCount;
+        return part;
+    }
     part->meshes.resize(meshCount);
     for (uint32_t mi = 0; mi < meshCount && ptr < end; ++mi) {
         Mesh& mesh = part->meshes[mi];
         mesh.name = readString(ptr, end);
     
         // Vertices
-        uint32_t vertCount = readUint32(ptr);
+        uint32_t vertCount = readUint32(ptr, end);
+        if (vertCount > 10000000 || ptr >= end) {
+            PLOGE << "Part data corrupt: vertCount=" << vertCount;
+            return part;
+        }
         mesh.vertices.resize(vertCount);
         for (uint32_t i = 0; i < vertCount && ptr < end; ++i) {
             auto& v = mesh.vertices[i];
-            v.position = readVec3(ptr);
-            v.normal = readVec3(ptr);
-            v.uv.x = readFloat(ptr);
-            v.uv.y = readFloat(ptr);
-            v.tangent.x = readFloat(ptr);
-            v.tangent.y = readFloat(ptr);
-            v.tangent.z = readFloat(ptr);
-            v.tangent.w = readFloat(ptr);
+            v.position = readVec3(ptr, end);
+            v.normal = readVec3(ptr, end);
+            v.uv.x = readFloat(ptr, end);
+            v.uv.y = readFloat(ptr, end);
+            v.tangent.x = readFloat(ptr, end);
+            v.tangent.y = readFloat(ptr, end);
+            v.tangent.z = readFloat(ptr, end);
+            v.tangent.w = readFloat(ptr, end);
             
-            v.boneIDs.x = static_cast<int>(readUint32(ptr));
-            v.boneIDs.y = static_cast<int>(readUint32(ptr));
-            v.boneIDs.z = static_cast<int>(readUint32(ptr));
-            v.boneIDs.w = static_cast<int>(readUint32(ptr));
-            v.boneWeights.x = readFloat(ptr);
-            v.boneWeights.y = readFloat(ptr);
-            v.boneWeights.z = readFloat(ptr);
-            v.boneWeights.w = readFloat(ptr);
+            v.boneIDs.x = static_cast<int>(readUint32(ptr, end));
+            v.boneIDs.y = static_cast<int>(readUint32(ptr, end));
+            v.boneIDs.z = static_cast<int>(readUint32(ptr, end));
+            v.boneIDs.w = static_cast<int>(readUint32(ptr, end));
+            v.boneWeights.x = readFloat(ptr, end);
+            v.boneWeights.y = readFloat(ptr, end);
+            v.boneWeights.z = readFloat(ptr, end);
+            v.boneWeights.w = readFloat(ptr, end);
         }
         
         // Indices
-        uint32_t indexCount = readUint32(ptr);
+        uint32_t indexCount = readUint32(ptr, end);
+        if (indexCount > 50000000 || ptr >= end) {
+            PLOGE << "Part data corrupt: indexCount=" << indexCount;
+            return part;
+        }
         mesh.indices.resize(indexCount);
         for (uint32_t i = 0; i < indexCount && ptr < end; ++i) {
-            mesh.indices[i] = readUint32(ptr);
+            mesh.indices[i] = readUint32(ptr, end);
         }
         
         // Materials
-        uint32_t matCount = readUint32(ptr);
+        uint32_t matCount = readUint32(ptr, end);
+        if (matCount > 100 || ptr >= end) {
+            PLOGE << "Part data corrupt: matCount=" << matCount;
+            return part;
+        }
         mesh.materials.resize(matCount);
         for (uint32_t i = 0; i < matCount && ptr < end; ++i) {
             auto& mat = mesh.materials[i];
             mat.name = readString(ptr, end);
-            mat.baseColor.r = readFloat(ptr);
-            mat.baseColor.g = readFloat(ptr);
-            mat.baseColor.b = readFloat(ptr);
-            mat.baseColor.a = readFloat(ptr);
-            mat.metallicRoughness.x = readFloat(ptr);
-            mat.metallicRoughness.y = readFloat(ptr);
+            mat.baseColor.r = readFloat(ptr, end);
+            mat.baseColor.g = readFloat(ptr, end);
+            mat.baseColor.b = readFloat(ptr, end);
+            mat.baseColor.a = readFloat(ptr, end);
+            mat.metallicRoughness.x = readFloat(ptr, end);
+            mat.metallicRoughness.y = readFloat(ptr, end);
         }
         
         // Skeleton
-        uint32_t boneCount = readUint32(ptr);
+        uint32_t boneCount = readUint32(ptr, end);
+        if (boneCount > 1024 || ptr >= end) {
+            PLOGE << "Part data corrupt: boneCount=" << boneCount;
+            return part;
+        }
         mesh.skeleton.bones.resize(boneCount);
         for (uint32_t i = 0; i < boneCount && ptr < end; ++i) {
             auto& bone = mesh.skeleton.bones[i];
-            bone.id = readUint32(ptr);
+            bone.id = readUint32(ptr, end);
             bone.name = readString(ptr, end);
-            bone.localTransform.position = readVec3(ptr);
-            bone.localTransform.rotation = readQuat(ptr);
-            bone.localTransform.scale = readVec3(ptr);
-            bone.inverseBindMatrix.position = readVec3(ptr);
-            bone.inverseBindMatrix.rotation = readQuat(ptr);
-            bone.inverseBindMatrix.scale = readVec3(ptr);
-            bone.parentID = readUint32(ptr);
-            bone.role = static_cast<PartRole>(readUint32(ptr));
+            bone.localTransform.position = readVec3(ptr, end);
+            bone.localTransform.rotation = readQuat(ptr, end);
+            bone.localTransform.scale = readVec3(ptr, end);
+            bone.inverseBindMatrix.position = readVec3(ptr, end);
+            bone.inverseBindMatrix.rotation = readQuat(ptr, end);
+            bone.inverseBindMatrix.scale = readVec3(ptr, end);
+            bone.parentID = readUint32(ptr, end);
+            bone.role = static_cast<PartRole>(readUint32(ptr, end));
             
             mesh.skeleton.boneNameToIndex[bone.name] = static_cast<int32_t>(i);
         }
         mesh.skeleton.buildHierarchy();
+        mesh.computeBounds();
     } // End of meshes loop
     
+    if (ptr >= end) {
+        PLOGI << "Part deserialized (no sockets/specs section): " << part->name;
+        return part;
+    }
+    
     // Sockets
-    uint32_t socketCount = readUint32(ptr);
+    uint32_t socketCount = readUint32(ptr, end);
+    if (socketCount > 256) {
+        PLOGE << "Part data corrupt: socketCount=" << socketCount;
+        return part;
+    }
     part->socketsOut.resize(socketCount);
     for (uint32_t i = 0; i < socketCount && ptr < end; ++i) {
         auto& socket = part->socketsOut[i];
@@ -413,26 +462,48 @@ std::unique_ptr<Part> PartLibrary::deserializePart(const std::vector<uint8_t>& d
         socket.name = readString(ptr, end);
         socket.profile.profileID = readString(ptr, end);
         socket.profile.category = readString(ptr, end);
-        socket.profile.version = readUint32(ptr);
-        socket.space = static_cast<SpaceType>(readUint32(ptr));
+        socket.profile.version = readUint32(ptr, end);
+        socket.space = static_cast<SpaceType>(readUint32(ptr, end));
         socket.boneName = readString(ptr, end);
-        socket.localOffset.position = readVec3(ptr);
-        socket.localOffset.rotation = readQuat(ptr);
-        socket.localOffset.scale = readVec3(ptr);
-        socket.influenceRadius = readFloat(ptr);
+        socket.localOffset.position = readVec3(ptr, end);
+        socket.localOffset.rotation = readQuat(ptr, end);
+        socket.localOffset.scale = readVec3(ptr, end);
+        socket.influenceRadius = readFloat(ptr, end);
+        
+        // Resolve ownerBoneIndex from boneName using first mesh's skeleton
+        if (!socket.boneName.empty() && !part->meshes.empty()) {
+            const Skeleton* skel = part->getSkeleton();
+            if (skel) {
+                auto it = skel->boneNameToIndex.find(socket.boneName);
+                if (it != skel->boneNameToIndex.end() && it->second >= 0) {
+                    socket.ownerBoneIndex = static_cast<uint32_t>(it->second);
+                }
+            }
+        }
+    }
+    
+    if (ptr >= end) {
+        PLOGI << "Part deserialized (no specs section): " << part->name;
+        return part;
     }
     
     // Attachment specs
-    uint32_t specCount = readUint32(ptr);
+    uint32_t specCount = readUint32(ptr, end);
+    if (specCount > 256) {
+        PLOGE << "Part data corrupt: specCount=" << specCount;
+        return part;
+    }
     part->attachmentSpecs.resize(specCount);
     for (uint32_t i = 0; i < specCount && ptr < end; ++i) {
         auto& spec = part->attachmentSpecs[i];
         spec.requiredProfile.profileID = readString(ptr, end);
         spec.requiredProfile.category = readString(ptr, end);
-        spec.requiredProfile.version = readUint32(ptr);
-        spec.priority = static_cast<int>(readUint32(ptr));
+        spec.requiredProfile.version = readUint32(ptr, end);
+        spec.priority = static_cast<int>(readUint32(ptr, end));
     }
     
+    PLOGI << "Part deserialized: " << part->name << " (" << part->meshes.size() 
+          << " meshes, " << part->socketsOut.size() << " sockets)";
     return part;
 }
 
@@ -982,24 +1053,25 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
     // Generate attachment ID
     std::string attachID = generatePartID();
     
-    // Resolve the host bone index from socket.boneName if ownerBoneIndex isn't set.
-    // The socket bone in the host skeleton is the attachment point.
-    uint32_t resolvedHostBoneIndex = socket.ownerBoneIndex;
-    if (resolvedHostBoneIndex == UINT32_MAX && !socket.boneName.empty()) {
+    // Resolve socket bone index by name if not already set
+    uint32_t resolvedBoneIndex = socket.ownerBoneIndex;
+    if (resolvedBoneIndex == UINT32_MAX && !socket.boneName.empty()) {
         auto it = hostSkeleton.boneNameToIndex.find(socket.boneName);
         if (it != hostSkeleton.boneNameToIndex.end() && it->second >= 0) {
-            resolvedHostBoneIndex = static_cast<uint32_t>(it->second);
-            PLOGI << "Resolved socket bone '" << socket.boneName 
-                  << "' to host bone index " << resolvedHostBoneIndex;
+            resolvedBoneIndex = static_cast<uint32_t>(it->second);
+            socket.ownerBoneIndex = resolvedBoneIndex;  // Cache for future use
+            PLOGI << "Resolved socket '" << socket.name << "' bone '" 
+                  << socket.boneName << "' to index " << resolvedBoneIndex;
         } else {
-            PLOGW << "Socket bone '" << socket.boneName << "' not found in host skeleton";
+            PLOGW << "Could not resolve socket bone '" << socket.boneName 
+                  << "' in host skeleton";
         }
     }
     
-    // Get socket's world transform for part positioning
+    // Get socket's world transform based on host skeleton
     Transform socketWorld;
-    if (resolvedHostBoneIndex < hostSkeleton.bones.size()) {
-        socketWorld = hostSkeleton.getWorldTransform(resolvedHostBoneIndex);
+    if (socket.space == SpaceType::Bone && resolvedBoneIndex < hostSkeleton.bones.size()) {
+        socketWorld = hostSkeleton.getWorldTransform(resolvedBoneIndex);
     } else {
         socketWorld = socket.localOffset;
     }
@@ -1017,7 +1089,7 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
     attachment.partID = part.id;
     attachment.socketID = socket.id;
     attachment.transform = partWorld;
-    attachment.hostBoneIndex = resolvedHostBoneIndex;
+    attachment.hostBoneIndex = resolvedBoneIndex;
     
     // Join skeletons if the part has bones
     if (part.hasSkeleton()) {
@@ -1027,37 +1099,39 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
             return AttachmentResult::Failure("Part has skeleton but no skeleton found");
         }
         
-        size_t beforeSize = m_combinedSkeleton.skeleton.bones.size();
-        
-        // Find the socket bone in the part for remapping
-        int32_t partSocketBoneIdx = -1;
-        for (size_t i = 0; i < partSkeleton->bones.size(); ++i) {
-            if (partSkeleton->bones[i].parentID == UINT32_MAX && partSkeleton->bones[i].isSocket()) {
-                partSocketBoneIdx = static_cast<int32_t>(i);
+        // Find the part's socket bone that matches the host socket profile
+        // This is the bone in the part that should align with the host socket
+        uint32_t partSocketBoneIndex = UINT32_MAX;
+        for (const auto& partSocket : part.socketsOut) {
+            if (partSocket.profile.isCompatibleWith(socket.profile) &&
+                partSocket.ownerBoneIndex != UINT32_MAX) {
+                partSocketBoneIndex = partSocket.ownerBoneIndex;
+                PLOGI << "Part socket bone for alignment: '" << partSocket.boneName 
+                      << "' index=" << partSocketBoneIndex;
                 break;
             }
         }
         
-        addPartToCombinedSkeleton(part, resolvedHostBoneIndex, Transform());
+        size_t beforeSize = m_combinedSkeleton.skeleton.bones.size();
+        addPartToCombinedSkeleton(part, resolvedBoneIndex, socketWorld, partSocketBoneIndex);
+        size_t afterSize = m_combinedSkeleton.skeleton.bones.size();
         
-        // Build remapped bone indices for vertex bone ID remapping:
-        // - Socket bone → resolvedHostBoneIndex (merged with host socket bone)
-        // - Other bones → sequential combined indices starting at beforeSize
-        // This must match the remapping in addPartToCombinedSkeleton exactly.
+        // Build remapped indices for all part bones
+        // Part bones get sequential indices starting from beforeSize
         uint32_t nextIndex = static_cast<uint32_t>(beforeSize);
         for (size_t i = 0; i < partSkeleton->bones.size(); ++i) {
-            if (static_cast<int32_t>(i) == partSocketBoneIdx && resolvedHostBoneIndex != UINT32_MAX) {
-                attachment.remappedBoneIndices.push_back(resolvedHostBoneIndex);
-            } else {
-                attachment.remappedBoneIndices.push_back(nextIndex++);
-            }
+            attachment.remappedBoneIndices.push_back(nextIndex++);
         }
         
         // Root bone handling
         if (!partSkeleton->rootBoneIndices.empty()) {
             uint32_t rootIdx = partSkeleton->rootBoneIndices[0];
-            attachment.partRootBoneIndex = attachment.remappedBoneIndices[rootIdx];
+            if (rootIdx < attachment.remappedBoneIndices.size()) {
+                attachment.partRootBoneIndex = attachment.remappedBoneIndices[rootIdx];
+            }
         }
+        
+        PLOGI << "Skeleton joined: " << beforeSize << " -> " << afterSize << " bones";
     }
     
     m_activeAttachments.push_back(attachment);
@@ -1103,7 +1177,8 @@ void PartLibrary::rebuildCombinedSkeleton(const Skeleton& baseSkeleton) {
 }
 
 void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneIndex,
-                                             const Transform& attachTransform) {
+                                             const Transform& attachTransform,
+                                             uint32_t partSocketBoneIndex) {
     if (!part.hasSkeleton()) return;
     
     const Skeleton* partSkelPtr = part.getSkeleton();
@@ -1112,61 +1187,55 @@ void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneI
     const Skeleton& partSkel = *partSkelPtr;
     uint32_t baseIndex = static_cast<uint32_t>(m_combinedSkeleton.skeleton.bones.size());
     
-    // Find the socket bone in the part (root bone with socket_ prefix).
-    // This bone represents the attachment point and will be MERGED with the
-    // host socket bone rather than added separately.
-    int32_t partSocketBoneIdx = -1;
-    for (size_t i = 0; i < partSkel.bones.size(); ++i) {
-        const Bone& bone = partSkel.bones[i];
-        if (bone.parentID == UINT32_MAX && bone.isSocket()) {
-            partSocketBoneIdx = static_cast<int32_t>(i);
-            PLOGI << "Found socket bone in part '" << part.name << "': " << bone.name
-                  << " (index " << i << "), merging with host bone " << hostBoneIndex;
-            break;
-        }
+    // Compute root offset so the part's socket bone aligns with the host socket bone.
+    // Without this, the part's ROOT bone ends up at the host socket position,
+    // but the actual connection point (the part's socket bone) is deeper in the
+    // hierarchy, creating an incorrect offset.
+    //
+    // rootOffset = inverse(partSocketBoneWorldTransform)
+    // This ensures the part's socket bone ends up at the host socket bone's position.
+    Transform rootOffset; // Identity by default (no adjustment)
+    if (partSocketBoneIndex != UINT32_MAX && partSocketBoneIndex < partSkel.bones.size()) {
+        Transform partSocketWorld = partSkel.getWorldTransform(partSocketBoneIndex);
+        rootOffset = partSocketWorld.inverse();
+        PLOGI << "Socket alignment offset: partSocketBone[" << partSocketBoneIndex 
+              << "] '" << partSkel.bones[partSocketBoneIndex].name 
+              << "' worldPos=(" << partSocketWorld.position.x 
+              << ", " << partSocketWorld.position.y 
+              << ", " << partSocketWorld.position.z << ")";
     }
     
-    // Build bone index remapping:
-    // - Socket bone → hostBoneIndex (merged with host socket bone)
-    // - All other bones → sequential new combined indices
+    // Build bone index remapping: all part bones get new sequential indices
     std::vector<uint32_t> boneIndexRemap(partSkel.bones.size());
-    uint32_t nextCombinedIdx = baseIndex;
     for (size_t i = 0; i < partSkel.bones.size(); ++i) {
-        if (static_cast<int32_t>(i) == partSocketBoneIdx && hostBoneIndex != UINT32_MAX) {
-            boneIndexRemap[i] = hostBoneIndex;  // Merge with host
-        } else {
-            boneIndexRemap[i] = nextCombinedIdx++;
-        }
+        boneIndexRemap[i] = baseIndex + static_cast<uint32_t>(i);
     }
     
-    // Add non-socket bones to the combined skeleton.
-    // The socket bone is NOT added — its children are re-parented to the host bone.
-    // Local transforms are preserved UNCHANGED. The inverse bind matrices from
-    // Assimp naturally handle the coordinate space conversion during GPU skinning:
-    //   skinMatrix = hostBoneWorld * childLocal * inverse(partSocketBind * childLocal)
-    //             = hostBoneWorld * inverse(partSocketBind)
-    // This correctly repositions vertices from the part's bind pose to the host socket.
-    uint32_t addedCount = 0;
+    // Add ALL bones from the part skeleton to the combined skeleton
     for (size_t i = 0; i < partSkel.bones.size(); ++i) {
-        if (static_cast<int32_t>(i) == partSocketBoneIdx && hostBoneIndex != UINT32_MAX) {
-            continue;  // Socket bone merged with host — skip
-        }
-        
         Bone newBone = partSkel.bones[i];
         newBone.id = boneIndexRemap[i];
         
-        // Remap parent ID
-        if (partSkel.bones[i].parentID != UINT32_MAX) {
+        if (partSkel.bones[i].parentID != UINT32_MAX && 
+            partSkel.bones[i].parentID < partSkel.bones.size()) {
+            // Remap parent to the new combined index
             newBone.parentID = boneIndexRemap[partSkel.bones[i].parentID];
         } else {
-            // Non-socket root bone: parent to host bone
-            if (hostBoneIndex != UINT32_MAX) {
+            // Root bone in the part — parent it under the host socket bone
+            if (hostBoneIndex != UINT32_MAX && hostBoneIndex < m_combinedSkeleton.skeleton.bones.size()) {
                 newBone.parentID = hostBoneIndex;
+                
+                // Apply socket alignment offset to root bones so the part's
+                // socket bone ends up at the host socket bone position
+                newBone.localTransform = rootOffset.compose(newBone.localTransform);
+                
+                PLOGI << "Parenting part root bone '" << newBone.name 
+                      << "' under host bone[" << hostBoneIndex << "] '"
+                      << m_combinedSkeleton.skeleton.bones[hostBoneIndex].name 
+                      << "' with socket alignment offset";
             }
+            // else: host bone unknown, leave as root (UINT32_MAX)
         }
-        
-        // DO NOT modify localTransform — the inverse bind matrices
-        // handle coordinate conversion from part bind space to host space.
         
         m_combinedSkeleton.skeleton.bones.push_back(newBone);
         m_combinedSkeleton.skeleton.boneNameToIndex[newBone.name] = 
@@ -1178,13 +1247,20 @@ void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneI
         src.sourceBoneIndex = static_cast<uint32_t>(i);
         src.combinedIndex = newBone.id;
         m_combinedSkeleton.boneSources.push_back(src);
-        addedCount++;
+    }
+    
+    // Track the socket connection
+    if (hostBoneIndex != UINT32_MAX && !partSkel.rootBoneIndices.empty()) {
+        CombinedSkeleton::SocketConnection conn;
+        conn.hostBoneIndex = hostBoneIndex;
+        conn.attachedPartRootIndex = boneIndexRemap[partSkel.rootBoneIndices[0]];
+        m_combinedSkeleton.socketConnections.push_back(conn);
     }
     
     // Rebuild hierarchy
     m_combinedSkeleton.skeleton.buildHierarchy();
     
-    PLOGI << "Added " << addedCount << " bones from part '" << part.name 
+    PLOGI << "Added " << partSkel.bones.size() << " bones from part '" << part.name 
           << "' to combined skeleton (total: " << m_combinedSkeleton.skeleton.bones.size() << ")";
 }
 

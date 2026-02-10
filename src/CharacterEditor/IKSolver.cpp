@@ -164,51 +164,54 @@ std::vector<Transform> FABRIKSolver::positionsToTransforms(
     std::vector<Transform> transforms;
     transforms.reserve(chain.length());
     
+    // Use a mutable working copy so each bone's rotation change cascades
+    // to subsequent bones in the chain (they need the updated parent world).
+    Skeleton working = skeleton;
+    
     for (size_t i = 0; i < chain.length(); ++i) {
-        const Bone& bone = skeleton.bones[chain.boneIndices[i]];
+        uint32_t boneIdx = chain.boneIndices[i];
+        const Bone& bone = working.bones[boneIdx];
         Transform localTrans = bone.localTransform;
         
         if (i < chain.length() - 1) {
-            // Calculate rotation to point towards next joint
-            glm::vec3 currentDir;
+            // Current world-space direction to next joint (from working skeleton)
+            Transform thisWorld = working.getWorldTransform(boneIdx);
+            Transform nextWorld = working.getWorldTransform(chain.boneIndices[i + 1]);
+            glm::vec3 currentDir = glm::normalize(nextWorld.position - thisWorld.position);
+            
+            // Desired world-space direction from solved positions
             glm::vec3 targetDir = glm::normalize(positions[i + 1] - positions[i]);
             
-            // Get the original direction this bone was pointing
-            if (i == 0) {
-                // For root, use the direction to the next bone in original pose
-                Transform nextWorld = skeleton.getWorldTransform(chain.boneIndices[i + 1]);
-                Transform thisWorld = skeleton.getWorldTransform(chain.boneIndices[i]);
-                currentDir = glm::normalize(nextWorld.position - thisWorld.position);
-            } else {
-                // For other bones, get direction from parent's coordinate system
-                Transform parentWorld = skeleton.getWorldTransform(chain.boneIndices[i - 1]);
-                Transform thisWorld = skeleton.getWorldTransform(chain.boneIndices[i]);
-                Transform nextWorld = skeleton.getWorldTransform(chain.boneIndices[i + 1]);
-                currentDir = glm::normalize(nextWorld.position - thisWorld.position);
-            }
-            
-            // Calculate rotation from current direction to target direction
             if (glm::length(currentDir) > 0.0001f && glm::length(targetDir) > 0.0001f) {
-                float dot = glm::dot(currentDir, targetDir);
-                dot = glm::clamp(dot, -1.0f, 1.0f);
+                float dot = glm::clamp(glm::dot(currentDir, targetDir), -1.0f, 1.0f);
                 
                 if (dot < 0.9999f) {
                     glm::vec3 axis = glm::cross(currentDir, targetDir);
                     if (glm::length(axis) > 0.0001f) {
                         axis = glm::normalize(axis);
                         float angle = std::acos(dot);
-                        glm::quat deltaRot = glm::angleAxis(angle, axis);
                         
-                        // Apply delta rotation to local transform
-                        localTrans.rotation = deltaRot * localTrans.rotation;
+                        // Delta rotation in world space
+                        glm::quat worldDelta = glm::angleAxis(angle, axis);
+                        
+                        // Convert to local space:
+                        // localDelta = inverse(parentWorldRot) * worldDelta * parentWorldRot
+                        glm::quat parentWorldRot = glm::quat(1, 0, 0, 0);
+                        if (bone.parentID != UINT32_MAX) {
+                            parentWorldRot = working.getWorldTransform(bone.parentID).rotation;
+                        }
+                        glm::quat invParent = glm::inverse(parentWorldRot);
+                        glm::quat localDelta = invParent * worldDelta * parentWorldRot;
+                        
+                        localTrans.rotation = localDelta * localTrans.rotation;
+                        
+                        // Update working skeleton so subsequent bones see the change
+                        working.bones[boneIdx].localTransform.rotation = localTrans.rotation;
                     }
                 }
             }
         }
         
-        // Update position for the local transform
-        // The position change propagates through the hierarchy, so we mainly
-        // care about rotations. Root position stays fixed.
         transforms.push_back(localTrans);
     }
     
