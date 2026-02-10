@@ -982,11 +982,24 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
     // Generate attachment ID
     std::string attachID = generatePartID();
     
-    // Get socket's world transform based on host skeleton
+    // Resolve the host bone index from socket.boneName if ownerBoneIndex isn't set.
+    // The socket bone in the host skeleton is the attachment point.
+    uint32_t resolvedHostBoneIndex = socket.ownerBoneIndex;
+    if (resolvedHostBoneIndex == UINT32_MAX && !socket.boneName.empty()) {
+        auto it = hostSkeleton.boneNameToIndex.find(socket.boneName);
+        if (it != hostSkeleton.boneNameToIndex.end() && it->second >= 0) {
+            resolvedHostBoneIndex = static_cast<uint32_t>(it->second);
+            PLOGI << "Resolved socket bone '" << socket.boneName 
+                  << "' to host bone index " << resolvedHostBoneIndex;
+        } else {
+            PLOGW << "Socket bone '" << socket.boneName << "' not found in host skeleton";
+        }
+    }
+    
+    // Get socket's world transform for part positioning
     Transform socketWorld;
-    if (socket.space == SpaceType::Bone && socket.ownerBoneIndex < hostSkeleton.bones.size()) {
-        Transform boneWorld = hostSkeleton.getWorldTransform(socket.ownerBoneIndex);
-        socketWorld = boneWorld.compose(socket.localOffset);
+    if (resolvedHostBoneIndex < hostSkeleton.bones.size()) {
+        socketWorld = hostSkeleton.getWorldTransform(resolvedHostBoneIndex);
     } else {
         socketWorld = socket.localOffset;
     }
@@ -1004,7 +1017,7 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
     attachment.partID = part.id;
     attachment.socketID = socket.id;
     attachment.transform = partWorld;
-    attachment.hostBoneIndex = socket.ownerBoneIndex;
+    attachment.hostBoneIndex = resolvedHostBoneIndex;
     
     // Join skeletons if the part has bones
     if (part.hasSkeleton()) {
@@ -1015,29 +1028,18 @@ AttachmentResult PartLibrary::attachPart(Part& part, Socket& socket, Skeleton& h
         }
         
         size_t beforeSize = m_combinedSkeleton.skeleton.bones.size();
-        addPartToCombinedSkeleton(part, socket.ownerBoneIndex, socketWorld);
-        size_t afterSize = m_combinedSkeleton.skeleton.bones.size();
+        // The part's socket root bone will be parented to the host's socket bone.
+        // Since they represent the same logical attachment point, the part's socket
+        // bone uses identity transform (co-located with host socket bone).
+        // Non-socket root bones also attach to the host socket bone.
+        addPartToCombinedSkeleton(part, resolvedHostBoneIndex, Transform());
         
-        // Find socket bone in part (it was merged, not added)
-        int32_t partSocketBoneIdx = -1;
-        for (size_t i = 0; i < partSkeleton->bones.size(); ++i) {
-            if (partSkeleton->bones[i].parentID == UINT32_MAX && 
-                partSkeleton->bones[i].isSocket()) {
-                partSocketBoneIdx = static_cast<int32_t>(i);
-                break;
-            }
-        }
-        
-        // Build remapped indices: socket bone maps to host, others get new indices
+        // Build remapped indices: ALL part bones get sequential new combined indices.
+        // The socket bone is NOT merged with the host bone; it's added as a child
+        // of the host bone to preserve correct inverse bind matrices for skinning.
         uint32_t nextIndex = static_cast<uint32_t>(beforeSize);
         for (size_t i = 0; i < partSkeleton->bones.size(); ++i) {
-            if (static_cast<int32_t>(i) == partSocketBoneIdx) {
-                // Socket bone merged with host
-                attachment.remappedBoneIndices.push_back(socket.ownerBoneIndex);
-            } else {
-                // Regular bone got new index
-                attachment.remappedBoneIndices.push_back(nextIndex++);
-            }
+            attachment.remappedBoneIndices.push_back(nextIndex++);
         }
         
         // Root bone handling
@@ -1099,12 +1101,11 @@ void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneI
     const Skeleton& partSkel = *partSkelPtr;
     uint32_t baseIndex = static_cast<uint32_t>(m_combinedSkeleton.skeleton.bones.size());
     
-    // Find the socket bone in the part (root bone that is a socket)
-    // This bone should merge with the host bone, not be added separately
+    // Find the socket bone in the part (root bone with socket marker).
+    // The socket bone represents the attachment point of the part.
     int32_t partSocketBoneIdx = -1;
     for (size_t i = 0; i < partSkel.bones.size(); ++i) {
         const Bone& bone = partSkel.bones[i];
-        // Socket bone is a root bone with socket marker
         if (bone.parentID == UINT32_MAX && bone.isSocket()) {
             partSocketBoneIdx = static_cast<int32_t>(i);
             PLOGI << "Found socket bone in part '" << part.name << "': " << bone.name;
@@ -1112,45 +1113,43 @@ void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneI
         }
     }
     
-    // Build bone index remapping (old part index -> new combined index)
-    // Socket bone maps to host bone, others get new indices
+    // Build bone index remapping: ALL part bones get sequential new combined indices.
+    // We no longer merge the socket bone with the host bone. Instead the socket bone
+    // is added as a child of the host bone with localTransform = attachTransform
+    // (the socket's localOffset). This preserves the part's inverse bind matrices
+    // so that GPU skinning produces correct vertex positions.
     std::vector<uint32_t> boneIndexRemap(partSkel.bones.size());
-    uint32_t nextIndex = baseIndex;
-    
     for (size_t i = 0; i < partSkel.bones.size(); ++i) {
-        if (static_cast<int32_t>(i) == partSocketBoneIdx) {
-            // Socket bone merges with host bone
-            boneIndexRemap[i] = hostBoneIndex;
-        } else {
-            // Regular bone gets new index
-            boneIndexRemap[i] = nextIndex++;
-        }
+        boneIndexRemap[i] = baseIndex + static_cast<uint32_t>(i);
     }
     
-    // Add all bones from the part except the socket bone
+    // Add ALL bones from the part (including the socket bone) to the combined skeleton.
     for (size_t i = 0; i < partSkel.bones.size(); ++i) {
-        if (static_cast<int32_t>(i) == partSocketBoneIdx) {
-            // Skip the socket bone - it merges with the host
-            continue;
-        }
-        
         Bone newBone = partSkel.bones[i];
         newBone.id = boneIndexRemap[i];
         
-        // Remap parent ID using the remap table
-        if (partSkel.bones[i].parentID != UINT32_MAX) {
-            newBone.parentID = boneIndexRemap[partSkel.bones[i].parentID];
-            
-            // If parent was the socket bone, apply attachment transform
-            if (static_cast<int32_t>(partSkel.bones[i].parentID) == partSocketBoneIdx) {
-                newBone.localTransform = attachTransform.compose(newBone.localTransform);
+        if (partSkel.bones[i].isRoot()) {
+            if (hostBoneIndex != UINT32_MAX) {
+                // Parent to the host socket bone
+                newBone.parentID = hostBoneIndex;
+                
+                if (static_cast<int32_t>(i) == partSocketBoneIdx) {
+                    // Socket bone: co-located with host socket bone (identity transform).
+                    // The host socket bone already defines the attachment position.
+                    // The part's inverse bind matrices handle the rest for skinning.
+                    newBone.localTransform = attachTransform;
+                } else {
+                    // Other root bones: place relative to the attachment transform
+                    newBone.localTransform = attachTransform.compose(partSkel.bones[i].localTransform);
+                }
+            } else {
+                // No valid host bone - keep as root but log warning
+                PLOGW << "Part bone '" << newBone.name << "' has no host bone to attach to";
             }
         } else {
-            // Root bones (that aren't the socket bone) attach to host bone
-            if (hostBoneIndex != UINT32_MAX) {
-                newBone.parentID = hostBoneIndex;
-                newBone.localTransform = attachTransform.compose(newBone.localTransform);
-            }
+            // Non-root bones: remap parent index, keep original local transform.
+            // The parent bone is also being added so the hierarchy is preserved.
+            newBone.parentID = boneIndexRemap[partSkel.bones[i].parentID];
         }
         
         m_combinedSkeleton.skeleton.bones.push_back(newBone);
@@ -1168,9 +1167,8 @@ void PartLibrary::addPartToCombinedSkeleton(const Part& part, uint32_t hostBoneI
     // Rebuild hierarchy
     m_combinedSkeleton.skeleton.buildHierarchy();
     
-    int bonesAdded = static_cast<int>(partSkel.bones.size()) - (partSocketBoneIdx >= 0 ? 1 : 0);
-    PLOGI << "Added " << bonesAdded << " bones from part '" << part.name 
-          << "' to combined skeleton (socket bone merged, total: " << m_combinedSkeleton.skeleton.bones.size() << ")";
+    PLOGI << "Added " << partSkel.bones.size() << " bones from part '" << part.name 
+          << "' to combined skeleton (total: " << m_combinedSkeleton.skeleton.bones.size() << ")";
 }
 
 } // namespace CharacterEditor

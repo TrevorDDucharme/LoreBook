@@ -3033,6 +3033,26 @@ void CharacterEditorUI::renderPartsLibraryPanel() {
                             // Add ALL meshes from the part
                             attachedModel.loadResult.meshes = partToAttach->meshes;
                             
+                            // Remap vertex bone IDs from part skeleton indices to
+                            // combined skeleton indices so GPU skinning references
+                            // the correct bones.
+                            const auto& allAttachments = m_partLibrary->getActiveAttachments();
+                            if (!allAttachments.empty()) {
+                                const auto& lastAtt = allAttachments.back();
+                                if (!lastAtt.remappedBoneIndices.empty()) {
+                                    for (auto& mesh : attachedModel.loadResult.meshes) {
+                                        for (auto& vertex : mesh.vertices) {
+                                            for (int bi = 0; bi < 4; ++bi) {
+                                                int origID = vertex.boneIDs[bi];
+                                                if (origID >= 0 && static_cast<size_t>(origID) < lastAtt.remappedBoneIndices.size()) {
+                                                    vertex.boneIDs[bi] = static_cast<int>(lastAtt.remappedBoneIndices[origID]);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
                             // Get skeleton from part (first mesh that has one)
                             const Skeleton* partSkel = partToAttach->getSkeleton();
                             if (partSkel) {

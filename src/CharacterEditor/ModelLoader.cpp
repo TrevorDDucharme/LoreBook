@@ -427,7 +427,8 @@ Skeleton processSkeleton(const aiScene* scene, const ImportConfig& config) {
 std::vector<Socket> extractSockets(const Skeleton& skeleton, const std::string& socketPrefix) {
     std::vector<Socket> sockets;
     
-    for (const auto& bone : skeleton.bones) {
+    for (size_t bi = 0; bi < skeleton.bones.size(); ++bi) {
+        const auto& bone = skeleton.bones[bi];
         if (bone.name.rfind(socketPrefix, 0) == 0) {
             // Skip "_end" bones - these are Blender bone chain terminators, not actual sockets
             if (bone.name.size() > 4 && bone.name.substr(bone.name.size() - 4) == "_end") {
@@ -440,6 +441,7 @@ std::vector<Socket> extractSockets(const Skeleton& skeleton, const std::string& 
             socket.name = bone.name.substr(socketPrefix.length()); // Remove prefix: "socket_arm_left" -> "arm_left"
             socket.space = SpaceType::Bone;
             socket.boneName = bone.name;
+            socket.ownerBoneIndex = static_cast<uint32_t>(bi); // Index of this bone in the skeleton
             socket.localOffset = bone.localTransform;
             
             // Infer socket category from name patterns
