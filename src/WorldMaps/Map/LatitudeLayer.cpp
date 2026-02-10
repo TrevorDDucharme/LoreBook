@@ -1,5 +1,6 @@
 #include <WorldMaps/Map/LatitudeLayer.hpp>
 #include <WorldMaps/WorldMap.hpp>
+#include <WorldMaps/World/LayerDelta.hpp>
 
 LatitudeLayer::~LatitudeLayer()
 {
@@ -116,4 +117,77 @@ void LatitudeLayer::latitude(
             throw std::runtime_error("clEnqueueNDRangeKernel failed for latitude");
         }
     }
+}
+
+// ── Region-bounded generation ────────────────────────────────────
+
+cl_mem LatitudeLayer::sampleRegion(float lonMinRad, float lonMaxRad,
+                                    float latMinRad, float latMaxRad,
+                                    int resX, int resY,
+                                    const LayerDelta* delta)
+{
+    ZoneScopedN("LatitudeLayer::sampleRegion");
+    if (!OpenCLContext::get().isReady()) return nullptr;
+
+    // Latitude is purely analytical: value = (π/2 - lat) / π
+    // 0.0 at north pole (lat = π/2), 1.0 at south pole (lat = -π/2)
+    size_t count = static_cast<size_t>(resX) * resY;
+    std::vector<float> cpuBuf(count);
+
+    for (int row = 0; row < resY; ++row) {
+        // Row 0 = northernmost edge (latMax), row resY-1 = southernmost (latMin)
+        float lat = latMaxRad - static_cast<float>(row) / std::max(resY - 1, 1)
+                                * (latMaxRad - latMinRad);
+        float val = (static_cast<float>(M_PI / 2.0) - lat) / static_cast<float>(M_PI);
+        for (int col = 0; col < resX; ++col) {
+            cpuBuf[row * resX + col] = val;
+        }
+    }
+
+    cl_int err = CL_SUCCESS;
+    cl_mem regionBuf = OpenCLContext::get().createBuffer(
+        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+        count * sizeof(float), cpuBuf.data(),
+        &err, "LatitudeLayer sampleRegion");
+    if (err != CL_SUCCESS || !regionBuf) return nullptr;
+
+    // Apply per-sample deltas if present
+    if (delta && !delta->data.empty() &&
+        delta->resolution == resX && delta->resolution == resY) {
+        size_t deltaSize = delta->data.size() * sizeof(float);
+        cl_mem deltaBuf = OpenCLContext::get().createBuffer(
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            deltaSize, const_cast<float*>(delta->data.data()),
+            &err, "latitude delta upload");
+        if (err == CL_SUCCESS && deltaBuf) {
+            applyDeltaScalar(regionBuf, deltaBuf, resY, resX,
+                              static_cast<int>(delta->mode));
+            OpenCLContext::get().releaseMem(deltaBuf);
+        }
+    }
+
+    return regionBuf;
+}
+
+cl_mem LatitudeLayer::getColorRegion(float lonMinRad, float lonMaxRad,
+                                      float latMinRad, float latMaxRad,
+                                      int resX, int resY,
+                                      const LayerDelta* delta)
+{
+    ZoneScopedN("LatitudeLayer::getColorRegion");
+
+    cl_mem scalarBuf = sampleRegion(lonMinRad, lonMaxRad,
+                                     latMinRad, latMaxRad,
+                                     resX, resY, delta);
+    if (!scalarBuf) return nullptr;
+
+    static std::vector<cl_float4> grayRamp = {
+        MapLayer::rgba(0, 0, 0, 255),
+        MapLayer::rgba(255, 255, 255, 255)
+    };
+
+    cl_mem colorBuf = nullptr;
+    scalarToColor(colorBuf, scalarBuf, resY, resX, 2, grayRamp);
+
+    return colorBuf;
 }

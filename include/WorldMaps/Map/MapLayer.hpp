@@ -11,6 +11,8 @@
 #include <OpenCLContext.hpp>
 #include <stringUtils.hpp>
 
+struct LayerDelta; // forward declaration
+
 
 class World;
 
@@ -19,10 +21,48 @@ class MapLayer
 public:
     MapLayer() = default;
     virtual ~MapLayer() = default;
-    // Layers can sample themselves given access to the full World so they can query other layers
+
+    // ── Full-world sampling (existing API) ─────────────────────────
     virtual cl_mem sample()= 0;
     virtual cl_mem getColor() = 0;
     virtual void parseParameters(const std::string &params) {}
+
+    // ── Region-bounded sampling (new: dynamic resolution / chunking) ─
+    /// Generate scalar data for a sub-region of the sphere.
+    /// lon/lat bounds in radians.  resX × resY is the output resolution.
+    /// delta may be null (no edits).
+    ///
+    /// Default implementation falls back to the full-world sample().
+    virtual cl_mem sampleRegion(float lonMinRad, float lonMaxRad,
+                                float latMinRad, float latMaxRad,
+                                int resX, int resY,
+                                const LayerDelta* delta = nullptr) {
+        // Fallback: return the full-world buffer.
+        // Projections will sub-sample from it.
+        (void)lonMinRad; (void)lonMaxRad;
+        (void)latMinRad; (void)latMaxRad;
+        (void)resX; (void)resY; (void)delta;
+        return sample();
+    }
+
+    /// Generate RGBA color data for a sub-region.
+    /// Default falls back to the full-world getColor().
+    virtual cl_mem getColorRegion(float lonMinRad, float lonMaxRad,
+                                  float latMinRad, float latMaxRad,
+                                  int resX, int resY,
+                                  const LayerDelta* delta = nullptr) {
+        (void)lonMinRad; (void)lonMaxRad;
+        (void)latMinRad; (void)latMaxRad;
+        (void)resX; (void)resY; (void)delta;
+        return getColor();
+    }
+
+    /// Returns true if this layer supports region-bounded generation (i.e.
+    /// sampleRegion / getColorRegion are properly overridden).
+    virtual bool supportsRegion() const { return false; }
+
+    /// Number of data channels (1 for scalar layers, N for multichannel).
+    virtual int getChannelCount() const { return 1; }
 
     static cl_float4 rgba(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {

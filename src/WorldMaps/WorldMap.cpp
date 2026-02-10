@@ -1,4 +1,11 @@
 #include <WorldMaps/WorldMap.hpp>
+#include <Vault.hpp>
+
+// ── Shared editing state (accessible from mercatorMap and worldMap) ────
+static int  g_editMode       = 0;     // 0=Browse, 1=Paint
+static float g_brushRadius   = 3.0f;  // in texels at current zoom
+static float g_brushStrength = 0.1f;
+static int   g_brushDeltaMode = 0;    // 0=Add, 1=Set
 
 void mercatorMap(const char *label, ImVec2 texSize, World &world)
 {
@@ -126,7 +133,7 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
     }
 
     // Panning with left mouse drag (operate in Mercator projected space)
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    if (g_editMode == 0 && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
     {
         ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
         float dx = -drag.x;
@@ -159,6 +166,88 @@ void mercatorMap(const char *label, ImVec2 texSize, World &world)
         mapCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN));
 
         ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    }
+
+    // ── Paint mode: apply brush to world deltas ──────────────────
+    if (g_editMode == 1 && ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+    {
+        // Compute mouse position relative to image top-left
+        ImVec2 imagePos = ImGui::GetItemRectMin();
+        ImVec2 mousePos = io.MousePos;
+        float mx = mousePos.x - imagePos.x;
+        float my = mousePos.y - imagePos.y;
+
+        if (mx >= 0 && mx < texSize.x && my >= 0 && my < texSize.y)
+        {
+            // Convert screen pixel to world lon/lat (Mercator inverse)
+            float nx = mx / texSize.x;
+            float ny = my / texSize.y;
+            float centerLonDeg = mapCenterLon;
+            float lat_rad_center = mapCenterLat * static_cast<float>(M_PI) / 180.0f;
+            float mercYCenter = std::log(std::tan(static_cast<float>(M_PI) / 4.0f + lat_rad_center / 2.0f));
+
+            float lonDeg = centerLonDeg + (nx - 0.5f) * (360.0f / mapZoom);
+            float mercY = mercYCenter + (0.5f - ny) * (2.0f * static_cast<float>(M_PI) / mapZoom);
+            float latDeg = std::atan(std::sinh(mercY)) * 180.0f / static_cast<float>(M_PI);
+
+            // Determine current depth from zoom
+            int depth = QuadTree::computeDepthForZoom(mapZoom, std::max(static_cast<int>(texSize.x), static_cast<int>(texSize.y)));
+
+            // Convert to radians for chunk lookup
+            float lonRad = lonDeg * static_cast<float>(M_PI) / 180.0f;
+            float latRad = latDeg * static_cast<float>(M_PI) / 180.0f;
+
+            // Clamp to valid range
+            lonRad = std::clamp(lonRad, -static_cast<float>(M_PI), static_cast<float>(M_PI));
+            latRad = std::clamp(latRad, -static_cast<float>(M_PI) / 2.0f, static_cast<float>(M_PI) / 2.0f);
+
+            // Find the chunk containing this point
+            int cells = 1 << depth;
+            float lonRange = static_cast<float>(2.0 * M_PI);
+            float latRange = static_cast<float>(M_PI);
+            float cellW = lonRange / cells;
+            float cellH = latRange / cells;
+            int cx = static_cast<int>(std::floor((lonRad + static_cast<float>(M_PI)) / cellW));
+            int cy = static_cast<int>(std::floor((latRad + static_cast<float>(M_PI / 2.0)) / cellH));
+            cx = std::clamp(cx, 0, cells - 1);
+            cy = std::clamp(cy, 0, cells - 1);
+            ChunkCoord coord{cx, cy, depth};
+
+            // Find the sample position within the chunk
+            float cLonMin, cLonMax, cLatMin, cLatMax;
+            coord.getBoundsRadians(cLonMin, cLonMax, cLatMin, cLatMax);
+            float localU = (lonRad - cLonMin) / (cLonMax - cLonMin);
+            float localV = (latRad - cLatMin) / (cLatMax - cLatMin);
+
+            // Apply brush (iterate over brush radius in sample space)
+            int brushRadSamples = std::max(1, static_cast<int>(g_brushRadius));
+            int centerSX = static_cast<int>(localU * CHUNK_BASE_RES);
+            int centerSY = static_cast<int>(localV * CHUNK_BASE_RES);
+
+            LayerDelta& delta = world.getOrCreateDelta(coord, selectedLayerName);
+            delta.mode = static_cast<DeltaMode>(g_brushDeltaMode);
+
+            for (int bdy = -brushRadSamples; bdy <= brushRadSamples; ++bdy) {
+                for (int bdx = -brushRadSamples; bdx <= brushRadSamples; ++bdx) {
+                    int sx = centerSX + bdx;
+                    int sy = centerSY + bdy;
+                    if (sx < 0 || sx >= CHUNK_BASE_RES || sy < 0 || sy >= CHUNK_BASE_RES)
+                        continue;
+                    float dist = std::sqrt(static_cast<float>(bdx * bdx + bdy * bdy));
+                    if (dist > g_brushRadius) continue;
+                    float falloff = 1.0f - (dist / g_brushRadius);
+                    float strength = g_brushStrength * falloff;
+
+                    if (g_brushDeltaMode == 0) { // Add
+                        float old = delta.getDelta(sx, sy);
+                        delta.setDelta(sx, sy, 0, old + strength);
+                    } else { // Set
+                        delta.setDelta(sx, sy, 0, strength);
+                    }
+                }
+            }
+            world.markChunkDirty(coord, selectedLayerName);
+        }
     }
 
     // Overlay UI (translucent box at bottom-left of the Mercator preview)
@@ -475,8 +564,67 @@ void worldMap(bool& m_isOpen, Vault* vault)
         }
         // Keep vault pointer up to date (may change between frames)
         world.setVault(vault);
+
+        // Load deltas from vault on first vault connection
+        static Vault* lastVault = nullptr;
+        if (vault && vault != lastVault) {
+            world.loadDeltasFromVault();
+            lastVault = vault;
+        }
+
         static ImVec2 texSize(512, 512);
-        
+
+        // ── Menu Bar ─────────────────────────────────────────────
+        if (ImGui::BeginMenuBar())
+        {
+            if (ImGui::BeginMenu("Mode"))
+            {
+                if (ImGui::MenuItem("Browse", nullptr, g_editMode == 0)) g_editMode = 0;
+                if (ImGui::MenuItem("Paint",  nullptr, g_editMode == 1)) g_editMode = 1;
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("View"))
+            {
+                ImGui::DragFloat2("Preview Size", &texSize.x, 8.0f, 128.0f, 2048.0f, "%.0f");
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Deltas"))
+            {
+                if (ImGui::MenuItem("Save Edits to Vault", nullptr, false, vault != nullptr)) {
+                    world.saveDeltasToVault();
+                }
+                if (ImGui::MenuItem("Reload Edits from Vault", nullptr, false, vault != nullptr)) {
+                    world.loadDeltasFromVault();
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::EndMenuBar();
+        }
+
+        // ── Paint Mode Controls ──────────────────────────────────
+        if (g_editMode == 1)
+        {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.12f, 0.18f, 0.90f));
+            ImGui::BeginChild("PaintControls", ImVec2(0, 60), true);
+            ImGui::Columns(4, nullptr, false);
+
+            ImGui::Text("Brush:");
+            ImGui::NextColumn();
+            ImGui::SliderFloat("Radius", &g_brushRadius, 0.5f, 16.0f, "%.1f");
+            ImGui::NextColumn();
+            ImGui::SliderFloat("Strength", &g_brushStrength, 0.01f, 1.0f, "%.2f");
+            ImGui::NextColumn();
+            ImGui::RadioButton("Add", &g_brushDeltaMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Set", &g_brushDeltaMode, 1);
+
+            ImGui::Columns(1);
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        }
 
         mercatorMap("Mercator World Map", texSize, world);
         ImGui::SameLine();

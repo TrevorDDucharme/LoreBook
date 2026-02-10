@@ -284,6 +284,141 @@ public:
     bool updateFloorPlanTemplate(int64_t templateID, const std::string& name, 
                                  const std::string& category, const std::string& tags);
 
+    // ── WorldMap LayerDelta persistence ──────────────────────────
+    // Save or update a layer delta for a specific chunk+layer.
+    bool saveLayerDelta(int chunkX, int chunkY, int chunkDepth,
+                        const std::string& layerName,
+                        int channelCount, int resolution, int deltaMode,
+                        const std::vector<uint8_t>& deltaData,
+                        const std::string& paramOverrides)
+    {
+        if (!dbConnection) return false;
+        const char* sql =
+            "INSERT OR REPLACE INTO LayerDeltas "
+            "(ChunkX, ChunkY, ChunkDepth, LayerName, ChannelCount, Resolution, "
+            " DeltaMode, DeltaData, ParamOverrides, UpdatedAt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'));";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_int(stmt, 1, chunkX);
+        sqlite3_bind_int(stmt, 2, chunkY);
+        sqlite3_bind_int(stmt, 3, chunkDepth);
+        sqlite3_bind_text(stmt, 4, layerName.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 5, channelCount);
+        sqlite3_bind_int(stmt, 6, resolution);
+        sqlite3_bind_int(stmt, 7, deltaMode);
+        if (!deltaData.empty())
+            sqlite3_bind_blob(stmt, 8, deltaData.data(),
+                              static_cast<int>(deltaData.size()), SQLITE_TRANSIENT);
+        else
+            sqlite3_bind_null(stmt, 8);
+        sqlite3_bind_text(stmt, 9, paramOverrides.c_str(), -1, SQLITE_TRANSIENT);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // Load a layer delta for a specific chunk+layer. Returns true if found.
+    bool loadLayerDelta(int chunkX, int chunkY, int chunkDepth,
+                        const std::string& layerName,
+                        int& channelCount, int& resolution, int& deltaMode,
+                        std::vector<uint8_t>& deltaData,
+                        std::string& paramOverrides)
+    {
+        if (!dbConnection) return false;
+        const char* sql =
+            "SELECT ChannelCount, Resolution, DeltaMode, DeltaData, ParamOverrides "
+            "FROM LayerDeltas WHERE ChunkX=? AND ChunkY=? AND ChunkDepth=? AND LayerName=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_int(stmt, 1, chunkX);
+        sqlite3_bind_int(stmt, 2, chunkY);
+        sqlite3_bind_int(stmt, 3, chunkDepth);
+        sqlite3_bind_text(stmt, 4, layerName.c_str(), -1, SQLITE_TRANSIENT);
+        bool found = false;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            channelCount = sqlite3_column_int(stmt, 0);
+            resolution = sqlite3_column_int(stmt, 1);
+            deltaMode = sqlite3_column_int(stmt, 2);
+            const void* blob = sqlite3_column_blob(stmt, 3);
+            int blobSize = sqlite3_column_bytes(stmt, 3);
+            if (blob && blobSize > 0) {
+                deltaData.resize(blobSize);
+                std::memcpy(deltaData.data(), blob, blobSize);
+            } else {
+                deltaData.clear();
+            }
+            const unsigned char* po = sqlite3_column_text(stmt, 4);
+            paramOverrides = po ? reinterpret_cast<const char*>(po) : "";
+            found = true;
+        }
+        sqlite3_finalize(stmt);
+        return found;
+    }
+
+    // Delete a layer delta.
+    bool deleteLayerDelta(int chunkX, int chunkY, int chunkDepth,
+                          const std::string& layerName)
+    {
+        if (!dbConnection) return false;
+        const char* sql =
+            "DELETE FROM LayerDeltas WHERE ChunkX=? AND ChunkY=? AND ChunkDepth=? AND LayerName=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return false;
+        sqlite3_bind_int(stmt, 1, chunkX);
+        sqlite3_bind_int(stmt, 2, chunkY);
+        sqlite3_bind_int(stmt, 3, chunkDepth);
+        sqlite3_bind_text(stmt, 4, layerName.c_str(), -1, SQLITE_TRANSIENT);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // List all layer deltas (for loading all edits on vault open).
+    struct LayerDeltaRecord {
+        int chunkX, chunkY, chunkDepth;
+        std::string layerName;
+        int channelCount, resolution, deltaMode;
+        std::vector<uint8_t> deltaData;
+        std::string paramOverrides;
+    };
+    std::vector<LayerDeltaRecord> listAllLayerDeltas()
+    {
+        std::vector<LayerDeltaRecord> result;
+        if (!dbConnection) return result;
+        const char* sql =
+            "SELECT ChunkX, ChunkY, ChunkDepth, LayerName, ChannelCount, Resolution, "
+            "DeltaMode, DeltaData, ParamOverrides FROM LayerDeltas;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return result;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            LayerDeltaRecord r;
+            r.chunkX = sqlite3_column_int(stmt, 0);
+            r.chunkY = sqlite3_column_int(stmt, 1);
+            r.chunkDepth = sqlite3_column_int(stmt, 2);
+            const unsigned char* ln = sqlite3_column_text(stmt, 3);
+            r.layerName = ln ? reinterpret_cast<const char*>(ln) : "";
+            r.channelCount = sqlite3_column_int(stmt, 4);
+            r.resolution = sqlite3_column_int(stmt, 5);
+            r.deltaMode = sqlite3_column_int(stmt, 6);
+            const void* blob = sqlite3_column_blob(stmt, 7);
+            int blobSize = sqlite3_column_bytes(stmt, 7);
+            if (blob && blobSize > 0) {
+                r.deltaData.resize(blobSize);
+                std::memcpy(r.deltaData.data(), blob, blobSize);
+            }
+            const unsigned char* po = sqlite3_column_text(stmt, 8);
+            r.paramOverrides = po ? reinterpret_cast<const char*>(po) : "";
+            result.push_back(std::move(r));
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
     // Tag filter API (used by GraphView to filter tree)
     void setTagFilter(const std::vector<std::string> &tags, bool modeAll)
     {
@@ -1008,6 +1143,31 @@ public:
                 
                 const char *idxCharsName = "CREATE INDEX IF NOT EXISTS idx_Characters_Name ON Characters(Name);";
                 sqlite3_exec(dbConnection, idxCharsName, nullptr, nullptr, nullptr);
+            }
+
+            // ============================================================
+            // WorldMap LayerDeltas table: persists per-chunk edits
+            // ============================================================
+            {
+                const char *createDeltasSQL = "CREATE TABLE IF NOT EXISTS LayerDeltas ("
+                                               "ChunkX INTEGER NOT NULL, "
+                                               "ChunkY INTEGER NOT NULL, "
+                                               "ChunkDepth INTEGER NOT NULL, "
+                                               "LayerName TEXT NOT NULL, "
+                                               "ChannelCount INTEGER DEFAULT 1, "
+                                               "Resolution INTEGER DEFAULT 32, "
+                                               "DeltaMode INTEGER DEFAULT 0, "
+                                               "DeltaData BLOB, "
+                                               "ParamOverrides TEXT, "
+                                               "UpdatedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                               "PRIMARY KEY(ChunkX, ChunkY, ChunkDepth, LayerName)"
+                                               ");";
+                char *dErr = nullptr;
+                if (sqlite3_exec(dbConnection, createDeltasSQL, nullptr, nullptr, &dErr) != SQLITE_OK)
+                {
+                    if (dErr)
+                        sqlite3_free(dErr);
+                }
             }
 
             // Initialize VaultHistory helper and ensure schema for revisions & conflicts

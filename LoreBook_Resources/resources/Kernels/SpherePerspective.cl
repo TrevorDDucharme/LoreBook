@@ -85,3 +85,90 @@ __kernel void sphere_perspective_sample_rgba(
     float4 color = sphereTex[texIdx];
     output[u + v * screenW] = color;
 }
+
+/// Region-aware sphere perspective projection.
+/// The source buffer covers only [regionLonMinDeg, regionLonMaxDeg] ×
+/// [regionLatMinDeg, regionLatMaxDeg] at (regionW × regionH) resolution.
+__kernel void sphere_perspective_sample_rgba_region(
+    __global const float4* regionTex,
+    int regionW,
+    int regionH,
+    float regionLonMinDeg,
+    float regionLonMaxDeg,
+    float regionLatMinDeg,
+    float regionLatMaxDeg,
+
+    __global float4* output,
+    int screenW,
+    int screenH,
+
+    float3 camPos,
+    float3 camForward,
+    float3 camRight,
+    float3 camUp,
+
+    float fovY)
+{
+    int u = get_global_id(0);
+    int v = get_global_id(1);
+
+    if (u >= screenW || v >= screenH)
+        return;
+
+    float nx = (float)u / (float)screenW;
+    float ny = (float)v / (float)screenH;
+
+    float aspect = (float)screenW / (float)screenH;
+    float px = (2.0f * nx - 1.0f) * tan(fovY * 0.5f) * aspect;
+    float py = (1.0f - 2.0f * ny) * tan(fovY * 0.5f);
+    float3 rayDir = normalize(px * camRight + py * camUp + camForward);
+
+    const float R = 1.0f;
+    float a = dot(rayDir, rayDir);
+    float b = 2.0f * dot(camPos, rayDir);
+    float c = dot(camPos, camPos) - R * R;
+    float disc = b * b - 4.0f * a * c;
+
+    if (disc <= 0.0f) {
+        output[u + v * screenW] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float sqrtD = sqrt(disc);
+    float t0 = (-b - sqrtD) / (2.0f * a);
+    float t1 = (-b + sqrtD) / (2.0f * a);
+
+    float t = t0;
+    if (t < 0.0f) t = t1;
+    if (t < 0.0f) {
+        output[u + v * screenW] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float3 hit = camPos + t * rayDir;
+    const float RAD_TO_DEG = 180.0f / 3.14159265358979323846f;
+    float lon = atan2(hit.z, hit.x) * RAD_TO_DEG;
+    float lat = asin(clamp(hit.y, -1.0f, 1.0f)) * RAD_TO_DEG;
+
+    float regionLonSpan = regionLonMaxDeg - regionLonMinDeg;
+    float regionLatSpan = regionLatMaxDeg - regionLatMinDeg;
+
+    float localLon = lon - regionLonMinDeg;
+    while (localLon < 0.0f) localLon += 360.0f;
+    while (localLon >= 360.0f) localLon -= 360.0f;
+    float regionLonSpanPos = regionLonSpan;
+    if (regionLonSpanPos < 0.0f) regionLonSpanPos += 360.0f;
+
+    float texU = localLon / regionLonSpanPos;
+    float texV = (regionLatMaxDeg - lat) / regionLatSpan;
+
+    if (texU < 0.0f || texU >= 1.0f || texV < 0.0f || texV >= 1.0f) {
+        output[u + v * screenW] = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    int texX = clamp((int)(texU * (float)regionW), 0, regionW - 1);
+    int texY = clamp((int)(texV * (float)regionH), 0, regionH - 1);
+
+    output[u + v * screenW] = regionTex[texY * regionW + texX];
+}

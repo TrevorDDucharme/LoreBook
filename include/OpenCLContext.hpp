@@ -646,3 +646,119 @@ static void multiplyColor(cl_mem& output,
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Region-bounded Perlin noise on a sphere sub-region
+// ─────────────────────────────────────────────────────────────────────
+
+static cl_program gPerlinRegionProgram = nullptr;
+
+/// Generate Perlin FBM noise for a sub-region of the sphere.
+///
+/// The region is specified in colatitude (theta ∈ [0,π]) and azimuth
+/// (phi ∈ [0,2π]).  Use lonLatToThetaPhi() to convert.
+///
+/// output: cl_mem float buffer of resLat × resLon.
+static void perlinRegion(cl_mem& output,
+                         int resLat, int resLon,
+                         float thetaMin, float thetaMax,
+                         float phiMin,   float phiMax,
+                         float frequency, float lacunarity,
+                         int octaves, float persistence,
+                         unsigned int seed)
+{
+    ZoneScopedN("PerlinRegion");
+    if (!OpenCLContext::get().isReady())
+        return;
+
+    cl_command_queue queue = OpenCLContext::get().getQueue();
+    cl_int err = CL_SUCCESS;
+
+    static cl_kernel gPerlinRegionKernel = nullptr;
+    try {
+        OpenCLContext::get().createProgram(gPerlinRegionProgram, "Kernels/PerlinRegion.cl");
+        OpenCLContext::get().createKernelFromProgram(gPerlinRegionKernel,
+                                                     gPerlinRegionProgram,
+                                                     "perlin_fbm_3d_sphere_region");
+    } catch (const std::runtime_error &e) {
+        printf("Error initializing PerlinRegion OpenCL: %s\n", e.what());
+        return;
+    }
+
+    {
+        ZoneScopedN("PerlinRegion Buffer Alloc");
+        size_t total = (size_t)resLat * (size_t)resLon * sizeof(float);
+        size_t existing = 0;
+        if (output != nullptr) {
+            err = clGetMemObjectInfo(output, CL_MEM_SIZE, sizeof(existing), &existing, NULL);
+            if (err != CL_SUCCESS || existing < total) {
+                OpenCLContext::get().releaseMem(output);
+                output = nullptr;
+            }
+        }
+        if (output == nullptr) {
+            output = OpenCLContext::get().createBuffer(CL_MEM_READ_WRITE, total,
+                                                       nullptr, &err, "perlinRegion output");
+            if (err != CL_SUCCESS || output == nullptr)
+                throw std::runtime_error("clCreateBuffer failed for perlinRegion output");
+        }
+    }
+
+    clSetKernelArg(gPerlinRegionKernel,  0, sizeof(cl_mem), &output);
+    clSetKernelArg(gPerlinRegionKernel,  1, sizeof(int),    &resLat);
+    clSetKernelArg(gPerlinRegionKernel,  2, sizeof(int),    &resLon);
+    clSetKernelArg(gPerlinRegionKernel,  3, sizeof(float),  &thetaMin);
+    clSetKernelArg(gPerlinRegionKernel,  4, sizeof(float),  &thetaMax);
+    clSetKernelArg(gPerlinRegionKernel,  5, sizeof(float),  &phiMin);
+    clSetKernelArg(gPerlinRegionKernel,  6, sizeof(float),  &phiMax);
+    clSetKernelArg(gPerlinRegionKernel,  7, sizeof(float),  &frequency);
+    clSetKernelArg(gPerlinRegionKernel,  8, sizeof(float),  &lacunarity);
+    clSetKernelArg(gPerlinRegionKernel,  9, sizeof(int),    &octaves);
+    clSetKernelArg(gPerlinRegionKernel, 10, sizeof(float),  &persistence);
+    clSetKernelArg(gPerlinRegionKernel, 11, sizeof(unsigned int), &seed);
+
+    size_t global[2] = { (size_t)resLat, (size_t)resLon };
+    {
+        ZoneScopedN("PerlinRegion Enqueue");
+        err = clEnqueueNDRangeKernel(queue, gPerlinRegionKernel, 2,
+                                      nullptr, global, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS)
+            throw std::runtime_error("clEnqueueNDRangeKernel failed for perlinRegion");
+    }
+}
+
+/// Apply a delta buffer to a base buffer on the GPU.
+///   mode 0 = Add, mode 1 = Set.
+static void applyDeltaScalar(cl_mem base, cl_mem delta,
+                              int resLat, int resLon, int mode)
+{
+    ZoneScopedN("ApplyDeltaScalar");
+    if (!OpenCLContext::get().isReady()) return;
+
+    static cl_program prog = nullptr;
+    static cl_kernel  kern = nullptr;
+    try {
+        OpenCLContext::get().createProgram(prog, "Kernels/ApplyDelta.cl");
+        OpenCLContext::get().createKernelFromProgram(kern, prog, "apply_delta_scalar");
+    } catch (...) { return; }
+
+    clSetKernelArg(kern, 0, sizeof(cl_mem), &base);
+    clSetKernelArg(kern, 1, sizeof(cl_mem), &delta);
+    clSetKernelArg(kern, 2, sizeof(int),    &resLat);
+    clSetKernelArg(kern, 3, sizeof(int),    &resLon);
+    clSetKernelArg(kern, 4, sizeof(int),    &mode);
+
+    size_t global[2] = { (size_t)resLat, (size_t)resLon };
+    clEnqueueNDRangeKernel(OpenCLContext::get().getQueue(), kern, 2,
+                            nullptr, global, nullptr, 0, nullptr, nullptr);
+}
+
+/// Utility: convert lon/lat (radians) to theta/phi for the Perlin sphere.
+///   theta: colatitude [0, π], 0 = north pole.
+///   phi:   azimuth [0, 2π].
+static inline void lonLatToThetaPhi(float lonRad, float latRad,
+                                     float& theta, float& phi) {
+    const float PI = 3.14159265358979323846f;
+    theta = PI / 2.0f - latRad; // north pole (lat=π/2) → theta=0
+    phi   = lonRad + PI;        // lon ∈ [-π,π] → phi ∈ [0,2π]
+}
+

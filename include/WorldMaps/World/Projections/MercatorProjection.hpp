@@ -27,6 +27,7 @@ private:
 
     static cl_program mercatorProgram;
     static cl_kernel mercatorKernel;
+    static cl_kernel mercatorRegionKernel;
 
     static void mercatorProject(
         cl_mem& output,
@@ -36,6 +37,17 @@ private:
         int outW,
         int outH,
         float centerLon,
+        float centerMercY,
+        float zoom);
+
+    static void mercatorProjectRegion(
+        cl_mem& output,
+        cl_mem regionTex,
+        int regionW, int regionH,
+        float regionLonMinDeg, float regionLonMaxDeg,
+        float regionLatMinDeg, float regionLatMaxDeg,
+        int outW, int outH,
+        float centerLonDeg,
         float centerMercY,
         float zoom);
 };
