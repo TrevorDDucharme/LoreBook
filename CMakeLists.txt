@@ -2,6 +2,10 @@
 cmake_minimum_required(VERSION 3.10)
 
 project(LoreBook)
+
+# Ensure `compile_commands.json` is generated for language servers and editor tooling
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 #set the C++ standard to use
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

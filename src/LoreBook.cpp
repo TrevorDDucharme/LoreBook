@@ -40,6 +40,7 @@
 #include <CharacterEditor/CharacterEditorUI.hpp>
 #include <CharacterEditor/PartLibrary.hpp>
 #include <CharacterEditor/CharacterManager.hpp>
+#include <Editors/Markdown/MarkdownEditor.hpp>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -1324,6 +1325,30 @@ int main(int argc, char** argv)
             }
         }
         characterEditor.render();
+
+        ImGui::Begin("markdown test");
+        // Use MarkdownEditor which encapsulates both editor and preview
+        static MarkdownEditor mdEditor;
+        static bool editorInitialized = false;
+        if (!editorInitialized) {
+            // Initialize with some sample content
+            mdEditor.openFile("");  // Empty path for scratch buffer
+            editorInitialized = true;
+        }
+        
+        // Draw tabs for editor and preview
+        if (ImGui::BeginTabBar("MarkdownTabs")) {
+            if (ImGui::BeginTabItem("Editor")) {
+                mdEditor.drawEditor();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Preview")) {
+                mdEditor.drawPreview();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+        ImGui::End();
 
         // Rendering
         ImGui::Render();

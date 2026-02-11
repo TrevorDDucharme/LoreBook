@@ -8,6 +8,7 @@
 #include <imgui_stdlib.h>
 #include <plog/Log.h>
 #include "MarkdownText.hpp"
+#include <Editors/Markdown/MarkdownEditor.hpp>
 #include <sqlite3.h>
 #include <unordered_set>
 #include <unordered_map>
@@ -62,6 +63,10 @@ class Vault
     int64_t loadedItemID = -1;
     bool contentDirty = false;
     float lastSaveTime = 0.0f;
+    
+    // Markdown editor/preview for vault content
+    MarkdownEditor vaultMarkdownEditor;
+    std::string vaultEditorContentCache;  // Used to detect external changes
 
     // UI status
     std::string statusMessage;
@@ -2527,6 +2532,7 @@ public:
             currentContent.clear();
             currentTitle.clear();
             currentTags.clear();
+            vaultEditorContentCache.clear();  // Force MarkdownEditor to resync on item change
             // Load content from DB (prefer remote)
             if (dbBackend && dbBackend->isOpen())
             {
@@ -2629,18 +2635,22 @@ public:
         }
         float leftWidth = avail.x * 0.5f;
 
+        // Sync content to MarkdownEditor when item changes
+        if (currentContent != vaultEditorContentCache)
+        {
+            vaultMarkdownEditor.setContent(currentContent);
+            vaultEditorContentCache = currentContent;
+        }
+
         // Left: editor (scrollable)
         if (canEdit)
         {
-            //no scrollbars
             ImGui::BeginChild("VaultEditorLeft", ImVec2(leftWidth, mainHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
             // Title editable
             char titleBuf[256];
             strncpy(titleBuf, currentTitle.c_str(), sizeof(titleBuf));
             titleBuf[sizeof(titleBuf) - 1] = '\0';
-            if (!canEdit)
-                ImGui::BeginDisabled();
             if (ImGui::InputText("Title", titleBuf, sizeof(titleBuf)))
             {
                 std::string newTitle = std::string(titleBuf);
@@ -2691,19 +2701,19 @@ public:
                     currentTitle = newTitle;
                 }
             }
-            if (!canEdit)
-                ImGui::EndDisabled();
 
             ImGui::Separator();
 
-            // Editor content
-            ImVec2 editorSize = ImVec2(leftWidth - 16, mainHeight - 40);
-            if (!canEdit)
-                ImGui::BeginDisabled();
-            if (ImGui::InputTextMultiline("##md_editor", &currentContent, editorSize, ImGuiInputTextFlags_AllowTabInput))
+            // Use MarkdownEditor for content editing
+            vaultMarkdownEditor.drawEditor();
+
+            // Check if editor content changed and save to DB
+            if (vaultMarkdownEditor.isDirty())
             {
-                currentContent=sanitizeContent(currentContent);
-                // Immediate save on modification
+                currentContent = vaultMarkdownEditor.getEditorContent();
+                currentContent = sanitizeContent(currentContent);
+                vaultEditorContentCache = currentContent;
+                
                 if (loadedItemID >= 0)
                 {
                     if (dbBackend && dbBackend->isOpen())
@@ -2748,11 +2758,10 @@ public:
                 {
                     contentDirty = true;
                 }
+                vaultMarkdownEditor.clearDirtyFlag();
             }
-            if (!canEdit)
-                ImGui::EndDisabled();
 
-            // Show saved indicator in editor if recently saved
+            // Show saved indicator
             if (lastSaveTime > 0.0f && (ImGui::GetTime() - lastSaveTime) < 1.5f)
             {
                 ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Saved");
@@ -2766,7 +2775,7 @@ public:
             ImGui::SameLine();
         }
 
-        // Right: live preview (scrollable)
+        // Right: live preview using MarkdownEditor's 2.5D FBO preview
         ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true);
         ImGui::TextDisabled("Preview");
         ImGui::Separator();
@@ -2780,43 +2789,8 @@ public:
             }
         }
 
-        // ── Text effects overlay setup ──
-        static float lastContentH = 100.0f;
-        {
-            TextEffectsOverlay &fxOverlay = GetTextEffectsOverlay();
-            float scrollY = ImGui::GetScrollY();
-            ImVec2 contentOrigin = ImGui::GetCursorScreenPos();
-            float vpW = ImGui::GetContentRegionAvail().x;
-            float vpH = ImGui::GetWindowHeight();
-            fxOverlay.beginFrame(scrollY, vpW, vpH, lastContentH);
-            ImGui::MarkdownTextSetEffectsOverlay(&fxOverlay, contentOrigin, scrollY);
-        }
-
-        // Render markdown using our MarkdownText helper (pass Vault context for attachment previews)
-        ImGui::MarkdownText(currentContent.c_str(), this);
-
-        // ── Text effects overlay finalize and composite ──
-        {
-            lastContentH = ImGui::GetCursorPosY();
-            TextEffectsOverlay &fxOverlay = GetTextEffectsOverlay();
-            fxOverlay.endFrame(ImGui::GetIO().DeltaTime);
-            // Clear the overlay pointer so other MarkdownText calls don't record into it
-            ImGui::MarkdownTextSetEffectsOverlay(nullptr, ImVec2(0,0), 0.0f);
-
-            // Composite the effects overlay on top of the preview
-            if (fxOverlay.hasActiveEffects() && fxOverlay.getOverlayTexture())
-            {
-                ImDrawList *dl = ImGui::GetWindowDrawList();
-                ImVec2 winPos = ImGui::GetWindowPos();
-                ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
-                ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
-                ImVec2 rectMin(winPos.x + contentMin.x, winPos.y + contentMin.y);
-                ImVec2 rectMax(winPos.x + contentMax.x, winPos.y + contentMax.y);
-                dl->AddImage(fxOverlay.getOverlayTexture(),
-                             rectMin, rectMax,
-                             fxOverlay.getUV0(), fxOverlay.getUV1());
-            }
-        }
+        // Use MarkdownEditor's 2.5D FBO preview renderer
+        vaultMarkdownEditor.drawPreview();
 
         // Process pending model viewer reloads triggered by background fetches
         {
