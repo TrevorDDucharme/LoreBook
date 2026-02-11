@@ -6,6 +6,8 @@
 // ImGui markdown rendering using md4c (CommonMark)
 #include <md4c.h>
 
+class TextEffectsOverlay; // forward declaration
+
 namespace ImGui
 {
     // Main function to render markdown text
@@ -13,6 +15,9 @@ namespace ImGui
     IMGUI_API void MarkdownText(const char* text, void* context);
     IMGUI_API void MarkdownText(const std::string& text);
     IMGUI_API void MarkdownText(const std::string& text, void* context);
+
+    // Set the active text effects overlay for subsequent MarkdownText() calls
+    IMGUI_API void MarkdownTextSetEffectsOverlay(TextEffectsOverlay* overlay, ImVec2 contentOrigin, float scrollY);
 
     // Convenience formatted versions
     template <typename... Args>

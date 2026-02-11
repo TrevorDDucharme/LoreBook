@@ -127,7 +127,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE GLUT::GLUT)
 
 if(UNIX AND NOT APPLE)
     find_package(X11 REQUIRED)
-    target_link_libraries(${PROJECT_NAME} PRIVATE X11::Xi X11::Xrandr X11::Xxf86vm)
+    target_link_libraries(${PROJECT_NAME} PRIVATE X11::X11 X11::Xi X11::Xrandr X11::Xxf86vm)
 endif()
 
 # assimp (3D model import)

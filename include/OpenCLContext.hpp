@@ -1,5 +1,6 @@
 #pragma once
 #include <CL/cl.h>
+#include <CL/cl_gl.h>
 #include <string>
 #include <stdexcept>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include <tracy/TracyOpenCL.hpp>
 #include <regex>
 #include <unordered_set>
+#include <GL/glew.h>
 
 inline static std::string normalizePath(const std::string &p) {
     std::vector<std::string> parts;
@@ -132,6 +134,17 @@ public:
     void createProgram(cl_program& program,std::string file_path);
     void createKernelFromProgram(cl_kernel& kernel,cl_program program, const std::string &kernelName);
 
+    // CL/GL interop — call after GL context is active
+    bool initGLInterop();
+    bool hasGLInterop() const { return clGLInterop; }
+
+    // Create a CL image from an existing GL texture (requires GL interop)
+    cl_mem createFromGLTexture(GLuint texID, cl_mem_flags flags, GLenum target = GL_TEXTURE_2D, GLint mipLevel = 0);
+
+    // Acquire/release GL objects for CL usage
+    void acquireGLObjects(cl_mem *memObjects, int count);
+    void releaseGLObjects(cl_mem *memObjects, int count);
+
 private:
     OpenCLContext() = default;
     ~OpenCLContext();
@@ -146,6 +159,7 @@ private:
     cl_command_queue clQueue = nullptr;
     bool clReady = false;
     bool clDeviceIsGPU = false;
+    bool clGLInterop = false;
 
     // Persistent debug buffer (always-on)
     cl_mem debugBuf_ = nullptr;

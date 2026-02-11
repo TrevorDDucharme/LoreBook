@@ -26,6 +26,7 @@
 #include "DBBackend.hpp"
 #include "VaultHistory.hpp"
 #include "LuaScriptManager.hpp"
+#include "TextEffectsOverlay.hpp"
 
 // Configuration for opening a vault with either local sqlite or remote MySQL
 struct VaultConfig
@@ -2778,8 +2779,44 @@ public:
                 ImGui::Separator();
             }
         }
+
+        // ── Text effects overlay setup ──
+        static float lastContentH = 100.0f;
+        {
+            TextEffectsOverlay &fxOverlay = GetTextEffectsOverlay();
+            float scrollY = ImGui::GetScrollY();
+            ImVec2 contentOrigin = ImGui::GetCursorScreenPos();
+            float vpW = ImGui::GetContentRegionAvail().x;
+            float vpH = ImGui::GetWindowHeight();
+            fxOverlay.beginFrame(scrollY, vpW, vpH, lastContentH);
+            ImGui::MarkdownTextSetEffectsOverlay(&fxOverlay, contentOrigin, scrollY);
+        }
+
         // Render markdown using our MarkdownText helper (pass Vault context for attachment previews)
         ImGui::MarkdownText(currentContent.c_str(), this);
+
+        // ── Text effects overlay finalize and composite ──
+        {
+            lastContentH = ImGui::GetCursorPosY();
+            TextEffectsOverlay &fxOverlay = GetTextEffectsOverlay();
+            fxOverlay.endFrame(ImGui::GetIO().DeltaTime);
+            // Clear the overlay pointer so other MarkdownText calls don't record into it
+            ImGui::MarkdownTextSetEffectsOverlay(nullptr, ImVec2(0,0), 0.0f);
+
+            // Composite the effects overlay on top of the preview
+            if (fxOverlay.hasActiveEffects() && fxOverlay.getOverlayTexture())
+            {
+                ImDrawList *dl = ImGui::GetWindowDrawList();
+                ImVec2 winPos = ImGui::GetWindowPos();
+                ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+                ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+                ImVec2 rectMin(winPos.x + contentMin.x, winPos.y + contentMin.y);
+                ImVec2 rectMax(winPos.x + contentMax.x, winPos.y + contentMax.y);
+                dl->AddImage(fxOverlay.getOverlayTexture(),
+                             rectMin, rectMax,
+                             fxOverlay.getUV0(), fxOverlay.getUV1());
+            }
+        }
 
         // Process pending model viewer reloads triggered by background fetches
         {

@@ -1,6 +1,7 @@
 #include <OpenCLContext.hpp>
 #include <plog/Log.h>
 #include <sstream>
+#include <GL/glx.h>
 
 OpenCLContext &OpenCLContext::get()
 {
@@ -99,6 +100,126 @@ bool OpenCLContext::init()
     return true;
 }
 
+static std::unordered_map<std::string, size_t> debugMemAllocations={};
+static std::unordered_map<cl_mem, std::string> tagLookup={};
+
+bool OpenCLContext::initGLInterop()
+{
+    if (clGLInterop)
+    {
+        PLOG_WARNING << "CL/GL interop already initialized";
+        return true;
+    }
+    if (!clReady)
+    {
+        PLOG_ERROR << "Cannot init CL/GL interop: OpenCL not initialized";
+        return false;
+    }
+
+    // Check cl_khr_gl_sharing extension support
+    size_t extSize = 0;
+    clGetDeviceInfo(clDevice, CL_DEVICE_EXTENSIONS, 0, nullptr, &extSize);
+    std::string extensions;
+    extensions.resize(extSize);
+    clGetDeviceInfo(clDevice, CL_DEVICE_EXTENSIONS, extSize, &extensions[0], nullptr);
+    if (extensions.find("cl_khr_gl_sharing") == std::string::npos)
+    {
+        PLOG_WARNING << "CL/GL interop: cl_khr_gl_sharing extension not supported";
+        return false;
+    }
+
+    // Get current GLX context and display
+    GLXContext glxCtx = glXGetCurrentContext();
+    Display *glxDisplay = glXGetCurrentDisplay();
+    if (!glxCtx || !glxDisplay)
+    {
+        PLOG_ERROR << "CL/GL interop: failed to get GLX context/display";
+        return false;
+    }
+
+    // Build context properties with GL sharing
+    cl_context_properties props[] = {
+        CL_CONTEXT_PLATFORM, (cl_context_properties)clPlatform,
+        CL_GL_CONTEXT_KHR,   (cl_context_properties)glxCtx,
+        CL_GLX_DISPLAY_KHR,  (cl_context_properties)glxDisplay,
+        0
+    };
+
+    // Release old context and queue
+    if (clQueue)
+    {
+        clReleaseCommandQueue(clQueue);
+        clQueue = nullptr;
+    }
+    if (clContext)
+    {
+        clReleaseContext(clContext);
+        clContext = nullptr;
+    }
+
+    // Recreate context with GL sharing
+    cl_int err = CL_SUCCESS;
+    clContext = clCreateContext(props, 1, &clDevice, nullptr, nullptr, &err);
+    if (err != CL_SUCCESS)
+    {
+        PLOG_ERROR << "CL/GL interop: clCreateContext with GL sharing failed (err=" << err << ")";
+        // Fall back: recreate plain context
+        clContext = clCreateContext(nullptr, 1, &clDevice, nullptr, nullptr, &err);
+        clQueue = clCreateCommandQueue(clContext, clDevice, 0, &err);
+        return false;
+    }
+
+    clQueue = clCreateCommandQueue(clContext, clDevice, 0, &err);
+    if (err != CL_SUCCESS)
+    {
+        PLOG_ERROR << "CL/GL interop: clCreateCommandQueue failed (err=" << err << ")";
+        return false;
+    }
+
+    clGLInterop = true;
+    PLOG_INFO << "CL/GL interop initialized successfully";
+    return true;
+}
+
+cl_mem OpenCLContext::createFromGLTexture(GLuint texID, cl_mem_flags flags, GLenum target, GLint mipLevel)
+{
+    if (!clGLInterop)
+    {
+        PLOG_ERROR << "createFromGLTexture: CL/GL interop not initialized";
+        return nullptr;
+    }
+    cl_int err = CL_SUCCESS;
+    cl_mem mem = clCreateFromGLTexture(clContext, flags, target, mipLevel, texID, &err);
+    if (err != CL_SUCCESS || !mem)
+    {
+        PLOG_ERROR << "clCreateFromGLTexture failed (err=" << err << ") texID=" << texID;
+        return nullptr;
+    }
+    // Track it
+    {
+        std::lock_guard<std::mutex> lk(memTrackMutex_);
+        memSizes_[mem] = 0; // size not directly known for GL-backed objects
+        tagLookup[mem] = "gl_texture";
+    }
+    return mem;
+}
+
+void OpenCLContext::acquireGLObjects(cl_mem *memObjects, int count)
+{
+    if (!clGLInterop || count <= 0) return;
+    cl_int err = clEnqueueAcquireGLObjects(clQueue, count, memObjects, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS)
+        PLOG_ERROR << "clEnqueueAcquireGLObjects failed (err=" << err << ")";
+}
+
+void OpenCLContext::releaseGLObjects(cl_mem *memObjects, int count)
+{
+    if (!clGLInterop || count <= 0) return;
+    cl_int err = clEnqueueReleaseGLObjects(clQueue, count, memObjects, 0, nullptr, nullptr);
+    if (err != CL_SUCCESS)
+        PLOG_ERROR << "clEnqueueReleaseGLObjects failed (err=" << err << ")";
+}
+
 void OpenCLContext::cleanup()
 {
     if (clQueue)
@@ -116,9 +237,6 @@ void OpenCLContext::cleanup()
     clReady = false;
     clDeviceIsGPU = false;
 }
-
-static std::unordered_map<std::string, size_t> debugMemAllocations={};
-static std::unordered_map<cl_mem, std::string> tagLookup={};
 
 // --- Tracked buffer helpers ---
 cl_mem OpenCLContext::createBuffer(cl_mem_flags flags, size_t size, void *hostPtr, cl_int *err, std::string debugTag)

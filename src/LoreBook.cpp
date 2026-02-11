@@ -106,6 +106,11 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Upgrade OpenCL context to support CL/GL interop now that GL is active
+    if (!OpenCLContext::get().initGLInterop()) {
+        PLOGW << "CL/GL interop not available — text effects overlay will be disabled";
+    }
+
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
