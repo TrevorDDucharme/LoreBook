@@ -19,128 +19,10 @@
 #include "ResourceExplorer.hpp"
 #include <GL/gl.h>
 #include "TextEffectsOverlay.hpp"
+#include "TextEffectSystem.hpp"
 #include <cctype>
 #include <algorithm>
 #include <cstdlib>
-
-// ── Persistent fairy-dust particle system for sparkle effects ──────
-namespace {
-    struct FairyParticle {
-        float x, y;         // screen position
-        float vx, vy;       // velocity
-        float life;          // remaining life (seconds)
-        float maxLife;       // initial lifetime
-        float size;          // current size
-        float hue;           // color hue (0..1)
-        float twinklePhase;  // per-particle twinkle offset
-        float trailX, trailY; // previous position for trail
-    };
-
-    static std::vector<FairyParticle> s_fairyParticles;
-    static float s_lastFairyTime = 0.0f;
-    static uint32_t s_fairySeed = 12345;
-
-    static float fairyRand() {
-        s_fairySeed = s_fairySeed * 1103515245u + 12345u;
-        return (float)(s_fairySeed >> 16 & 0x7FFF) / 32767.0f;
-    }
-
-    static void fairySpawn(float x, float y, float density) {
-        int count = (int)(density * 0.3f + 0.5f);
-        if (count < 1 && fairyRand() < density * 0.3f) count = 1;
-        for (int i = 0; i < count; i++) {
-            FairyParticle p;
-            p.x = x + (fairyRand() - 0.5f) * 8.0f;
-            p.y = y + (fairyRand() - 0.5f) * 4.0f;
-            // Gentle upward and outward drift with swirl
-            float angle = fairyRand() * 6.2832f;
-            float spd = 8.0f + fairyRand() * 20.0f;
-            p.vx = cosf(angle) * spd;
-            p.vy = -5.0f - fairyRand() * 15.0f; // mostly upward
-            p.maxLife = 0.6f + fairyRand() * 1.2f;
-            p.life = p.maxLife;
-            p.size = 1.0f + fairyRand() * 2.5f;
-            p.hue = fairyRand(); // random pastel hue
-            p.twinklePhase = fairyRand() * 6.28f;
-            p.trailX = p.x;
-            p.trailY = p.y;
-            s_fairyParticles.push_back(p);
-        }
-    }
-
-    static void fairyUpdate(float dt) {
-        for (int i = (int)s_fairyParticles.size() - 1; i >= 0; i--) {
-            auto &p = s_fairyParticles[i];
-            p.trailX = p.x;
-            p.trailY = p.y;
-            // Swirling motion
-            float t = p.maxLife - p.life;
-            p.vx += sinf(t * 3.0f + p.twinklePhase) * 30.0f * dt;
-            p.vy += cosf(t * 2.5f + p.twinklePhase * 1.3f) * 15.0f * dt;
-            // Drag
-            p.vx *= (1.0f - 1.5f * dt);
-            p.vy *= (1.0f - 1.0f * dt);
-            p.x += p.vx * dt;
-            p.y += p.vy * dt;
-            p.life -= dt;
-            if (p.life <= 0.0f) {
-                s_fairyParticles[i] = s_fairyParticles.back();
-                s_fairyParticles.pop_back();
-            }
-        }
-    }
-
-    static void fairyDraw(ImDrawList *dl) {
-        for (auto &p : s_fairyParticles) {
-            float t = 1.0f - (p.life / p.maxLife); // 0=born, 1=dead
-            float alpha = (t < 0.1f) ? (t / 0.1f) : (1.0f - (t - 0.1f) / 0.9f);
-            alpha = alpha * alpha; // ease out
-            float twinkle = sinf(p.life * 12.0f + p.twinklePhase) * 0.5f + 0.5f;
-            alpha *= 0.5f + 0.5f * twinkle;
-            float sz = p.size * (0.3f + 0.7f * (1.0f - t));
-
-            // Pastel fairy color from hue
-            float r, g, b;
-            ImGui::ColorConvertHSVtoRGB(p.hue, 0.4f + 0.3f * twinkle, 1.0f, r, g, b);
-
-            // Trail line (fading)
-            float trailAlpha = alpha * 0.3f;
-            if (trailAlpha > 0.01f) {
-                ImU32 trailCol = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, trailAlpha));
-                dl->AddLine(ImVec2(p.trailX, p.trailY), ImVec2(p.x, p.y), trailCol, sz * 0.5f);
-            }
-
-            // Core glow (larger, softer)
-            if (alpha > 0.01f) {
-                float glowSz = sz * 2.5f;
-                ImU32 glowCol = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, alpha * 0.25f));
-                dl->AddCircleFilled(ImVec2(p.x, p.y), glowSz, glowCol, 8);
-
-                // Bright center
-                ImU32 coreCol = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                    r * 0.5f + 0.5f, g * 0.5f + 0.5f, b * 0.5f + 0.5f, alpha * 0.9f));
-                dl->AddCircleFilled(ImVec2(p.x, p.y), sz * 0.6f, coreCol, 6);
-
-                // Tiny bright white speck at core
-                ImU32 dotCol = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, alpha * twinkle));
-                dl->AddCircleFilled(ImVec2(p.x, p.y), sz * 0.25f, dotCol, 4);
-            }
-
-            // Star sparkle burst at birth
-            if (t < 0.15f) {
-                float starAlpha = (1.0f - t / 0.15f) * 0.7f;
-                float starSz = sz * 3.0f * (1.0f - t / 0.15f);
-                ImU32 starCol = ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, starAlpha));
-                dl->AddLine(ImVec2(p.x - starSz, p.y), ImVec2(p.x + starSz, p.y), starCol, 1.0f);
-                dl->AddLine(ImVec2(p.x, p.y - starSz), ImVec2(p.x, p.y + starSz), starCol, 1.0f);
-                dl->AddLine(ImVec2(p.x - starSz * 0.7f, p.y - starSz * 0.7f),
-                            ImVec2(p.x + starSz * 0.7f, p.y + starSz * 0.7f), starCol, 0.7f);
-                dl->AddLine(ImVec2(p.x + starSz * 0.7f, p.y - starSz * 0.7f),
-                            ImVec2(p.x - starSz * 0.7f, p.y + starSz * 0.7f), starCol, 0.7f);
-            }
-        }
-    }
-} // anonymous namespace
 
 // Parse optional size suffixes appended with ::<width>x<height>
 // Examples: "vault://Assets/model.glb::800x600" or "https://.../model.glb::640x480"
@@ -212,6 +94,7 @@ namespace ImGui
         // ── Text effects system ──
         struct ActiveEffect {
             EffectParams params;
+            TextEffectDef effectDef;
             std::string tagName;
         };
         std::vector<ActiveEffect> effectStack;
@@ -219,9 +102,17 @@ namespace ImGui
         // Document-space offset: used to convert screen positions to document coords
         ImVec2 contentOrigin = ImVec2(0,0);
         float docScrollY = 0.0f;
+        // Flag: an inline effect tag was just consumed, so the next text chunk should
+        // continue on the same visual line via SameLine(0,0).
+        bool sameLineNext = false;
+        // Flag: visible text has been rendered in the current block. Used to gate
+        // sameLineNext so that opening tags at the start of a paragraph don't
+        // cause SameLine against the previous paragraph's content.
+        bool hasRenderedTextInBlock = false;
 
-        // Parse an effect HTML tag and return the params. Returns true if it was an effect tag.
-        static bool parseEffectTag(const std::string &html, EffectParams &out, std::string &tagName, bool &isClosing)
+        // Parse an effect HTML tag and return the params + TextEffectDef. Returns true if it was an effect tag.
+        static bool parseEffectTag(const std::string &html, EffectParams &out, TextEffectDef &outDef,
+                                   std::string &tagName, bool &isClosing)
         {
             isClosing = false;
             tagName.clear();
@@ -233,38 +124,29 @@ namespace ImGui
                 tagName.push_back((char)std::tolower((unsigned char)html[i]));
                 i++;
             }
-            // Map tag name to effect type
-            static const struct { const char *name; TextEffectType type; } tagMap[] = {
-                {"pulse",    TextEffectType::Pulse},
-                {"glow",     TextEffectType::Glow},
-                {"shake",    TextEffectType::Shake},
-                {"particle", TextEffectType::Fire},
-                {"sparkle",  TextEffectType::Sparkle},
-                {"rainbow",  TextEffectType::Rainbow},
-                {"effect",   TextEffectType::None}, // generic, resolved via type= attr
-            };
-            bool found = false;
-            out = EffectParams(); // defaults
-            for (auto &m : tagMap) {
-                if (tagName == m.name) { out.type = m.type; found = true; break; }
-            }
-            if (!found) return false;
-            if (isClosing) return true; // closing tags don't need attrs
+            // Check if tag is a known modifier or the generic "effect" compose tag
+            bool isEffectTag = (tagName == "effect");
+            bool isKnownMod = (TextEffectSystem::parseModName(tagName) != FXMod::Count);
+            if (!isEffectTag && !isKnownMod) return false;
+            if (isClosing) return true; // closing tags just need the tag name for stack matching
 
-            // Parse key=value attributes
+            // Parse key=value attributes and bare words (modifier names without values)
+            std::vector<std::pair<std::string,std::string>> attrs;
+            std::vector<std::string> bareWords;
+
             while (i < html.size() && html[i] != '>') {
-                // skip whitespace
                 while (i < html.size() && (html[i] == ' ' || html[i] == '\t')) i++;
                 if (i >= html.size() || html[i] == '>' || html[i] == '/') break;
-                // key
+
                 std::string key;
                 while (i < html.size() && html[i] != '=' && html[i] != ' ' && html[i] != '>') {
                     key.push_back((char)std::tolower((unsigned char)html[i]));
                     i++;
                 }
-                std::string val;
+
                 if (i < html.size() && html[i] == '=') {
                     i++; // skip '='
+                    std::string val;
                     if (i < html.size() && (html[i] == '\"' || html[i] == '\'')) {
                         char q = html[i]; i++;
                         while (i < html.size() && html[i] != q) { val.push_back(html[i]); i++; }
@@ -274,58 +156,35 @@ namespace ImGui
                             val.push_back(html[i]); i++;
                         }
                     }
+                    attrs.push_back({key, val});
+                } else if (!key.empty()) {
+                    bareWords.push_back(key);
                 }
-                // Process attribute
-                if (key == "type" && tagName == "effect") {
-                    if (val == "pulse") out.type = TextEffectType::Pulse;
-                    else if (val == "glow") out.type = TextEffectType::Glow;
-                    else if (val == "shake") out.type = TextEffectType::Shake;
-                    else if (val == "fire") out.type = TextEffectType::Fire;
-                    else if (val == "sparkle") out.type = TextEffectType::Sparkle;
-                    else if (val == "rainbow") out.type = TextEffectType::Rainbow;
-                } else if (key == "effect" && tagName == "particle") {
-                    if (val == "fire") out.type = TextEffectType::Fire;
-                    else if (val == "sparkle") out.type = TextEffectType::Sparkle;
-                } else if (key == "cycle") {
-                    // parse e.g. "500ms" or "1s" or plain number
-                    float v = 1.0f;
-                    try {
-                        v = std::stof(val);
-                        if (val.find("ms") != std::string::npos) v /= 1000.0f;
-                    } catch (...) {}
-                    out.cycleSec = v;
-                } else if (key == "intensity") {
-                    try { out.intensity = std::stof(val); } catch (...) {}
-                } else if (key == "color") {
-                    // Parse #RRGGBB or #RGB
-                    if (!val.empty() && val[0] == '#') {
-                        unsigned int hex = 0;
-                        try { hex = std::stoul(val.substr(1), nullptr, 16); } catch (...) {}
-                        if (val.size() == 4) { // #RGB
-                            float r2 = ((hex >> 8) & 0xF) / 15.0f;
-                            float g2 = ((hex >> 4) & 0xF) / 15.0f;
-                            float b2 = (hex & 0xF) / 15.0f;
-                            out.color = ImVec4(r2, g2, b2, 1.0f);
-                        } else { // #RRGGBB
-                            out.color = ImVec4(((hex >> 16) & 0xFF) / 255.0f,
-                                               ((hex >> 8) & 0xFF) / 255.0f,
-                                               (hex & 0xFF) / 255.0f, 1.0f);
-                        }
-                    }
-                } else if (key == "radius") {
-                    try { out.radius = std::stof(val); } catch (...) {}
-                } else if (key == "lifetime") {
-                    float v = 1.0f;
-                    try {
-                        v = std::stof(val);
-                        if (val.find("ms") != std::string::npos) v /= 1000.0f;
-                    } catch (...) {}
-                    out.lifetimeSec = v;
-                } else if (key == "speed") {
-                    try { out.speed = std::stof(val); } catch (...) {}
-                } else if (key == "density") {
-                    try { out.density = std::stof(val); } catch (...) {}
+            }
+
+            // Build the composable TextEffectDef via TextEffectSystem
+            outDef = TextEffectSystem::buildFromTag(tagName, attrs, bareWords);
+
+            // Derive legacy EffectParams for overlay compatibility
+            out = EffectParams();
+            if (!outDef.modifiers.empty()) {
+                auto &first = outDef.modifiers[0];
+                switch (first.type) {
+                case FXMod::Pulse:     out.type = TextEffectType::Pulse; break;
+                case FXMod::Glow:      out.type = TextEffectType::Glow; break;
+                case FXMod::Shake:     out.type = TextEffectType::Shake; break;
+                case FXMod::FireEmit:  out.type = TextEffectType::Fire; break;
+                case FXMod::FairyDust: out.type = TextEffectType::Sparkle; break;
+                case FXMod::Rainbow:   out.type = TextEffectType::Rainbow; break;
+                default:               out.type = TextEffectType::None; break;
                 }
+                out.cycleSec = 1.0f / std::max(0.01f, first.params.speed);
+                out.intensity = first.params.amplitude;
+                out.color = first.params.color;
+                out.radius = first.params.radius;
+                out.speed = first.params.speed;
+                out.density = first.params.density;
+                out.lifetimeSec = first.params.lifetime;
             }
             return true;
         }
@@ -558,6 +417,14 @@ namespace ImGui
                 }
             }
 
+            // Color for link — push BEFORE definition list heuristic so early returns can pop it
+            bool pushedLinkColor = false;
+            if (!linkUrl.empty())
+            {
+                PushStyleColor(ImGuiCol_Text, ImVec4(0.26f, 0.53f, 0.96f, 1.0f));
+                pushedLinkColor = true;
+            }
+
             // Definition list heuristics (inline 'Term: definition' or leading ': definition')
             if (!in_code_block && lists.empty() && !in_table && !s.empty()){
                 // single-line 'Term: definition'
@@ -577,7 +444,7 @@ namespace ImGui
                         ImGui::SameLine();
                         TextWrapped(def.c_str());
                         src_pos += size; // consumed
-                        if (!linkUrl.empty()) PopStyleColor(); if (usedFont) PopFont();
+                        if (pushedLinkColor) PopStyleColor(); if (usedFont) PopFont();
                         return;
                     }
                 }
@@ -592,18 +459,19 @@ namespace ImGui
                     ImGui::Unindent(ImGui::GetFontSize() * 1.0f);
                     PopStyleColor();
                     src_pos += size;
-                    if (!linkUrl.empty()) PopStyleColor(); if (usedFont) PopFont();
+                    if (pushedLinkColor) PopStyleColor(); if (usedFont) PopFont();
                     return;
                 }
             }
 
-            // Color for link
-            if (!linkUrl.empty())
-            {
-                PushStyleColor(ImGuiCol_Text, ImVec4(0.26f, 0.53f, 0.96f, 1.0f));
+            // Render (use wrapped text so paragraphs wrap properly)
+            // Continue inline text flow after consumed HTML effect tags (SameLine
+            // keeps chunks like "The <shake>word</shake> rest" on one visual line)
+            if (sameLineNext) {
+                ImGui::SameLine(0, 0);
+                sameLineNext = false;
             }
 
-            // Render (use wrapped text so paragraphs wrap properly)
             // Record cursor position before rendering for glyph data capture
             ImVec2 preRenderPos = GetCursorScreenPos();
 
@@ -614,217 +482,21 @@ namespace ImGui
             TextWrapped(s.c_str());
             ImVec2 postRenderPos = GetCursorScreenPos();
 
-            // ── Per-character text effects via draw list vertex manipulation ──
+            // ── Per-character text effects via TextEffectSystem ──
+            // Merge all stacked effects and apply (position → color → alpha → additive)
             if (!effectStack.empty())
             {
-                auto &eff = effectStack.back().params;
-                int vtxCountAfter = dl->VtxBuffer.Size;
                 ImTextureID atlasID = GetIO().Fonts->TexID;
-
-                // Each visible glyph ImGui renders = 4 vertices in the draw list
-                // We iterate in groups of 4 to operate on individual characters
-
-                switch (eff.type)
-                {
-                case TextEffectType::Rainbow:
-                {
-                    // Per-character hue cycling based on char index + time
-                    int charIdx = 0;
-                    for (int v = vtxCountBefore; v + 3 < vtxCountAfter; v += 4)
-                    {
-                        float hue = fmodf(charIdx * 0.08f + (float)GetTime() * eff.speed, 1.0f);
-                        float r, g, b;
-                        ColorConvertHSVtoRGB(hue, 0.9f, 1.0f, r, g, b);
-                        ImU32 col = ColorConvertFloat4ToU32(ImVec4(r, g, b, 1.0f));
-                        dl->VtxBuffer[v].col = col;
-                        dl->VtxBuffer[v + 1].col = col;
-                        dl->VtxBuffer[v + 2].col = col;
-                        dl->VtxBuffer[v + 3].col = col;
-                        charIdx++;
-                    }
-                    break;
-                }
-
-                case TextEffectType::Pulse:
-                {
-                    // Per-character alpha pulsing — text fades in and out
-                    float phase = sinf((float)GetTime() * 2.0f * 3.14159f / eff.cycleSec);
-                    float alpha = 0.3f + 0.7f * (phase * 0.5f + 0.5f);
-                    for (int v = vtxCountBefore; v < vtxCountAfter; v++)
-                    {
-                        ImVec4 c = ColorConvertU32ToFloat4(dl->VtxBuffer[v].col);
-                        c.w *= alpha;
-                        dl->VtxBuffer[v].col = ColorConvertFloat4ToU32(c);
-                    }
-                    break;
-                }
-
-                case TextEffectType::Glow:
-                {
-                    // Per-character glow: draw offset copies of each character glyph
-                    // from the font atlas in the glow color, creating a halo around each letter
-                    float animP = sinf((float)GetTime() * 1.5f) * 0.5f + 0.5f;
-                    float glowA = 0.10f + 0.08f * animP;
-                    ImU32 glowCol = ColorConvertFloat4ToU32(
-                        ImVec4(eff.color.x, eff.color.y, eff.color.z, glowA));
-                    float rad = eff.radius;
-
-                    // Collect glyph quads before adding new ones (modifying buffer during iteration is unsafe)
-                    struct GlyphQuad
-                    {
-                        ImVec2 p0, p1, uv0, uv1;
-                    };
-                    std::vector<GlyphQuad> quads;
-                    for (int v = vtxCountBefore; v + 3 < vtxCountAfter; v += 4)
-                    {
-                        quads.push_back({dl->VtxBuffer[v].pos, dl->VtxBuffer[v + 2].pos,
-                                         dl->VtxBuffer[v].uv, dl->VtxBuffer[v + 2].uv});
-                    }
-
-                    // Draw glow copies at 8 compass offsets around each character
-                    for (auto &q : quads)
-                    {
-                        for (int d = 0; d < 8; d++)
-                        {
-                            float angle = d * 0.7854f; // 45 degree increments
-                            float ox = cosf(angle) * rad;
-                            float oy = sinf(angle) * rad;
-                            dl->AddImage(atlasID,
-                                         ImVec2(q.p0.x + ox, q.p0.y + oy),
-                                         ImVec2(q.p1.x + ox, q.p1.y + oy),
-                                         q.uv0, q.uv1, glowCol);
-                        }
-                        // Also an extra larger, more transparent ring
-                        float outerA = glowA * 0.5f;
-                        ImU32 outerCol = ColorConvertFloat4ToU32(
-                            ImVec4(eff.color.x, eff.color.y, eff.color.z, outerA));
-                        for (int d = 0; d < 8; d++)
-                        {
-                            float angle = d * 0.7854f;
-                            float ox = cosf(angle) * rad * 2.0f;
-                            float oy = sinf(angle) * rad * 2.0f;
-                            dl->AddImage(atlasID,
-                                         ImVec2(q.p0.x + ox, q.p0.y + oy),
-                                         ImVec2(q.p1.x + ox, q.p1.y + oy),
-                                         q.uv0, q.uv1, outerCol);
-                        }
-                    }
-
-                    // Tint the original text characters with the glow color
-                    ImU32 tintCol = ColorConvertFloat4ToU32(
-                        ImVec4(eff.color.x, eff.color.y, eff.color.z, 1.0f));
-                    for (int v = vtxCountBefore; v < vtxCountAfter; v++)
-                        dl->VtxBuffer[v].col = tintCol;
-                    break;
-                }
-
-                case TextEffectType::Fire:
-                {
-                    // Per-character fire: tint chars with flickering orange-red gradient
-                    // and spawn upward-drifting particle dots from character positions
-                    int charIdx = 0;
-                    for (int v = vtxCountBefore; v + 3 < vtxCountAfter; v += 4)
-                    {
-                        // Flicker each character independently
-                        float flicker = sinf((float)GetTime() * 8.0f + charIdx * 1.7f) * 0.5f + 0.5f;
-                        float r = 1.0f;
-                        float g = 0.3f + 0.4f * flicker;
-                        float b = 0.0f + 0.1f * flicker;
-                        ImU32 col = ColorConvertFloat4ToU32(ImVec4(r, g, b, 1.0f));
-                        dl->VtxBuffer[v].col = col;
-                        dl->VtxBuffer[v + 1].col = col;
-                        // Bottom vertices: darker red
-                        ImU32 botCol = ColorConvertFloat4ToU32(ImVec4(0.8f, 0.15f, 0.0f, 1.0f));
-                        dl->VtxBuffer[v + 2].col = botCol;
-                        dl->VtxBuffer[v + 3].col = botCol;
-
-                        // Spawn CPU particles from character top edge
-                        ImVec2 charMin = dl->VtxBuffer[v].pos;
-                        ImVec2 charMax = dl->VtxBuffer[v + 2].pos;
-                        float cx = (charMin.x + charMax.x) * 0.5f;
-                        float cy = charMin.y;
-                        // Pseudo-random spawn using time + char index
-                        float spawnChance = sinf((float)GetTime() * 13.7f + charIdx * 3.1f);
-                        if (spawnChance > 0.7f)
-                        {
-                            // Draw a small upward-drifting ember
-                            float age = fmodf((float)GetTime() * 2.0f + charIdx * 0.4f, 1.0f);
-                            float py = cy - age * 14.0f * eff.lifetimeSec;
-                            float px = cx + sinf(age * 6.0f + charIdx) * 3.0f;
-                            float pAlpha = (1.0f - age) * 0.8f;
-                            float pSize = (1.0f - age) * 2.5f;
-                            ImU32 pCol = ColorConvertFloat4ToU32(ImVec4(1.0f, 0.6f * (1.0f - age), 0.0f, pAlpha));
-                            dl->AddRectFilled(ImVec2(px - pSize, py - pSize),
-                                              ImVec2(px + pSize, py + pSize), pCol);
-                        }
-                        charIdx++;
-                    }
-                    break;
-                }
-
-                case TextEffectType::Sparkle:
-                {
-                    // Fairy-dust particle effect: spawn glowing particles from characters
-                    float now = (float)GetTime();
-                    float dt = now - s_lastFairyTime;
-                    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f; // clamp
-
-                    // Give text a subtle magical tint (soft lavender/gold shimmer)
-                    int charIdx = 0;
-                    for (int v = vtxCountBefore; v + 3 < vtxCountAfter; v += 4)
-                    {
-                        float shimmer = sinf(now * 3.0f + charIdx * 1.1f) * 0.5f + 0.5f;
-                        float hue = fmodf(charIdx * 0.07f + now * 0.15f, 1.0f);
-                        float r, g, b;
-                        ColorConvertHSVtoRGB(hue, 0.2f + 0.15f * shimmer, 1.0f, r, g, b);
-                        ImU32 col = ColorConvertFloat4ToU32(ImVec4(r, g, b, 1.0f));
-                        for (int k = 0; k < 4; k++)
-                            dl->VtxBuffer[v + k].col = col;
-
-                        // Spawn fairy particles from random character positions
-                        ImVec2 charMin = dl->VtxBuffer[v].pos;
-                        ImVec2 charMax = dl->VtxBuffer[v + 2].pos;
-                        float cx = charMin.x + (charMax.x - charMin.x) * fairyRand();
-                        float cy = charMin.y + (charMax.y - charMin.y) * fairyRand();
-
-                        // Stochastic spawn: ~density particles per character per second
-                        if (fairyRand() < eff.density * dt * 0.5f)
-                            fairySpawn(cx, cy, 1.0f);
-
-                        charIdx++;
-                    }
-
-                    // Update and draw all fairy particles
-                    fairyUpdate(dt);
-                    fairyDraw(dl);
-                    s_lastFairyTime = now;
-                    break;
-                }
-
-                case TextEffectType::Shake:
-                {
-                    // Per-character positional displacement
-                    int charIdx = 0;
-                    for (int v = vtxCountBefore; v + 3 < vtxCountAfter; v += 4)
-                    {
-                        float ox = sinf((float)GetTime() * 15.0f + charIdx * 2.1f) * eff.intensity;
-                        float oy = cosf((float)GetTime() * 13.0f + charIdx * 3.3f) * eff.intensity;
-                        for (int k = 0; k < 4; k++)
-                        {
-                            dl->VtxBuffer[v + k].pos.x += ox;
-                            dl->VtxBuffer[v + k].pos.y += oy;
-                        }
-                        charIdx++;
-                    }
-                    break;
-                }
-
-                default:
-                    break;
-                }
+                TextEffectDef combined;
+                for (auto &ae : effectStack)
+                    combined.modifiers.insert(combined.modifiers.end(),
+                        ae.effectDef.modifiers.begin(), ae.effectDef.modifiers.end());
+                TextEffectSystem::applyEffect(dl, vtxCountBefore, dl->VtxBuffer.Size,
+                                              atlasID, (float)GetTime(), combined);
             }
 
             // ── Record glyph data for text effects overlay ──
+            // Push one region per active effect so stacked effects all get overlay data
             if (!effectStack.empty() && effectsOverlay)
             {
                 ImFont *font = GetFont();
@@ -833,12 +505,11 @@ namespace ImGui
                 float atlasW = (float)atlas->TexWidth;
                 float atlasH = (float)atlas->TexHeight;
 
-                // Build glyph info for each character in this text span
-                EffectRegion region;
-                region.params = effectStack.back().params;
-                region.boundsMin = ImVec2(preRenderPos.x - contentOrigin.x,
-                                          preRenderPos.y - contentOrigin.y + docScrollY);
-                region.boundsMax = region.boundsMin;
+                // Build glyph list once, reuse for all stacked effects
+                std::vector<EffectGlyphInfo> glyphList;
+                ImVec2 bMin(preRenderPos.x - contentOrigin.x,
+                            preRenderPos.y - contentOrigin.y + docScrollY);
+                ImVec2 bMax = bMin;
 
                 float curX = preRenderPos.x;
                 float curY = preRenderPos.y;
@@ -873,13 +544,13 @@ namespace ImGui
                         gi.glyphH = glyphH;
                         gi.charIndex = charIdx;
 
-                        region.glyphs.push_back(gi);
+                        glyphList.push_back(gi);
 
                         // Expand bounds
-                        region.boundsMax.x = std::max(region.boundsMax.x, gi.docPos.x + glyphW);
-                        region.boundsMax.y = std::max(region.boundsMax.y, gi.docPos.y + glyphH);
-                        region.boundsMin.x = std::min(region.boundsMin.x, gi.docPos.x);
-                        region.boundsMin.y = std::min(region.boundsMin.y, gi.docPos.y);
+                        bMax.x = std::max(bMax.x, gi.docPos.x + glyphW);
+                        bMax.y = std::max(bMax.y, gi.docPos.y + glyphH);
+                        bMin.x = std::min(bMin.x, gi.docPos.x);
+                        bMin.y = std::min(bMin.y, gi.docPos.y);
 
                         curX += advance;
                     }
@@ -888,15 +559,26 @@ namespace ImGui
                     charIdx++;
                 }
 
-                if (!region.glyphs.empty())
-                    effectsOverlay->addEffectRegion(region);
+                if (!glyphList.empty())
+                {
+                    for (auto &ae : effectStack)
+                    {
+                        EffectRegion region;
+                        region.params = ae.params;
+                        region.boundsMin = bMin;
+                        region.boundsMax = bMax;
+                        region.glyphs = glyphList;
+                        effectsOverlay->addEffectRegion(region);
+                    }
+                }
             }
 
-            if (!linkUrl.empty())
+            if (pushedLinkColor)
                 PopStyleColor();
             if (usedFont)
                 PopFont();
 
+            hasRenderedTextInBlock = true;
             // Track source offset for mapping UI interactions back to original text
             src_pos += size;
         }
@@ -905,6 +587,8 @@ namespace ImGui
         static int enter_block(MD_BLOCKTYPE t, void *detail, void *userdata)
         {
             MD4CRenderer *r = (MD4CRenderer *)userdata;
+            r->sameLineNext = false;
+            r->hasRenderedTextInBlock = false;
             r->blocks.push(t);
             switch (t)
             {
@@ -987,10 +671,13 @@ namespace ImGui
             switch (t)
             {
             case MD_BLOCK_H:
+                r->effectStack.clear();
                 r->popHeader();
                 Dummy(ImVec2(0, 6));
                 break;
             case MD_BLOCK_P:
+                // Clear any unclosed effect tags at paragraph boundary
+                r->effectStack.clear();
                 // If this paragraph belonged to a list and we opened a wrap for it, close it
                 if (!r->li_wrap_active.empty() && r->li_wrap_active.top()) {
                     r->endListItemParagraph();
@@ -1060,7 +747,13 @@ namespace ImGui
                 r->in_table = false; r->table_col_count = 0; r->table_in_header = false; r->table_current_row.clear(); r->table_header_rows.clear(); r->table_body_rows.clear();
                 break;
             case MD_BLOCK_CODE:
+                r->effectStack.clear();
                 r->endCodeBlock();
+                break;
+            case MD_BLOCK_QUOTE:
+                r->effectStack.clear();
+                ImGui::Unindent(ImGui::GetFontSize() * 1.0f);
+                ImGui::PopStyleColor();
                 break;
             case MD_BLOCK_UL:
             case MD_BLOCK_OL:
@@ -1664,14 +1357,24 @@ namespace ImGui
         {
             MD4CRenderer *r = (MD4CRenderer *)userdata;
 
+            // Soft/hard breaks reset inline continuation so the next text chunk
+            // starts on a new line (ImGui naturally places items below each other).
+            if (type == MD_TEXT_SOFTBR || type == MD_TEXT_BR)
+            {
+                r->sameLineNext = false;
+                r->src_pos += size;
+                return 0;
+            }
+
             // Intercept HTML tags for text effects
             if (type == MD_TEXT_HTML && !r->in_code_block)
             {
                 std::string html((const char *)text, (size_t)size);
                 EffectParams params;
+                TextEffectDef effectDef;
                 std::string tagName;
                 bool isClosing = false;
-                if (parseEffectTag(html, params, tagName, isClosing))
+                if (parseEffectTag(html, params, effectDef, tagName, isClosing))
                 {
                     if (isClosing) {
                         // Pop matching effect from stack
@@ -1683,10 +1386,14 @@ namespace ImGui
                         }
                     } else {
                         // Push new effect
-                        r->effectStack.push_back({params, tagName});
+                        r->effectStack.push_back({params, effectDef, tagName});
                     }
-                    // Consume the HTML tag silently — don't render
+                    // Consume the HTML tag silently — don't render.
+                    // Signal that the next text chunk should continue inline,
+                    // but only if visible text was already rendered in this block.
                     r->src_pos += size;
+                    if (r->hasRenderedTextInBlock)
+                        r->sameLineNext = true;
                     return 0;
                 }
             }
@@ -1732,7 +1439,7 @@ namespace ImGui
         parser.text = MD4CRenderer::textcb;
 
         // Set desired parser flags via the parser struct (md_parse takes only 4 args)
-        parser.flags = MD_FLAG_TABLES;
+        parser.flags = MD_FLAG_TABLES | MD_FLAG_NOHTMLBLOCKS;
         md_parse(text, strlen(text), &parser, &renderer);
     }
 
