@@ -1,4 +1,5 @@
 #include <Editors/Markdown/MarkdownPreview.hpp>
+#include <Editors/Markdown/Effect.hpp>
 #include <OpenCLContext.hpp>
 #include <plog/Log.h>
 #include <GLFW/glfw3.h>
@@ -345,9 +346,6 @@ void MarkdownPreview::cleanup() {
         m_clCollisionHeight = 0;
     }
     
-    // Cleanup particle kernels
-    cleanupParticleKernels();
-    
     // Cleanup bloom resources
     for (int i = 0; i < 2; ++i) {
         if (m_bloomFBO[i]) { glDeleteFramebuffers(1, &m_bloomFBO[i]); m_bloomFBO[i] = 0; }
@@ -559,49 +557,7 @@ void MarkdownPreview::initVAOs() {
 
 void MarkdownPreview::initOpenCL() {
     // OpenCL is already initialized via OpenCLContext singleton
-    // Load particle kernels for GPU-accelerated particle physics
-    loadParticleKernels();
-}
-
-void MarkdownPreview::loadParticleKernels() {
-    if (m_kernelsLoaded) return;
-    if (!OpenCLContext::get().isReady()) return;
-    
-    auto loadKernel = [](const char* path, const char* entry,
-                         cl_program& prog, cl_kernel& kern) {
-        try {
-            OpenCLContext::get().createProgram(prog, path);
-            OpenCLContext::get().createKernelFromProgram(kern, prog, entry);
-            PLOG_INFO << "Loaded particle kernel: " << path << ":" << entry;
-        } catch (const std::exception& e) {
-            PLOG_WARNING << "Failed to load particle kernel " << path << ": " << e.what();
-            prog = nullptr;
-            kern = nullptr;
-        }
-    };
-    
-    loadKernel("Kernels/particles/fire.cl",     "updateFire",     m_fireProgram,     m_fireUpdateKernel);
-    loadKernel("Kernels/particles/snow.cl",     "updateSnow",     m_snowProgram,     m_snowUpdateKernel);
-    loadKernel("Kernels/particles/electric.cl", "updateElectric", m_electricProgram, m_electricUpdateKernel);
-    loadKernel("Kernels/particles/sparkle.cl",  "updateSparkle",  m_sparkleProgram,  m_sparkleUpdateKernel);
-    loadKernel("Kernels/particles/smoke.cl",    "updateSmoke",    m_smokeProgram,    m_smokeUpdateKernel);
-    
-    m_kernelsLoaded = true;
-}
-
-void MarkdownPreview::cleanupParticleKernels() {
-    auto releaseKernel = [](cl_program& prog, cl_kernel& kern) {
-        if (kern) { clReleaseKernel(kern); kern = nullptr; }
-        if (prog) { clReleaseProgram(prog); prog = nullptr; }
-    };
-    
-    releaseKernel(m_fireProgram,     m_fireUpdateKernel);
-    releaseKernel(m_snowProgram,     m_snowUpdateKernel);
-    releaseKernel(m_electricProgram, m_electricUpdateKernel);
-    releaseKernel(m_sparkleProgram,  m_sparkleUpdateKernel);
-    releaseKernel(m_smokeProgram,    m_smokeUpdateKernel);
-    
-    m_kernelsLoaded = false;
+    // Particle kernels are now compiled by the Effect system during init
 }
 
 void MarkdownPreview::updateCollisionCLImage() {
@@ -1023,20 +979,7 @@ void MarkdownPreview::renderGlyphBatches(const std::vector<EffectBatch>& batches
     for (const auto& batch : batches) {
         if (batch.vertices.empty()) continue;
         
-        EffectShaderType shaderType = batch.effect ? batch.effect->shaderType : EffectShaderType::None;
-        GLuint shader = 0;
-        
-        // Check if this is a composite effect (has __composite_ prefix in name)
-        // If so, use the combined shader with vert from shaderType and frag from customShaderProgram
-        if (batch.effect && batch.effect->name.rfind("__composite_", 0) == 0) {
-            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
-            shader = m_effectSystem.getCombinedShaderProgram(shaderType, fragType);
-        }
-        
-        if (!shader) {
-            shader = m_effectSystem.getShaderProgram(shaderType);
-        }
-        
+        GLuint shader = m_effectSystem.getGlyphShader(batch.effect);
         if (!shader) continue;
         
         glUseProgram(shader);
@@ -1064,16 +1007,13 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
         return;
     }
     
-    // Check if any batches have Glow shader type
+    // Check if any batches contribute to bloom
     bool hasGlow = false;
     for (const auto& batch : batches) {
-        if (!batch.effect) continue;
-        EffectShaderType st = batch.effect->shaderType;
-        if (st == EffectShaderType::Glow) { hasGlow = true; break; }
-        // Also check composite effects where the frag type is Glow
-        if (batch.effect->name.rfind("__composite_", 0) == 0) {
-            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
-            if (fragType == EffectShaderType::Glow) { hasGlow = true; break; }
+        if (!batch.effect || !batch.effect->effect) continue;
+        if (batch.effect->effect->getCapabilities().contributesToBloom) {
+            hasGlow = true;
+            break;
         }
     }
     if (!hasGlow) return;
@@ -1096,17 +1036,11 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
     glBindTexture(GL_TEXTURE_2D, m_fontAtlasTexture);
     
     for (const auto& batch : batches) {
-        if (!batch.effect || batch.vertices.empty()) continue;
+        if (!batch.effect || !batch.effect->effect || batch.vertices.empty()) continue;
+        if (!batch.effect->effect->getCapabilities().contributesToBloom) continue;
         
-        bool isGlow = (batch.effect->shaderType == EffectShaderType::Glow);
-        if (!isGlow && batch.effect->name.rfind("__composite_", 0) == 0) {
-            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
-            isGlow = (fragType == EffectShaderType::Glow);
-        }
-        if (!isGlow) continue;
-        
-        glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &batch.effect->color1[0]);
-        glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), batch.effect->intensity);
+        glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &batch.effect->effect->color1[0]);
+        glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), batch.effect->effect->intensity);
         
         uploadGlyphBatch(batch.vertices);
         glBindVertexArray(m_glyphVAO);
@@ -1250,9 +1184,6 @@ void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& ba
             p.life = emission.lifetime + lifeVar * emission.lifetimeVar;
             p.maxLife = p.life;
             
-            // Color from effect
-            p.color = batch.effect->color1;
-            
             // Size
             float sizeVar = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 2.0f;
             p.size = emission.size + sizeVar * emission.sizeVar;
@@ -1260,7 +1191,13 @@ void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& ba
             p.meshID = emission.meshID;
             p.rotation = glm::vec3(0, 0, static_cast<float>(rand()) / RAND_MAX * 6.28f);
             p.rotVel = glm::vec3(0, 0, (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 4.0f);
-            p.behaviorID = static_cast<uint32_t>(batch.effect->shaderType);
+            p.behaviorID = batch.effect->effect ? batch.effect->effect->getBehaviorID() : 0;
+            
+            // Color from effect
+            if (batch.effect->effect) {
+                const auto& c = batch.effect->effect->color1;
+                p.color = glm::vec4(c[0], c[1], c[2], c[3]);
+            }
             
             m_particleCount = std::max(m_particleCount, static_cast<size_t>(idx + 1));
         }
@@ -1268,19 +1205,18 @@ void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& ba
 }
 
 void MarkdownPreview::updateParticlesGPU(float dt) {
-    // Safety check - ensure particle buffers are initialized
     if (m_cpuParticles.empty() || m_cpuDeadIndices.empty() || m_particleCount == 0) {
         return;
     }
     
     auto& cl = OpenCLContext::get();
-    bool useCL = cl.isReady() && m_clParticleBuffer && m_kernelsLoaded &&
-                 (m_fireUpdateKernel || m_snowUpdateKernel || m_electricUpdateKernel ||
-                  m_sparkleUpdateKernel || m_smokeUpdateKernel);
+    if (!cl.isReady() || !m_clParticleBuffer) {
+        return;
+    }
     
-    if (!useCL) {
-        // Fall back to CPU-based particle update
-        updateParticlesCPU(dt);
+    // Get all effects that have compiled particle kernels
+    auto particleEffects = m_effectSystem.getParticleEffects();
+    if (particleEffects.empty()) {
         return;
     }
     
@@ -1297,7 +1233,6 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
                                        m_cpuParticles.data(), 0, nullptr, nullptr);
     if (err != CL_SUCCESS) {
         PLOG_ERROR << "Failed to upload particles to CL: " << err;
-        updateParticlesCPU(dt);
         return;
     }
     
@@ -1323,99 +1258,37 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         maskH = 1.0f;
     }
     
-    // 3. Dispatch each particle kernel — each kernel checks behaviorID internally
-    
-    // Fire kernel (behaviorID == 1 / BEHAVIOR_FIRE)
-    if (m_fireUpdateKernel) {
-        cl_float2 gravity = {{0.0f, -80.0f}};
-        float turbulence = 100.0f;
-        float heatDecay = 1.5f;
-        clSetKernelArg(m_fireUpdateKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
-        clSetKernelArg(m_fireUpdateKernel, 1, sizeof(cl_mem), &collisionImg);
-        clSetKernelArg(m_fireUpdateKernel, 2, sizeof(float), &dt);
-        clSetKernelArg(m_fireUpdateKernel, 3, sizeof(cl_float2), &gravity);
-        clSetKernelArg(m_fireUpdateKernel, 4, sizeof(float), &turbulence);
-        clSetKernelArg(m_fireUpdateKernel, 5, sizeof(float), &heatDecay);
-        clSetKernelArg(m_fireUpdateKernel, 6, sizeof(float), &scrollY);
-        clSetKernelArg(m_fireUpdateKernel, 7, sizeof(float), &maskH);
-        clSetKernelArg(m_fireUpdateKernel, 8, sizeof(uint32_t), &count);
-        err = clEnqueueNDRangeKernel(q, m_fireUpdateKernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) PLOG_ERROR << "Fire kernel dispatch failed: " << err;
-    }
-    
-    // Snow kernel (behaviorID == 10 / BEHAVIOR_SNOW)
-    if (m_snowUpdateKernel) {
-        cl_float2 gravity = {{0.0f, 30.0f}};
-        float swayAmount = 20.0f;
-        float swayFreq = 2.0f;
-        clSetKernelArg(m_snowUpdateKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
-        clSetKernelArg(m_snowUpdateKernel, 1, sizeof(cl_mem), &collisionImg);
-        clSetKernelArg(m_snowUpdateKernel, 2, sizeof(float), &dt);
-        clSetKernelArg(m_snowUpdateKernel, 3, sizeof(cl_float2), &gravity);
-        clSetKernelArg(m_snowUpdateKernel, 4, sizeof(float), &swayAmount);
-        clSetKernelArg(m_snowUpdateKernel, 5, sizeof(float), &swayFreq);
-        clSetKernelArg(m_snowUpdateKernel, 6, sizeof(float), &time);
-        clSetKernelArg(m_snowUpdateKernel, 7, sizeof(float), &scrollY);
-        clSetKernelArg(m_snowUpdateKernel, 8, sizeof(float), &maskH);
-        clSetKernelArg(m_snowUpdateKernel, 9, sizeof(uint32_t), &count);
-        err = clEnqueueNDRangeKernel(q, m_snowUpdateKernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) PLOG_ERROR << "Snow kernel dispatch failed: " << err;
-    }
-    
-    // Electric kernel (behaviorID == 3 / BEHAVIOR_SHAKE — electric effect uses Shake type)
-    if (m_electricUpdateKernel) {
-        float jumpChance = 5.0f;
-        float jumpDistance = 30.0f;
-        float arcAttraction = 200.0f;
-        clSetKernelArg(m_electricUpdateKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
-        clSetKernelArg(m_electricUpdateKernel, 1, sizeof(cl_mem), &collisionImg);
-        clSetKernelArg(m_electricUpdateKernel, 2, sizeof(float), &dt);
-        clSetKernelArg(m_electricUpdateKernel, 3, sizeof(float), &jumpChance);
-        clSetKernelArg(m_electricUpdateKernel, 4, sizeof(float), &jumpDistance);
-        clSetKernelArg(m_electricUpdateKernel, 5, sizeof(float), &arcAttraction);
-        clSetKernelArg(m_electricUpdateKernel, 6, sizeof(float), &time);
-        clSetKernelArg(m_electricUpdateKernel, 7, sizeof(float), &scrollY);
-        clSetKernelArg(m_electricUpdateKernel, 8, sizeof(float), &maskH);
-        clSetKernelArg(m_electricUpdateKernel, 9, sizeof(uint32_t), &count);
-        err = clEnqueueNDRangeKernel(q, m_electricUpdateKernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) PLOG_ERROR << "Electric kernel dispatch failed: " << err;
-    }
-    
-    // Sparkle kernel (behaviorID == 11 / BEHAVIOR_SPARKLE)
-    if (m_sparkleUpdateKernel) {
-        float twinkleSpeed = 10.0f;
-        float driftSpeed = 5.0f;
-        clSetKernelArg(m_sparkleUpdateKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
-        clSetKernelArg(m_sparkleUpdateKernel, 1, sizeof(cl_mem), &collisionImg);
-        clSetKernelArg(m_sparkleUpdateKernel, 2, sizeof(float), &dt);
-        clSetKernelArg(m_sparkleUpdateKernel, 3, sizeof(float), &twinkleSpeed);
-        clSetKernelArg(m_sparkleUpdateKernel, 4, sizeof(float), &driftSpeed);
-        clSetKernelArg(m_sparkleUpdateKernel, 5, sizeof(float), &time);
-        clSetKernelArg(m_sparkleUpdateKernel, 6, sizeof(float), &scrollY);
-        clSetKernelArg(m_sparkleUpdateKernel, 7, sizeof(float), &maskH);
-        clSetKernelArg(m_sparkleUpdateKernel, 8, sizeof(uint32_t), &count);
-        err = clEnqueueNDRangeKernel(q, m_sparkleUpdateKernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) PLOG_ERROR << "Sparkle kernel dispatch failed: " << err;
-    }
-    
-    // Smoke kernel (behaviorID == 4 / BEHAVIOR_DISSOLVE)
-    if (m_smokeUpdateKernel) {
-        cl_float2 wind = {{5.0f, 0.0f}};
-        float riseSpeed = 30.0f;
-        float expansion = 2.0f;
-        float dissipation = 1.0f;
-        clSetKernelArg(m_smokeUpdateKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
-        clSetKernelArg(m_smokeUpdateKernel, 1, sizeof(cl_mem), &collisionImg);
-        clSetKernelArg(m_smokeUpdateKernel, 2, sizeof(float), &dt);
-        clSetKernelArg(m_smokeUpdateKernel, 3, sizeof(cl_float2), &wind);
-        clSetKernelArg(m_smokeUpdateKernel, 4, sizeof(float), &riseSpeed);
-        clSetKernelArg(m_smokeUpdateKernel, 5, sizeof(float), &expansion);
-        clSetKernelArg(m_smokeUpdateKernel, 6, sizeof(float), &dissipation);
-        clSetKernelArg(m_smokeUpdateKernel, 7, sizeof(float), &scrollY);
-        clSetKernelArg(m_smokeUpdateKernel, 8, sizeof(float), &maskH);
-        clSetKernelArg(m_smokeUpdateKernel, 9, sizeof(uint32_t), &count);
-        err = clEnqueueNDRangeKernel(q, m_smokeUpdateKernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) PLOG_ERROR << "Smoke kernel dispatch failed: " << err;
+    // 3. Dispatch each Effect's particle kernel
+    // Standard arg order: (particles, collision, dt, scrollY, maskH, time, count)
+    // Effect-specific args start at index 7 via bindKernelParams()
+    for (EffectDef* def : particleEffects) {
+        cl_kernel kernel = def->effectKernel;
+        if (!kernel || !def->effect) continue;
+        
+        // Set standard kernel args 0-6
+        clSetKernelArg(kernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
+        clSetKernelArg(kernel, 1, sizeof(cl_mem), &collisionImg);
+        clSetKernelArg(kernel, 2, sizeof(float), &dt);
+        clSetKernelArg(kernel, 3, sizeof(float), &scrollY);
+        clSetKernelArg(kernel, 4, sizeof(float), &maskH);
+        clSetKernelArg(kernel, 5, sizeof(float), &time);
+        clSetKernelArg(kernel, 6, sizeof(uint32_t), &count);
+        
+        // Let the Effect bind its specific params from arg 7 onward
+        KernelParams params;
+        params.particleBuffer = m_clParticleBuffer;
+        params.collisionImage = collisionImg;
+        params.deltaTime = dt;
+        params.scrollY = scrollY;
+        params.maskHeight = maskH;
+        params.time = time;
+        params.particleCount = count;
+        def->effect->bindKernelParams(kernel, params);
+        
+        err = clEnqueueNDRangeKernel(q, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            PLOG_ERROR << def->name << " kernel dispatch failed: " << err;
+        }
     }
     
     // 4. Read back particles from CL buffer (blocking read)
@@ -1431,164 +1304,14 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         clReleaseMemObject(dummyImg);
     }
     
-    // 5. CPU fallback for behaviors not handled by any kernel
-    // (behaviorIDs: 0=None, 2=Rainbow, 5=Glow, 6=Wave, 9=Blood, etc.)
-    // Only skip behaviors if their CL kernel is actually loaded and executed
-    for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
-        Particle& p = m_cpuParticles[i];
-        if (p.life <= 0.0f) continue;
-        
-        uint32_t bid = p.behaviorID;
-        // Skip behaviors that were handled by CL kernels (only if kernel exists)
-        if ((bid == 1 && m_fireUpdateKernel) ||      // Fire
-            (bid == 10 && m_snowUpdateKernel) ||     // Snow
-            (bid == 3 && m_electricUpdateKernel) ||  // Electric/Shake
-            (bid == 11 && m_sparkleUpdateKernel) ||  // Sparkle
-            (bid == 4 && m_smokeUpdateKernel)) {     // Dissolve/Smoke
-            continue;
-        }
-        
-        // Generic CPU particle physics
-        p.vel.y += 100.0f * dt;  // Gravity
-        p.vel *= 0.99f;
-        p.life -= dt;
-        p.color.a = std::min(1.0f, p.life * 2.0f);
-        
-        // Update position with collision
-        glm::vec2 newPos = p.pos + p.vel * dt;
-        
-        if (m_collisionMask.hasCPUData()) {
-            float maskH2 = static_cast<float>(m_collisionMask.getHeight());
-            // Document Y = scrollY maps to texel row maskH-1 (top), 
-            // Document Y = scrollY + maskH maps to texel row 0 (bottom)
-            float newMaskX = newPos.x;
-            float newMaskY = (m_scrollY + maskH2 - 1.0f) - newPos.y;
-            float curMaskX = p.pos.x;
-            float curMaskY = (m_scrollY + maskH2 - 1.0f) - p.pos.y;
-            
-            bool newInside = m_collisionMask.sample(newMaskX, newMaskY) > 0.5f;
-            bool curInside = m_collisionMask.sample(curMaskX, curMaskY) > 0.5f;
-            
-            if (newInside && !curInside) {
-                glm::vec2 maskNormal = m_collisionMask.surfaceNormal(newMaskX, newMaskY);
-                glm::vec2 docNormal(maskNormal.x, -maskNormal.y);
-                p.vel = glm::reflect(p.vel, docNormal) * 0.5f;
-            } else {
-                p.pos = newPos;
-            }
-        } else {
-            p.pos = newPos;
-        }
-        
-        p.z += p.zVel * dt;
-        p.rotation += p.rotVel * dt;
-    }
-    
-    // 6. Mark dead particles for recycling
+    // 5. Mark dead particles for recycling
     for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
         if (m_cpuParticles[i].life <= 0.0f && m_deadCount < m_cpuDeadIndices.size()) {
             m_cpuDeadIndices[m_deadCount++] = static_cast<uint32_t>(i);
         }
     }
     
-    // 7. Upload to GPU for rendering
-    if (m_particleCount > 0 && m_particleCount <= m_cpuParticles.size()) {
-        glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
-        glBufferData(GL_ARRAY_BUFFER, m_particleCount * sizeof(Particle),
-                     m_cpuParticles.data(), GL_DYNAMIC_DRAW);
-    }
-}
-
-void MarkdownPreview::updateParticlesCPU(float dt) {
-    // CPU-only particle update (fallback when OpenCL is unavailable)
-    for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
-        Particle& p = m_cpuParticles[i];
-        
-        if (p.life <= 0.0f) continue;
-        
-        // Apply physics based on behavior ID
-        switch (static_cast<EffectShaderType>(p.behaviorID)) {
-            case EffectShaderType::Fire:
-                p.vel.y -= 80.0f * dt;
-                p.vel.x += (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 100.0f * dt;
-                p.vel *= 0.98f;
-                p.life -= dt * 1.5f;
-                {
-                    float heat = p.life / p.maxLife;
-                    if (heat > 0.7f) {
-                        float t = (heat - 0.7f) / 0.3f;
-                        p.color = glm::vec4(1.0f, 1.0f, t, 1.0f);
-                    } else if (heat > 0.4f) {
-                        float t = (heat - 0.4f) / 0.3f;
-                        p.color = glm::vec4(1.0f, 0.5f + 0.5f * t, 0.0f, 1.0f);
-                    } else {
-                        float t = heat / 0.4f;
-                        p.color = glm::vec4(1.0f * t, 0.1f * t, 0.0f, 0.8f * t);
-                    }
-                }
-                break;
-                
-            case EffectShaderType::Snow:
-                p.vel.y += 30.0f * dt;
-                p.vel.x += sin(static_cast<float>(glfwGetTime()) * 2.0f + p.pos.x * 0.05f) * 20.0f * dt;
-                p.vel.y = std::min(p.vel.y, 80.0f);
-                p.life -= dt * 0.3f;
-                p.color.a = p.life / p.maxLife;
-                break;
-                
-            case EffectShaderType::Sparkle:
-                p.vel *= 0.9f;
-                p.life -= dt * 0.5f;
-                {
-                    float sinVal = static_cast<float>(sin(static_cast<float>(glfwGetTime()) * 10.0f + static_cast<float>(i) * 2.718f));
-                    float twinkle = pow(std::max(0.0f, sinVal), 8.0f);
-                    float brightness = (p.life / p.maxLife) * (0.3f + twinkle * 0.7f);
-                    p.color = glm::vec4(brightness, brightness * 0.95f, brightness * 0.7f, brightness);
-                }
-                break;
-                
-            default:
-                p.vel.y += 100.0f * dt;
-                p.vel *= 0.99f;
-                p.life -= dt;
-                p.color.a = std::min(1.0f, p.life * 2.0f);
-                break;
-        }
-        
-        glm::vec2 newPos = p.pos + p.vel * dt;
-        
-        if (m_collisionMask.hasCPUData()) {
-            float maskH = static_cast<float>(m_collisionMask.getHeight());
-            // Document Y = scrollY maps to texel row maskH-1 (top),
-            // Document Y = scrollY + maskH maps to texel row 0 (bottom)
-            float newMaskX = newPos.x;
-            float newMaskY = (m_scrollY + maskH - 1.0f) - newPos.y;
-            float curMaskX = p.pos.x;
-            float curMaskY = (m_scrollY + maskH - 1.0f) - p.pos.y;
-            
-            bool newInside = m_collisionMask.sample(newMaskX, newMaskY) > 0.5f;
-            bool curInside = m_collisionMask.sample(curMaskX, curMaskY) > 0.5f;
-            
-            if (newInside && !curInside) {
-                glm::vec2 maskNormal = m_collisionMask.surfaceNormal(newMaskX, newMaskY);
-                glm::vec2 docNormal(maskNormal.x, -maskNormal.y);
-                p.vel = glm::reflect(p.vel, docNormal) * 0.5f;
-            } else {
-                p.pos = newPos;
-            }
-        } else {
-            p.pos = newPos;
-        }
-        
-        p.z += p.zVel * dt;
-        p.rotation += p.rotVel * dt;
-        
-        if (p.life <= 0.0f && m_deadCount < m_cpuDeadIndices.size()) {
-            m_cpuDeadIndices[m_deadCount++] = static_cast<uint32_t>(i);
-        }
-    }
-    
-    // Upload to GPU for rendering
+    // 6. Upload to GPU for rendering
     if (m_particleCount > 0 && m_particleCount <= m_cpuParticles.size()) {
         glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
         glBufferData(GL_ARRAY_BUFFER, m_particleCount * sizeof(Particle),

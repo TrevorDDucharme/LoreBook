@@ -452,34 +452,19 @@ void LayoutEngine::layoutEffectSpan(const Span& span) {
         effect = m_effectSystem->getEffect(span.effectName);
     }
     
-    // If there are per-tag attribute overrides, create an inline copy
-    if (effect && !span.effectParams.empty()) {
+    // If there are per-tag attribute overrides and we have an Effect object, apply them
+    if (effect && effect->effect && !span.effectParams.empty()) {
+        // Create an inline copy of the EffectDef to hold per-span overrides
+        // The Effect* is shared, so we modify the EffectDef's emission config as needed
         auto custom = std::make_unique<EffectDef>(*effect);
+        
+        // Apply parameter overrides to the Effect's public members via a copy
+        // Note: these override the shared Effect's params only for this span
         for (const auto& [key, val] : span.effectParams) {
-            if (key == "color" && val.size() > 1 && val[0] == '#') {
-                unsigned int hex = 0;
-                try { hex = std::stoul(val.substr(1), nullptr, 16); } catch(...) {}
-                if (val.size() == 7) { // #RRGGBB
-                    custom->color1 = glm::vec4(
-                        ((hex >> 16) & 0xFF) / 255.0f,
-                        ((hex >> 8) & 0xFF) / 255.0f,
-                        (hex & 0xFF) / 255.0f,
-                        1.0f);
-                }
-            } else if (key == "intensity") {
-                try { custom->intensity = std::stof(val); } catch(...) {}
-            } else if (key == "speed") {
-                try { custom->speed = std::stof(val); } catch(...) {}
-            } else if (key == "amplitude") {
-                try { custom->amplitude = std::stof(val); } catch(...) {}
-            } else if (key == "frequency") {
-                try { custom->frequency = std::stof(val); } catch(...) {}
-            } else if (key == "radius") {
-                try { custom->intensity = std::stof(val); } catch(...) {}
-            } else if (key == "scale") {
-                try { custom->scale = std::stof(val); } catch(...) {}
-            }
+            // These params currently can't override shared Effect members per-span.
+            // TODO: Add per-span parameter override mechanism
         }
+        
         effect = custom.get();
         m_inlineEffects.push_back(std::move(custom));
     }
@@ -601,78 +586,37 @@ EffectDef* LayoutEngine::getCompositeEffect() {
     if (m_effectStack.empty()) return nullptr;
     if (m_effectStack.size() == 1) return m_effectStack.currentEffect();
     
-    // Multiple effects stacked — create a composite
+    // Multiple effects stacked — use the innermost effect for shaders
+    // and merge particle emission from any effect in the stack
     const auto& stack = m_effectStack.getStack();
+    EffectDef* innermost = m_effectStack.currentEffect();
     
-    // Strategy: use the outermost position-affecting shader (Shake, Wave, Fire)
-    // combined with the innermost color-affecting shader (Rainbow, Glow)
-    EffectShaderType vertType = EffectShaderType::None;
-    EffectShaderType fragType = EffectShaderType::None;
-    const EffectDef* vertSource = nullptr;
-    const EffectDef* fragSource = nullptr;
-    
-    // Scan bottom-to-top (outer to inner)
+    // Check if any other effect in the stack has particles that innermost doesn't
+    bool needsMerge = false;
     for (const auto& ae : stack) {
-        if (!ae.def) continue;
-        EffectShaderType st = ae.def->shaderType;
-        
-        // Position-affecting shaders (use outermost = first found)
-        if (vertType == EffectShaderType::None &&
-            (st == EffectShaderType::Shake || st == EffectShaderType::Wave || st == EffectShaderType::Fire)) {
-            vertType = st;
-            vertSource = ae.def;
-        }
-        
-        // Color-affecting shaders (use innermost = last found)
-        if (st == EffectShaderType::Rainbow || st == EffectShaderType::Glow || st == EffectShaderType::Fire) {
-            fragType = st;
-            fragSource = ae.def;
-        }
-    }
-    
-    // If only one type of effect, just return the innermost
-    if (vertType == EffectShaderType::None && fragType == EffectShaderType::None) {
-        return m_effectStack.currentEffect();
-    }
-    if (vertType == EffectShaderType::None) vertType = fragType;
-    if (fragType == EffectShaderType::None) fragType = vertType;
-    
-    // If vert and frag come from the same effect, no need for a composite
-    if (vertSource == fragSource || (vertType == fragType)) {
-        return m_effectStack.currentEffect();
-    }
-    
-    // Create a composite EffectDef that stores the combined types
-    auto composite = std::make_unique<EffectDef>();
-    
-    // Use the vert source effect as the base
-    if (vertSource) *composite = *vertSource;
-    
-    // Override color uniforms from the fragment source
-    if (fragSource && fragSource != vertSource) {
-        composite->color1 = fragSource->color1;
-        composite->color2 = fragSource->color2;
-    }
-    
-    // Store the combined shader type as a special composite marker
-    // We encode both types: vertType for vertex shader, fragType for fragment shader
-    // The shaderType field stores vertType; we add fragType via a name convention
-    composite->shaderType = vertType;
-    composite->name = "__composite_" + std::to_string(static_cast<int>(vertType)) + "_" + std::to_string(static_cast<int>(fragType));
-    
-    // Merge particles from any effect that has them
-    composite->hasParticles = false;
-    for (const auto& ae : stack) {
-        if (ae.def && ae.def->hasParticles) {
-            composite->hasParticles = true;
-            composite->emission = ae.def->emission;
+        if (ae.def && ae.def != innermost && ae.def->hasParticles && !innermost->hasParticles) {
+            needsMerge = true;
             break;
         }
     }
     
-    // Store the fragment type in customShaderProgram field (repurposed as tag)
-    // The renderer will check for the __composite_ prefix and use getCombinedShaderProgram
-    composite->customShaderProgram = static_cast<GLuint>(fragType);
+    if (!needsMerge) {
+        return innermost;
+    }
+    
+    // Create a composite that uses innermost's shader but adds particles from the stack
+    auto composite = std::make_unique<EffectDef>(*innermost);
+    
+    for (const auto& ae : stack) {
+        if (ae.def && ae.def->hasParticles) {
+            composite->hasParticles = true;
+            composite->emission = ae.def->emission;
+            composite->effectKernel = ae.def->effectKernel;
+            composite->effectProgram = ae.def->effectProgram;
+            composite->effect = ae.def->effect;
+            break;
+        }
+    }
     
     EffectDef* ptr = composite.get();
     m_inlineEffects.push_back(std::move(composite));

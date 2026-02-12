@@ -1,0 +1,32 @@
+#pragma once
+#include <Editors/Markdown/Effect.hpp>
+#include <array>
+
+namespace Markdown {
+
+/// Snow effect - particles fall down with wind drift, accumulate on glyphs
+class SnowEffect : public Effect {
+public:
+    SnowEffect();
+    
+    const char* getName() const override { return "Snow"; }
+    uint32_t getBehaviorID() const override { return 3; }
+    
+    EffectCapabilities getCapabilities() const override;
+    ShaderSources getGlyphShaderSources() const override;
+    ShaderSources getParticleShaderSources() const override;
+    KernelSources getKernelSources() const override;
+    EffectEmissionConfig getEmissionConfig() const override;
+    
+    void uploadGlyphUniforms(GLuint shader, float time) const override;
+    void uploadParticleUniforms(GLuint shader, float time) const override;
+    void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
+    
+    // Snow-specific parameters
+    std::array<float, 2> gravity = {0.0f, 50.0f};
+    std::array<float, 2> wind = {20.0f, 0.0f};
+    float drift = 0.5f;
+    float meltRate = 0.3f;
+};
+
+} // namespace Markdown

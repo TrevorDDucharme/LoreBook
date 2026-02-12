@@ -9,52 +9,8 @@
 
 namespace Markdown {
 
-// ────────────────────────────────────────────────────────────────────
-// Effect shader types
-// ────────────────────────────────────────────────────────────────────
-
-enum class EffectShaderType {
-    None,           // default glyph shader
-    Fire,           // vertex wave + fragment glow/distortion
-    Rainbow,        // fragment hue cycling
-    Shake,          // vertex noise offset
-    Dissolve,       // fragment noise discard
-    Glow,           // fragment additive bloom
-    Wave,           // vertex sinusoidal displacement
-    Glitch,         // fragment RGB split + scan lines
-    Neon,           // fragment bright outline
-    Blood,          // drip physics + viscous rendering
-    Snow,           // particle accumulation
-    Sparkle,        // particle emission
-    Custom          // user-defined via Lua
-};
-
-// ────────────────────────────────────────────────────────────────────
-// OpenCL Particle Kernel
-// ────────────────────────────────────────────────────────────────────
-
-struct ParticleKernel {
-    cl_kernel kernel = nullptr;        // compiled OpenCL kernel
-    cl_program program = nullptr;      // program owning the kernel
-    std::string sourcePath;            // path to .cl file for hot-reload
-    std::string entryPoint = "update"; // kernel function name
-    
-    // Kernel parameters (set as CL arguments)
-    float gravity = 0.0f;
-    float drag = 0.0f;
-    float bounciness = 0.5f;
-    float collisionThreshold = 0.5f;
-    glm::vec4 color1 = {1,1,1,1};
-    glm::vec4 color2 = {1,1,1,1};
-    float speed = 1.0f;
-    float turbulence = 0.0f;
-    float heatRise = 0.0f;
-    
-    // Custom params buffer for user-defined kernels
-    std::vector<float> customParams;
-    
-    ~ParticleKernel();
-};
+// Forward declaration of abstract Effect
+class Effect;
 
 // ────────────────────────────────────────────────────────────────────
 // Particle Emission Configuration
@@ -79,25 +35,17 @@ struct EmissionConfig {
 
 struct EffectDef {
     std::string name;
-    EffectShaderType shaderType = EffectShaderType::None;
-    GLuint customShaderProgram = 0;  // for Custom type
     
-    // Shader parameters (uploaded as uniforms)
-    glm::vec4 color1 = {1,1,1,1};
-    glm::vec4 color2 = {1,1,1,1};
-    float speed = 1.0f;
-    float intensity = 1.0f;
-    float scale = 1.0f;
-    float amplitude = 1.0f;
-    float frequency = 1.0f;
+    // Abstract Effect instance (owns shaders, kernels, params)
+    Effect* effect = nullptr;
+    GLuint effectGlyphShader = 0;      // compiled from Effect::getGlyphShaderSources()
+    GLuint effectParticleShader = 0;   // compiled from Effect::getParticleShaderSources()
+    cl_kernel effectKernel = nullptr;  // compiled from Effect::getKernelSources()
+    cl_program effectProgram = nullptr;
     
-    // OpenCL particle physics (optional)
-    ParticleKernel* particleKernel = nullptr;
+    // Emission config (copied from Effect at registration)
     EmissionConfig emission;
     bool hasParticles = false;
-    
-    // Post-process pass (optional)
-    GLuint postProcessShader = 0;
     
     // For data-driven hot-reload
     std::string sourceFile;
@@ -210,8 +158,11 @@ public:
     bool init(cl_context clContext, cl_device_id clDevice);
     void cleanup();
     
-    // Register effect definitions
-    void registerEffect(const std::string& name, EffectDef def);
+    // Register Effect instances
+    void registerEffect(Effect* effect);
+    void registerEffectAs(const std::string& name, Effect* effect);
+    
+    // Look up effect by name
     EffectDef* getEffect(const std::string& name);
     const std::unordered_map<std::string, EffectDef>& getEffects() const { return m_effects; }
     
@@ -223,27 +174,27 @@ public:
     void buildBatches(const std::vector<LayoutGlyph>& glyphs,
                       std::vector<EffectBatch>& outBatches);
     
-    // Compile/cache shaders
-    GLuint getShaderProgram(EffectShaderType type);
+    // Get shader program for an Effect's glyph rendering (falls back to base)
+    GLuint getGlyphShader(const EffectDef* def);
     
-    // OpenCL particle kernel management
-    ParticleKernel* loadParticleKernel(const std::string& clPath, const std::string& entry);
-    void reloadKernel(ParticleKernel* kernel);
-    void reloadKernel(const std::string& effectName);
+    // Get shader program for an Effect's particle rendering
+    GLuint getParticleShader(const EffectDef* def);
     
-    // Get built-in kernel names
-    std::vector<std::string> listBuiltinKernels() const;
+    // Get OpenCL kernel for an Effect's particle physics
+    cl_kernel getEffectKernel(const EffectDef* def);
     
-    // Upload effect uniforms to shader
+    // Upload effect uniforms to shader (delegates to Effect::uploadGlyphUniforms)
     void uploadEffectUniforms(GLuint shader, const EffectDef* effect, float time);
     
-    // Get combined shader program (vertex from one type, fragment from another)
-    GLuint getCombinedShaderProgram(EffectShaderType vertType, EffectShaderType fragType);
+    // Get all active Effects that have particles
+    std::vector<EffectDef*> getParticleEffects();
 
 private:
     void registerBuiltinEffects();
-    void compileShader(EffectShaderType type);
     GLuint compileShaderProgram(const char* vertSrc, const char* fragSrc, const char* geomSrc = nullptr);
+    
+    /// Compile shaders and kernel for an Effect instance
+    void compileEffectResources(EffectDef& def);
     
     // OpenCL context (borrowed from OpenCLContext singleton)
     cl_context m_clContext = nullptr;
@@ -252,14 +203,11 @@ private:
     // Effect registry
     std::unordered_map<std::string, EffectDef> m_effects;
     
-    // Shader cache (single type)
-    std::unordered_map<EffectShaderType, GLuint> m_shaderCache;
+    // Owned Effect instances
+    std::vector<std::unique_ptr<Effect>> m_ownedEffects;
     
-    // Combined shader cache (vertex_type * 100 + frag_type)
-    std::unordered_map<int, GLuint> m_combinedShaderCache;
-    
-    // Particle kernel cache
-    std::unordered_map<std::string, std::unique_ptr<ParticleKernel>> m_kernelCache;
+    // Base glyph shader (for effects with no custom glyph shader)
+    GLuint m_baseGlyphShader = 0;
     
     bool m_initialized = false;
 };

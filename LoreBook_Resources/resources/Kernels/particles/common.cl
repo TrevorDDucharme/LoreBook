@@ -1,20 +1,17 @@
 // Common particle definitions and utilities
 // Shared across all particle kernels
 
-// Behavior IDs — must match C++ EffectShaderType enum values
+// Behavior IDs — must match Effect::getBehaviorID() values
+// 0 = no particle kernel (shader-only effects)
 #define BEHAVIOR_NONE     0
 #define BEHAVIOR_FIRE     1
-#define BEHAVIOR_RAINBOW  2
-#define BEHAVIOR_SHAKE    3
-#define BEHAVIOR_DISSOLVE 4
-#define BEHAVIOR_GLOW     5
-#define BEHAVIOR_WAVE     6
-#define BEHAVIOR_GLITCH   7
-#define BEHAVIOR_NEON     8
-#define BEHAVIOR_BLOOD    9
-#define BEHAVIOR_SNOW     10
-#define BEHAVIOR_SPARKLE  11
-#define BEHAVIOR_CUSTOM   12
+#define BEHAVIOR_BLOOD    2
+#define BEHAVIOR_SNOW     3
+#define BEHAVIOR_SPARKLE  4
+#define BEHAVIOR_ELECTRIC 5
+#define BEHAVIOR_SMOKE    6
+#define BEHAVIOR_MAGIC    7
+#define BEHAVIOR_BUBBLES  8
 
 // Must match C++ Particle struct in PreviewEffectSystem.hpp
 // C++ uses explicit padding so that glm::vec3 (12 bytes) + 4 bytes pad
