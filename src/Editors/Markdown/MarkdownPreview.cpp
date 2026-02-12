@@ -1594,11 +1594,22 @@ void MarkdownPreview::updateParticlesCPU(float dt) {
 void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
     if (m_particleCount == 0) return;
     
+    // Particles should always render on top of glyphs (no depth test)
+    // and use additive blending for fire/glow effects
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // Additive blend
+    
     glUseProgram(m_particleShader);
     glUniformMatrix4fv(glGetUniformLocation(m_particleShader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
     
     glBindVertexArray(m_particleVAO);
     glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(m_particleCount));
+    
+    // Restore state
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
 void MarkdownPreview::renderOverlayWidgets(const ImVec2& origin, float scrollY) {

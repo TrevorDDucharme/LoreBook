@@ -40,13 +40,16 @@ __kernel void updateSnow(
     // Update position
     float2 newPos = p.pos + p.vel * deltaTime;
     
-    // Collision - snow sticks (transform to mask coords)
-    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
-    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
-    if (collisionVal > 0.5f) {
-        // Hit text/obstacle - accumulate briefly then die
+    // Two-point collision: only stick when entering solid from outside
+    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);
+    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);
+    float newCol = sampleCollision(collision, collisionSampler, newMaskPos);
+    float curCol = sampleCollision(collision, collisionSampler, curMaskPos);
+    
+    if (newCol > 0.5f && curCol <= 0.5f) {
+        // Hit text/obstacle from outside — accumulate briefly then die
         p.vel = (float2)(0.0f, 0.0f);
-        p.life -= deltaTime * 5.0f; // Die faster when stopped
+        p.life -= deltaTime * 5.0f;
         newPos = p.pos;
     }
     

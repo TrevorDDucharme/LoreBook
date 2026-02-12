@@ -39,17 +39,22 @@ __kernel void updateFire(
     // Update position
     float2 newPos = p.pos + p.vel * deltaTime;
     
-    // Check collision (transform document coords to mask texel coords)
-    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
-    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
-    if (collisionVal > 0.5f) {
-        // Hit something - deflect along surface
-        float2 maskNorm = surfaceNormal(collision, collisionSampler, maskPos);
-        // Flip normal Y back to document space
+    // Two-point collision check: only bounce when entering solid from outside
+    // Particles are emitted from within glyph bounds so they start inside —
+    // must allow them to escape.
+    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);
+    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);
+    float newCol = sampleCollision(collision, collisionSampler, newMaskPos);
+    float curCol = sampleCollision(collision, collisionSampler, curMaskPos);
+    
+    if (newCol > 0.5f && curCol <= 0.5f) {
+        // Entering solid from outside — deflect along surface
+        float2 maskNorm = surfaceNormal(collision, collisionSampler, newMaskPos);
         float2 docNorm = (float2)(maskNorm.x, -maskNorm.y);
         p.vel = reflect(p.vel, docNorm) * 0.3f;
         newPos = p.pos; // Don't penetrate
     }
+    // If both inside (just emitted) or both outside — allow movement
     
     p.pos = newPos;
     

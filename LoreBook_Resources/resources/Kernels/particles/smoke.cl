@@ -42,11 +42,14 @@ __kernel void updateSmoke(
     // Update position
     float2 newPos = p.pos + p.vel * deltaTime;
     
-    // Collision - smoke wraps around obstacles
-    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
-    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
-    if (collisionVal > 0.5f) {
-        float2 maskNorm = surfaceNormal(collision, collisionSampler, maskPos);
+    // Two-point collision: only deflect when entering solid from outside
+    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);
+    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);
+    float newCol = sampleCollision(collision, collisionSampler, newMaskPos);
+    float curCol = sampleCollision(collision, collisionSampler, curMaskPos);
+    
+    if (newCol > 0.5f && curCol <= 0.5f) {
+        float2 maskNorm = surfaceNormal(collision, collisionSampler, newMaskPos);
         float2 normal = (float2)(maskNorm.x, -maskNorm.y);
         // Deflect along surface
         p.vel = p.vel - normal * dot(p.vel, normal) * 1.5f;
