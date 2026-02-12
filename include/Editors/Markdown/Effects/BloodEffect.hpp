@@ -16,6 +16,8 @@ public:
     EffectEmissionConfig getEmissionConfig() const override;
     
     // Snippet API
+    GlyphSnippets getGlyphSnippets() const override;
+    void uploadGlyphSnippetUniforms(GLuint shader, float time) const override;
     ParticleSnippets getParticleSnippets() const override;
     void uploadParticleSnippetUniforms(GLuint shader, float time) const override;
     KernelSnippet getKernelSnippet() const override;

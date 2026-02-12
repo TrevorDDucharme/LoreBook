@@ -10,7 +10,24 @@ BloodEffect::BloodEffect() {
 }
 
 EffectCapabilities BloodEffect::getCapabilities() const {
-    return {true, false, true, false, false};
+    return {true, true, true, false, false};
+}
+
+GlyphSnippets BloodEffect::getGlyphSnippets() const {
+    GlyphSnippets gs;
+    gs.fragment.uniformDecls = "uniform vec4 uBlood_Color1;\nuniform vec4 uBlood_Color2;\n";
+    gs.fragment.code = R"({
+    // Tint text blood red with subtle darkening toward bottom
+    float drip = smoothstep(0.0, 1.0, v_uv.y);
+    vec3 bloodColor = mix(uBlood_Color1.rgb, uBlood_Color2.rgb, drip);
+    color.rgb = bloodColor;
+})";
+    return gs;
+}
+
+void BloodEffect::uploadGlyphSnippetUniforms(GLuint shader, float time) const {
+    glUniform4fv(glGetUniformLocation(shader, "uBlood_Color1"), 1, &color1[0]);
+    glUniform4fv(glGetUniformLocation(shader, "uBlood_Color2"), 1, &color2[0]);
 }
 
 EffectEmissionConfig BloodEffect::getEmissionConfig() const {

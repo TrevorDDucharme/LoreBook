@@ -48,9 +48,28 @@ GlyphSnippets FireEffect::getGlyphSnippets() const {
     pos.y += sin(uTime * 7.0 * uFire_Speed + in_pos.x * 0.2) * fireHeight * uFire_Intensity;
 })";
     gs.fragment.uniformDecls = "uniform vec4 uFire_Color1;\nuniform vec4 uFire_Color2;\n";
+    gs.fragment.helpers = R"(
+float fireHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float fireNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = fireHash(i);
+    float b = fireHash(i + vec2(1.0, 0.0));
+    float c = fireHash(i + vec2(0.0, 1.0));
+    float d = fireHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+)";
     gs.fragment.code = R"({
     float heat = 1.0 - v_uv.y;
     vec3 fireColor = mix(uFire_Color1.rgb, uFire_Color2.rgb, heat);
+    // Dark blobs via scrolling noise
+    float n = fireNoise(v_worldPos.xy * 0.08 + vec2(0.0, uTime * 2.5));
+    float blob = smoothstep(0.35, 0.65, n);
+    fireColor *= mix(0.3, 1.0, blob);
     color.rgb = fireColor;
     float fireGlow = smoothstep(0.0, 0.5, alpha) * (1.0 + heat * 0.5);
     color.a *= fireGlow;
