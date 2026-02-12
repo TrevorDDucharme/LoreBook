@@ -11,6 +11,7 @@ public:
     
     const char* getName() const override { return "smoke"; }
     uint32_t getBehaviorID() const override { return 6; }  // BEHAVIOR_SMOKE
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<SmokeEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     KernelSources getKernelSources() const override;

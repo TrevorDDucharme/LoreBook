@@ -1010,8 +1010,9 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
     // Check if any batches contribute to bloom
     bool hasGlow = false;
     for (const auto& batch : batches) {
-        if (!batch.effect || !batch.effect->effect) continue;
-        if (batch.effect->effect->getCapabilities().contributesToBloom) {
+        if (!batch.effect) continue;
+        Effect* fx = batch.effect->bloomEffect ? batch.effect->bloomEffect : batch.effect->effect;
+        if (fx && fx->getCapabilities().contributesToBloom) {
             hasGlow = true;
             break;
         }
@@ -1036,11 +1037,12 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
     glBindTexture(GL_TEXTURE_2D, m_fontAtlasTexture);
     
     for (const auto& batch : batches) {
-        if (!batch.effect || !batch.effect->effect || batch.vertices.empty()) continue;
-        if (!batch.effect->effect->getCapabilities().contributesToBloom) continue;
+        if (!batch.effect || batch.vertices.empty()) continue;
+        Effect* bloomFx = batch.effect->bloomEffect ? batch.effect->bloomEffect : batch.effect->effect;
+        if (!bloomFx || !bloomFx->getCapabilities().contributesToBloom) continue;
         
-        glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &batch.effect->effect->color1[0]);
-        glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), batch.effect->effect->intensity);
+        glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &bloomFx->color1[0]);
+        glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), bloomFx->intensity);
         
         uploadGlyphBatch(batch.vertices);
         glBindVertexArray(m_glyphVAO);
@@ -1218,6 +1220,24 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
     auto particleEffects = m_effectSystem.getParticleEffects();
     if (particleEffects.empty()) {
         return;
+    }
+    
+    // Deduplicate by behaviorID — only dispatch one kernel per behavior type
+    // (variants like "lava" share behaviorID with "fire", dispatching both
+    //  would double-process the same particles)
+    {
+        uint32_t seenBitmask = 0;
+        auto it = particleEffects.begin();
+        while (it != particleEffects.end()) {
+            uint32_t bid = (*it)->effect ? (*it)->effect->getBehaviorID() : 0;
+            uint32_t bit = 1u << bid;
+            if (bid == 0 || (seenBitmask & bit)) {
+                it = particleEffects.erase(it);
+            } else {
+                seenBitmask |= bit;
+                ++it;
+            }
+        }
     }
     
     cl_command_queue q = cl.getQueue();

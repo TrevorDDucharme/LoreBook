@@ -10,6 +10,7 @@ public:
     
     const char* getName() const override { return "Rainbow"; }
     uint32_t getBehaviorID() const override { return 0; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<RainbowEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;
@@ -29,6 +30,7 @@ public:
     
     const char* getName() const override { return "Wave"; }
     uint32_t getBehaviorID() const override { return 0; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<WaveEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;
@@ -51,6 +53,7 @@ public:
     
     const char* getName() const override { return "Shake"; }
     uint32_t getBehaviorID() const override { return 0; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<ShakeEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

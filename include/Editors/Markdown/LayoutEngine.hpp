@@ -115,6 +115,8 @@ private:
     
     // Inline custom effect defs (for per-tag parameter overrides)
     std::vector<std::unique_ptr<EffectDef>> m_inlineEffects;
+    // Cloned effects for per-span parameter overrides
+    std::vector<std::unique_ptr<Effect>> m_clonedEffects;
     
     // Output
     std::vector<LayoutGlyph>* m_outGlyphs = nullptr;

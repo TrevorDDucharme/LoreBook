@@ -10,6 +10,7 @@ public:
     
     const char* getName() const override { return "blood"; }
     uint32_t getBehaviorID() const override { return 2; }  // BEHAVIOR_BLOOD
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<BloodEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     KernelSources getKernelSources() const override;

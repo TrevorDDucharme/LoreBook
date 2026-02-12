@@ -10,6 +10,7 @@ public:
     
     const char* getName() const override { return "Glow"; }
     uint32_t getBehaviorID() const override { return 0; } // No particles
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<GlowEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

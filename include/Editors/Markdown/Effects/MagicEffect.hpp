@@ -11,6 +11,7 @@ public:
     
     const char* getName() const override { return "magic"; }
     uint32_t getBehaviorID() const override { return 7; }  // BEHAVIOR_MAGIC
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<MagicEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

@@ -109,6 +109,7 @@ public:
     // ── Identity ──
     virtual const char* getName() const = 0;
     virtual uint32_t getBehaviorID() const = 0;  // Unique ID for particle filtering
+    virtual std::unique_ptr<Effect> clone() const = 0;  // Deep copy for per-span overrides
     
     // ── Capabilities ──
     virtual EffectCapabilities getCapabilities() const = 0;

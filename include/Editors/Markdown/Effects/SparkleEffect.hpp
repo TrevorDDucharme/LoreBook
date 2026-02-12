@@ -10,6 +10,7 @@ public:
     
     const char* getName() const override { return "Sparkle"; }
     uint32_t getBehaviorID() const override { return 4; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<SparkleEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

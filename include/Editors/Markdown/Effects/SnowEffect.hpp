@@ -11,6 +11,7 @@ public:
     
     const char* getName() const override { return "Snow"; }
     uint32_t getBehaviorID() const override { return 3; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<SnowEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

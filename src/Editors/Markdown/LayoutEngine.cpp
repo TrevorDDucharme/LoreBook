@@ -1,8 +1,10 @@
 #include <Editors/Markdown/LayoutEngine.hpp>
+#include <Editors/Markdown/Effect.hpp>
 #include <Fonts.hpp>
 #include <imgui.h>
 #include <plog/Log.h>
 #include <cmath>
+#include <cstdio>
 #include <algorithm>
 #include <string>
 
@@ -42,6 +44,7 @@ void LayoutEngine::resetState(float wrapWidth) {
     
     m_effectStack.clear();
     m_inlineEffects.clear();
+    m_clonedEffects.clear();
 }
 
 void LayoutEngine::layout(const MarkdownDocument& doc, float wrapWidth,
@@ -454,16 +457,45 @@ void LayoutEngine::layoutEffectSpan(const Span& span) {
     
     // If there are per-tag attribute overrides and we have an Effect object, apply them
     if (effect && effect->effect && !span.effectParams.empty()) {
-        // Create an inline copy of the EffectDef to hold per-span overrides
-        // The Effect* is shared, so we modify the EffectDef's emission config as needed
-        auto custom = std::make_unique<EffectDef>(*effect);
+        // Clone the Effect so we can modify params for this span only
+        auto cloned = effect->effect->clone();
         
-        // Apply parameter overrides to the Effect's public members via a copy
-        // Note: these override the shared Effect's params only for this span
         for (const auto& [key, val] : span.effectParams) {
-            // These params currently can't override shared Effect members per-span.
-            // TODO: Add per-span parameter override mechanism
+            if (key == "color" && val.size() >= 7 && val[0] == '#') {
+                unsigned int hex = 0;
+                if (std::sscanf(val.c_str() + 1, "%x", &hex) == 1) {
+                    if (val.size() == 7) {
+                        cloned->color1 = {
+                            ((hex >> 16) & 0xFF) / 255.0f,
+                            ((hex >> 8) & 0xFF) / 255.0f,
+                            (hex & 0xFF) / 255.0f,
+                            1.0f
+                        };
+                    } else if (val.size() == 9) {
+                        cloned->color1 = {
+                            ((hex >> 24) & 0xFF) / 255.0f,
+                            ((hex >> 16) & 0xFF) / 255.0f,
+                            ((hex >> 8) & 0xFF) / 255.0f,
+                            (hex & 0xFF) / 255.0f
+                        };
+                    }
+                }
+            } else if (key == "intensity") {
+                try { cloned->intensity = std::stof(val); } catch (...) {}
+            } else if (key == "speed") {
+                try { cloned->speed = std::stof(val); } catch (...) {}
+            } else if (key == "scale") {
+                try { cloned->scale = std::stof(val); } catch (...) {}
+            } else if (key == "amplitude") {
+                try { cloned->amplitude = std::stof(val); } catch (...) {}
+            } else if (key == "frequency") {
+                try { cloned->frequency = std::stof(val); } catch (...) {}
+            }
         }
+        
+        auto custom = std::make_unique<EffectDef>(*effect);
+        custom->effect = cloned.get();
+        m_clonedEffects.push_back(std::move(cloned));
         
         effect = custom.get();
         m_inlineEffects.push_back(std::move(custom));
@@ -587,34 +619,50 @@ EffectDef* LayoutEngine::getCompositeEffect() {
     if (m_effectStack.size() == 1) return m_effectStack.currentEffect();
     
     // Multiple effects stacked — use the innermost effect for shaders
-    // and merge particle emission from any effect in the stack
+    // and merge particle emission + bloom from other effects in the stack
     const auto& stack = m_effectStack.getStack();
     EffectDef* innermost = m_effectStack.currentEffect();
     
-    // Check if any other effect in the stack has particles that innermost doesn't
-    bool needsMerge = false;
+    bool needsParticleMerge = false;
+    bool needsBloomMerge = false;
+    Effect* bloomFx = nullptr;
+    
     for (const auto& ae : stack) {
-        if (ae.def && ae.def != innermost && ae.def->hasParticles && !innermost->hasParticles) {
-            needsMerge = true;
-            break;
+        if (!ae.def || !ae.def->effect) continue;
+        // Check if an outer effect has particles the innermost doesn't
+        if (ae.def != innermost && ae.def->hasParticles && !innermost->hasParticles) {
+            needsParticleMerge = true;
+        }
+        // Check if an outer effect contributes to bloom but innermost doesn't
+        if (ae.def->effect->getCapabilities().contributesToBloom) {
+            if (!innermost->effect || !innermost->effect->getCapabilities().contributesToBloom) {
+                needsBloomMerge = true;
+                bloomFx = ae.def->effect;
+            }
         }
     }
     
-    if (!needsMerge) {
+    if (!needsParticleMerge && !needsBloomMerge) {
         return innermost;
     }
     
-    // Create a composite that uses innermost's shader but adds particles from the stack
+    // Create a composite that uses innermost's shader but adds particles/bloom from the stack
     auto composite = std::make_unique<EffectDef>(*innermost);
     
-    for (const auto& ae : stack) {
-        if (ae.def && ae.def->hasParticles) {
-            composite->hasParticles = true;
-            composite->emission = ae.def->emission;
-            composite->effectKernel = ae.def->effectKernel;
-            composite->effectProgram = ae.def->effectProgram;
-            composite->effect = ae.def->effect;
-            break;
+    if (needsBloomMerge && bloomFx) {
+        composite->bloomEffect = bloomFx;
+    }
+    
+    if (needsParticleMerge) {
+        for (const auto& ae : stack) {
+            if (ae.def && ae.def->hasParticles) {
+                composite->hasParticles = true;
+                composite->emission = ae.def->emission;
+                composite->effectKernel = ae.def->effectKernel;
+                composite->effectProgram = ae.def->effectProgram;
+                composite->effect = ae.def->effect;
+                break;
+            }
         }
     }
     

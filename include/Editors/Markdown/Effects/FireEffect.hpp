@@ -14,6 +14,7 @@ public:
     
     const char* getName() const override { return "fire"; }
     uint32_t getBehaviorID() const override { return 1; }  // BEHAVIOR_FIRE
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<FireEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

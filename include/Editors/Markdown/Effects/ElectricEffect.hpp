@@ -10,6 +10,7 @@ public:
     
     const char* getName() const override { return "Electric"; }
     uint32_t getBehaviorID() const override { return 5; }
+    std::unique_ptr<Effect> clone() const override { return std::make_unique<ElectricEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
     ShaderSources getGlyphShaderSources() const override;

@@ -47,6 +47,9 @@ struct EffectDef {
     EmissionConfig emission;
     bool hasParticles = false;
     
+    // Bloom effect from stack compositing (may differ from primary effect)
+    Effect* bloomEffect = nullptr;
+    
     // For data-driven hot-reload
     std::string sourceFile;
 };
