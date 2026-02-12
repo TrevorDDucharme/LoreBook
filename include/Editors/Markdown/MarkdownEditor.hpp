@@ -21,13 +21,18 @@ class MarkdownEditor : public Editors::BaseTextEditor
     // Markdown-specific helpers
     void updateFileWatcher();
     void parseCurrentFileForContext();
-    void renderInlineMarkdown(ImDrawList* drawList, const std::string& text, float startX, float lineY, ImFont* font);
     void handlePreviewMouseInput();
     void syncPreviewSource();
 
+    // Tokenizer state for multi-line code blocks
+    bool mdInCodeBlock = false;
+    std::string mdCodeBlockLang;
+    void tokenizeInlineMarkdown(std::vector<Editors::SyntaxToken>& tokens, const std::string& text, size_t offset);
+
 protected:
     // BaseTextEditor overrides
-    void drawTextContentWithSyntaxHighlighting(ImDrawList* drawList, const ImVec2& origin, float visibleHeight) override;
+    void beginTokenize(size_t startLine) override;
+    std::vector<Editors::SyntaxToken> tokenizeLine(const std::string& line, size_t lineIndex) override;
     void updateCompletions() override;
     void updateSyntaxErrors() override;
     void generateContextAwareCompletions(const std::string& prefix, bool isQualifiedAccess, const std::string& objectName) override;

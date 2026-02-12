@@ -53,9 +53,13 @@ class JavaEditor : public Editors::BaseTextEditor
     std::string getClassInfo(const std::string& className);
     std::string executeStaticMethod(const std::string& className, const std::string& methodName, const std::vector<std::string>& args);
 
+    // Tokenizer state for multi-line comments (/* ... */)
+    bool javaInMultiLineComment = false;
+
 protected:
     // BaseTextEditor overrides
-    void drawTextContentWithSyntaxHighlighting(ImDrawList* drawList, const ImVec2& origin, float visibleHeight) override;
+    void beginTokenize(size_t startLine) override;
+    std::vector<Editors::SyntaxToken> tokenizeLine(const std::string& line, size_t lineIndex) override;
     void updateCompletions() override;
     void updateSyntaxErrors() override;
     void generateContextAwareCompletions(const std::string& prefix, bool isQualifiedAccess, const std::string& objectName) override;

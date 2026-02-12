@@ -29,6 +29,9 @@ class LuaEditor : public Editors::BaseTextEditor
     // Per-tab Lua engines keyed by filepath string (for live console)
     std::unordered_map<std::string, std::unique_ptr<LuaEngine>> tabEngines;
 
+    // Tokenizer state for multi-line comments (--[[ ... ]])
+    bool luaInMultiComment = false;
+
     // Live console state
     std::string liveConsoleInput;
     std::string liveConsoleOutput;
@@ -81,7 +84,8 @@ class LuaEditor : public Editors::BaseTextEditor
 
 protected:
     // BaseTextEditor overrides
-    void drawTextContentWithSyntaxHighlighting(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight) override;
+    void beginTokenize(size_t startLine) override;
+    std::vector<Editors::SyntaxToken> tokenizeLine(const std::string& line, size_t lineIndex) override;
     void updateCompletions() override;
     void updateSyntaxErrors() override;
     void generateContextAwareCompletions(const std::string &prefix, bool isQualifiedAccess, const std::string &objectName) override;

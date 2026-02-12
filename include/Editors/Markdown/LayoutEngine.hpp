@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
+#include <memory>
 
 namespace Markdown {
 
@@ -82,6 +83,9 @@ private:
     void lineBreak();
     void addVerticalSpace(float space);
     
+    /// Get the current composite effect (merges stacked effects)
+    EffectDef* getCompositeEffect();
+    
     // UTF-8 helpers
     static int decodeUTF8(const char* p, uint32_t* outCodepoint);
     
@@ -108,6 +112,9 @@ private:
     // Effect stack
     EffectStack m_effectStack;
     PreviewEffectSystem* m_effectSystem = nullptr;
+    
+    // Inline custom effect defs (for per-tag parameter overrides)
+    std::vector<std::unique_ptr<EffectDef>> m_inlineEffects;
     
     // Output
     std::vector<LayoutGlyph>* m_outGlyphs = nullptr;

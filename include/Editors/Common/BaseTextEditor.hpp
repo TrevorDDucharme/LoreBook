@@ -55,6 +55,14 @@ struct UndoEntry
     size_t cursorColumn = 0;
 };
 
+// Syntax highlighting token — child editors produce these per line
+struct SyntaxToken
+{
+    size_t start;   // Column offset (0-based byte position)
+    size_t length;  // Number of bytes
+    ImU32 color;    // Rendering color
+};
+
 // Editor tab containing file state
 struct EditorTab
 {
@@ -137,6 +145,7 @@ protected:
     
     // Rendering helpers
     void drawLineNumbers(ImDrawList* drawList, const ImVec2& origin, float visibleHeight);
+    void drawTextContentWithSyntaxHighlighting(ImDrawList* drawList, const ImVec2& origin, float visibleHeight);
     void drawCursor(ImDrawList* drawList, const ImVec2& origin);
     void drawSelection(ImDrawList* drawList, const ImVec2& origin);
     void drawSyntaxErrors(ImDrawList* drawList, const ImVec2& origin);
@@ -162,7 +171,8 @@ protected:
     void syncEditorToActiveTab();
     
     // Virtual methods for language-specific behavior
-    virtual void drawTextContentWithSyntaxHighlighting(ImDrawList* drawList, const ImVec2& origin, float visibleHeight) = 0;
+    virtual void beginTokenize(size_t startLine) {} // Prepare tokenizer multi-line state up to startLine
+    virtual std::vector<SyntaxToken> tokenizeLine(const std::string& line, size_t lineIndex) = 0;
     virtual void updateCompletions() = 0;
     virtual void updateSyntaxErrors() = 0;
     virtual void generateContextAwareCompletions(const std::string& prefix, bool isQualifiedAccess, const std::string& objectName) = 0;

@@ -95,6 +95,9 @@ private:
     float m_cameraZ = 500.0f;
     float m_fovY = 45.0f;
     
+    // ── Scroll state ──
+    float m_scrollY = 0.0f;
+    
     // ── Shaders ──
     GLuint m_collisionShader = 0;
     GLuint m_particleShader = 0;

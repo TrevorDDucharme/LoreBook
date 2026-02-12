@@ -8,6 +8,10 @@
 #include <sstream>
 #include <ctime>
 
+using Editors::EditorTab;
+using Editors::CompletionItem;
+using Editors::EditorState;
+
 JavaEditor::JavaEditor()
 {
 }
@@ -96,422 +100,10 @@ void JavaEditor::setWorkingFile(std::filesystem::path file)
     // Legacy method - now delegates to openFile
     openFile(file);
 }
-
-// Tab management methods
-int JavaEditor::findTabByPath(const std::filesystem::path &path)
-{
-    for (int i = 0; i < tabs.size(); ++i)
-    {
-        if (tabs[i].filePath == path)
-        {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void JavaEditor::openTab(const std::filesystem::path &path)
-{
-    // Check if tab already exists
-    int existingTabIndex = findTabByPath(path);
-    if (existingTabIndex != -1)
-    {
-        setActiveTab(existingTabIndex);
-        return;
-    }
-
-    // Create new tab
-    tabs.emplace_back(path);
-    int newTabIndex = tabs.size() - 1;
-
-    // Load content for the new tab
-    loadTabContent(tabs[newTabIndex]);
-
-    // Set as active tab
-    setActiveTab(newTabIndex);
-}
-
-void JavaEditor::closeTab(int tabIndex)
-{
-    if (tabIndex < 0 || tabIndex >= tabs.size())
-    {
-        return;
-    }
-
-    // Remove the tab
-    tabs.erase(tabs.begin() + tabIndex);
-
-    // Update active tab index
-    if (tabs.empty())
-    {
-        activeTabIndex = -1;
-    }
-    else if (activeTabIndex >= tabs.size())
-    {
-        activeTabIndex = tabs.size() - 1;
-    }
-    else if (activeTabIndex > tabIndex)
-    {
-        activeTabIndex--;
-    }
-
-    // If we closed the active tab, make sure activeTabIndex points to a valid tab
-    if (activeTabIndex >= 0 && activeTabIndex < tabs.size())
-    {
-        tabs[activeTabIndex].isActive = true;
-    }
-}
-
-void JavaEditor::setActiveTab(int tabIndex)
-{
-    if (tabIndex < 0 || tabIndex >= tabs.size())
-    {
-        return;
-    }
-
-    // Save current editor state to the previously active tab
-    syncEditorToActiveTab();
-
-    // Deactivate all tabs
-    for (auto &tab : tabs)
-    {
-        tab.isActive = false;
-    }
-
-    // Activate the selected tab
-    activeTabIndex = tabIndex;
-    tabs[activeTabIndex].isActive = true;
-
-    // Load the active tab state into the editor
-    syncActiveTabToEditor();
-}
-
-EditorTab *JavaEditor::getActiveTab()
-{
-    if (activeTabIndex >= 0 && activeTabIndex < tabs.size())
-    {
-        return &tabs[activeTabIndex];
-    }
-    return nullptr;
-}
-
-const EditorTab *JavaEditor::getActiveTab() const
-{
-    if (activeTabIndex >= 0 && activeTabIndex < tabs.size())
-    {
-        return &tabs[activeTabIndex];
-    }
-    return nullptr;
-}
-
-void JavaEditor::loadTabContent(EditorTab &tab)
-{
-
-    // Prefer reading via Vault if available through the file backend; otherwise, use filesystem.
-    std::filesystem::path fullPath;
-    bool useFilesystem = true;
-
-    // Attempt to resolve via Vault if a Vault API exists.
-    // If not available, fall back to local filesystem path relative to workspace.
-    try {
-        // If the project exposes a Vault pointer or manager, integrate here.
-        // For now, fall back to filesystem-based behavior.
-        fullPath = tab.filePath;
-        useFilesystem = true;
-    }
-    catch (...) {
-        fullPath = tab.filePath;
-        useFilesystem = true;
-    }
-
-    tab.editorState.lines.clear();
-    tab.editorState.cursorLine = 0;
-    tab.editorState.cursorColumn = 0;
-    tab.editorState.scrollY = 0.0f;
-    tab.editorState.hasSelection = false;
-    tab.editorState.currentFile = tab.filePath.string();
-    tab.editorState.isDirty = false;
-    tab.editorState.isLoadedInMemory = false;
-
-    if (useFilesystem && std::filesystem::exists(fullPath))
-    {
-        std::ifstream file(fullPath);
-        if (file.is_open())
-        {
-            std::string line;
-            while (std::getline(file, line))
-            {
-                tab.editorState.lines.push_back(line);
-            }
-            file.close();
-            tab.editorState.isLoadedInMemory = true;
-        }
-        else
-        {
-            tab.editorState.lines.push_back("// Error: Cannot open file");
-            tab.editorState.isLoadedInMemory = true;
-        }
-    }
-    else
-    {
-        // Create new file (or vault-backed missing file)
-        tab.editorState.lines.push_back("");
-        tab.editorState.isLoadedInMemory = true;
-        tab.editorState.isDirty = true;
-    }
-
-    if (tab.editorState.lines.empty())
-    {
-        tab.editorState.lines.push_back("");
-    }
-}
-
-void JavaEditor::saveActiveTab()
-{
-    EditorTab *activeTab = getActiveTab();
-    if (!activeTab || activeTab->editorState.currentFile.empty())
-    {
-        return;
-    }
-
-    // Save to filesystem by default. Integrate with FileBackend/VaultFileBackend later.
-    std::filesystem::path fullPath = activeTab->filePath;
-
-    // If editorState.currentFile is a relative path, prefer using that relative to cwd
-    if (!activeTab->editorState.currentFile.empty() && activeTab->filePath.empty()) {
-        fullPath = std::filesystem::path(activeTab->editorState.currentFile);
-    }
-
-    // Create directory if it doesn't exist
-    std::filesystem::create_directories(fullPath.parent_path());
-
-    std::ofstream file(fullPath);
-    if (file.is_open())
-    {
-        for (size_t i = 0; i < activeTab->editorState.lines.size(); ++i)
-        {
-            file << activeTab->editorState.lines[i];
-            if (i < activeTab->editorState.lines.size() - 1)
-            {
-                file << "\n";
-            }
-        }
-        file.close();
-        activeTab->editorState.isDirty = false;
-
-        // Update the tab's display name to remove dirty indicator
-        activeTab->displayName = activeTab->filePath.filename().string();
-        
-        // If this is the active tab, also update the main editor state
-        if (activeTab->isActive)
-        {
-            editorState.isDirty = false;
-        }
-    }
-}
-
 void JavaEditor::openFile(std::filesystem::path file)
 {
     openTab(file);
 }
-
-void JavaEditor::syncActiveTabToEditor()
-{
-    EditorTab *activeTab = getActiveTab();
-    if (activeTab)
-    {
-        editorState = activeTab->editorState;
-        syntaxErrors = activeTab->syntaxErrors;
-    }
-}
-
-void JavaEditor::syncEditorToActiveTab()
-{
-    EditorTab *activeTab = getActiveTab();
-    if (activeTab)
-    {
-        activeTab->editorState = editorState;
-        activeTab->syntaxErrors = syntaxErrors;
-
-        // Update display name to show dirty indicator
-        if (activeTab->editorState.isDirty && !activeTab->displayName.empty() && activeTab->displayName.back() != '*')
-        {
-            activeTab->displayName += "*";
-        }
-        else if (!activeTab->editorState.isDirty && !activeTab->displayName.empty() && activeTab->displayName.back() == '*')
-        {
-            activeTab->displayName.pop_back();
-        }
-    }
-}
-
-void JavaEditor::updateFontMetrics()
-{
-    // Get current font from ImGui
-    ImFont *font = ImGui::GetFont();
-    if (font)
-    {
-        // Calculate character width based on a typical character ('M' is often used for monospace width)
-        charWidth = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, "M").x;
-        lineHeight = font->FontSize + ImGui::GetStyle().ItemSpacing.y * 0.5f;
-    }
-    else
-    {
-        // Fallback values if no font is available
-        charWidth = 8.0f;
-        lineHeight = 18.0f;
-    }
-}
-
-void JavaEditor::forceReloadFromDisk()
-{
-    EditorTab *activeTab = getActiveTab();
-    if (activeTab)
-    {
-        activeTab->editorState.isLoadedInMemory = false; // Force reload
-        loadTabContent(*activeTab);
-        // Update the main editor state
-        editorState = activeTab->editorState;
-        syntaxErrors = activeTab->syntaxErrors;
-    }
-}
-
-void JavaEditor::saveEditorToFile()
-{
-    saveActiveTab();
-}
-
-void JavaEditor::insertTextAtCursor(const std::string &text)
-{
-    if (editorState.hasSelection)
-    {
-        deleteSelection();
-    }
-
-    if (editorState.cursorLine >= editorState.lines.size())
-    {
-        editorState.lines.resize(editorState.cursorLine + 1);
-    }
-
-    // Handle multi-line text insertion (e.g., pasted text)
-    if (text.find('\n') != std::string::npos)
-    {
-        std::vector<std::string> lines;
-        std::string currentLine;
-        for (char c : text)
-        {
-            if (c == '\n')
-            {
-                lines.push_back(currentLine);
-                currentLine.clear();
-            }
-            else
-            {
-                currentLine += c;
-            }
-        }
-        lines.push_back(currentLine);
-
-        // Insert the text
-        std::string &line = editorState.lines[editorState.cursorLine];
-        std::string afterCursor = line.substr(editorState.cursorColumn);
-        line = line.substr(0, editorState.cursorColumn) + lines[0];
-
-        // Insert additional lines if needed
-        for (size_t i = 1; i < lines.size(); ++i)
-        {
-            editorState.lines.insert(editorState.lines.begin() + editorState.cursorLine + i, lines[i]);
-        }
-
-        // Update cursor position
-        editorState.cursorLine += lines.size() - 1;
-        editorState.cursorColumn = lines.back().length();
-
-        // Append the text that was after the cursor
-        editorState.lines[editorState.cursorLine] += afterCursor;
-    }
-    else
-    {
-        // Single line text insertion
-        std::string &line = editorState.lines[editorState.cursorLine];
-        line.insert(editorState.cursorColumn, text);
-        editorState.cursorColumn += text.length();
-    }
-
-    editorState.isDirty = true;
-    editorState.needsScrollToCursor = true;
-
-    // Sync changes back to active tab
-    syncEditorToActiveTab();
-
-    updateSyntaxErrors();
-    updateLiveProgramStructure(); // Update program structure with live content
-    updateCompletions();
-}
-
-void JavaEditor::deleteSelection()
-{
-    if (!editorState.hasSelection)
-    {
-        return;
-    }
-
-    size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-    size_t endCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionEndColumn : editorState.selectionStartColumn;
-
-    if (startLine == endLine)
-    {
-        // Single line deletion
-        editorState.lines[startLine].erase(startCol, endCol - startCol);
-    }
-    else
-    {
-        // Multi-line deletion
-        std::string newLine = editorState.lines[startLine].substr(0, startCol) +
-                              editorState.lines[endLine].substr(endCol);
-        editorState.lines[startLine] = newLine;
-        editorState.lines.erase(editorState.lines.begin() + startLine + 1,
-                                editorState.lines.begin() + endLine + 1);
-    }
-
-    editorState.cursorLine = startLine;
-    editorState.cursorColumn = startCol;
-    editorState.hasSelection = false;
-    editorState.isDirty = true;
-
-    // Sync changes back to active tab
-    syncEditorToActiveTab();
-
-    updateSyntaxErrors();
-    updateLiveProgramStructure(); // Update program structure with live content
-}
-
-void JavaEditor::moveCursor(int deltaLine, int deltaColumn)
-{
-    int newLine = static_cast<int>(editorState.cursorLine) + deltaLine;
-    int newColumn = static_cast<int>(editorState.cursorColumn) + deltaColumn;
-
-    newLine = std::max(0, std::min(newLine, static_cast<int>(editorState.lines.size()) - 1));
-
-    if (newLine < static_cast<int>(editorState.lines.size()))
-    {
-        newColumn = std::max(0, std::min(newColumn, static_cast<int>(editorState.lines[newLine].length())));
-    }
-    else
-    {
-        newColumn = 0;
-    }
-
-    editorState.cursorLine = newLine;
-    editorState.cursorColumn = newColumn;
-    editorState.needsScrollToCursor = true;
-
-    // Sync cursor position back to active tab
-    syncEditorToActiveTab();
-}
-
 void JavaEditor::updateCompletions()
 {
     completionItems.clear();
@@ -1322,172 +914,6 @@ ImVec2 JavaEditor::draw()
     // Return the screen position of the grid for drop coordinate calculation
     return childOrigin;
 }
-
-ImVec2 JavaEditor::drawEditor()
-{
-    // Update font metrics first
-    updateFontMetrics();
-
-    // Get the current drawing context (we're already inside a child window from draw())
-    ImDrawList *drawList = ImGui::GetWindowDrawList();
-    ImVec2 childOrigin = ImGui::GetCursorScreenPos();
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-
-    // Create an invisible button that covers the entire editor area for input capture
-    ImGui::SetCursorScreenPos(childOrigin);
-    ImGui::InvisibleButton("##editorInput", avail, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-    bool isHovered = ImGui::IsItemHovered();
-    bool isClicked = ImGui::IsItemClicked(0);
-
-    // Update focus state
-    if (isClicked)
-    {
-        editorState.wantsFocus = true;
-    }
-
-    if (editorState.wantsFocus)
-    {
-        ImGui::SetKeyboardFocusHere(-1); // Focus the invisible button
-        editorState.hasFocus = true;
-        editorState.wantsFocus = false;
-    }
-
-    // Check if we still have focus
-    editorState.hasFocus = ImGui::IsItemFocused() || isHovered;
-
-    // Handle keyboard input only when focused
-    if (editorState.hasFocus)
-    {
-        handleKeyboardInput();
-    }
-
-    // Calculate visible area
-    float lineNumberWidth = 60.0f;
-    ImVec2 textOrigin = ImVec2(childOrigin.x + lineNumberWidth, childOrigin.y);
-    visibleHeight = avail.y; // Store for use in cursor visibility checks
-
-    // Background
-    drawList->AddRectFilled(childOrigin, ImVec2(childOrigin.x + avail.x, childOrigin.y + avail.y), backgroundColor);
-
-    // Line numbers background
-    drawList->AddRectFilled(childOrigin, ImVec2(childOrigin.x + lineNumberWidth, childOrigin.y + avail.y), IM_COL32(40, 40, 40, 255));
-
-    // Separator line
-    drawList->AddLine(ImVec2(childOrigin.x + lineNumberWidth, childOrigin.y),
-                      ImVec2(childOrigin.x + lineNumberWidth, childOrigin.y + avail.y),
-                      IM_COL32(80, 80, 80, 255));
-
-    // Ensure cursor is visible
-    if (editorState.needsScrollToCursor)
-    {
-        ensureCursorVisible();
-        editorState.needsScrollToCursor = false;
-    }
-
-    // Draw components
-    drawLineNumbers(drawList, childOrigin, visibleHeight);
-    drawSelection(drawList, textOrigin);
-    drawTextContent(drawList, textOrigin, visibleHeight);
-    drawCursor(drawList, textOrigin);
-    drawSyntaxErrors(drawList, textOrigin);
-
-    // Handle mouse click for cursor positioning
-    if (isClicked)
-    {
-        ImVec2 mousePos = ImGui::GetMousePos();
-        // Convert mouse position to text coordinates
-        float relativeX = mousePos.x - textOrigin.x;
-        float relativeY = mousePos.y - textOrigin.y + editorState.scrollY;
-
-        size_t clickedLine = static_cast<size_t>(relativeY / lineHeight);
-
-        if (clickedLine < editorState.lines.size())
-        {
-            const std::string &line = editorState.lines[clickedLine];
-
-            // Find the closest character position by measuring text width
-            size_t clickedColumn = 0;
-            ImFont *font = ImGui::GetFont();
-
-            if (font && !line.empty())
-            {
-                // Binary search or linear search to find the closest character position
-                float bestDistance = FLT_MAX;
-                for (size_t col = 0; col <= line.length(); ++col)
-                {
-                    std::string textToCol = line.substr(0, col);
-                    float textWidth = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, textToCol.c_str()).x;
-                    float distance = std::abs(textWidth - relativeX);
-
-                    if (distance < bestDistance)
-                    {
-                        bestDistance = distance;
-                        clickedColumn = col;
-                    }
-                    else
-                    {
-                        break; // We've passed the closest point
-                    }
-                }
-            }
-            else
-            {
-                // Fallback to simple calculation
-                clickedColumn = static_cast<size_t>(relativeX / charWidth);
-                clickedColumn = std::min(clickedColumn, line.length());
-            }
-
-            editorState.cursorLine = clickedLine;
-            editorState.cursorColumn = clickedColumn;
-            editorState.hasSelection = false;
-            // Don't set needsScrollToCursor for mouse clicks since user clicked in visible area
-        }
-    }
-
-    // Handle scrolling
-    float scroll = ImGui::GetIO().MouseWheel;
-    if (scroll != 0.0f && isHovered)
-    {
-        editorState.scrollY -= scroll * lineHeight * 3;
-        editorState.scrollY = std::max(0.0f, editorState.scrollY);
-    }
-
-    // Check for error tooltips
-    if (isHovered)
-    {
-        ImVec2 mousePos = ImGui::GetMousePos();
-        for (const auto &error : syntaxErrors)
-        {
-            size_t errorLine = error.getLine() - 1;
-            size_t errorCol = error.getColumn() - 1;
-
-            if (errorLine < editorState.lines.size())
-            {
-                float errorX = textOrigin.x + errorCol * charWidth;
-                float errorY = textOrigin.y + errorLine * lineHeight - editorState.scrollY;
-                float errorWidth = charWidth * 5; // Error underline width
-
-                if (mousePos.x >= errorX && mousePos.x <= errorX + errorWidth &&
-                    mousePos.y >= errorY && mousePos.y <= errorY + lineHeight)
-                {
-                    ImGui::SetTooltip("%s", error.getMessage().c_str());
-                    break;
-                }
-            }
-        }
-    }
-
-    // Draw completion popup
-    if (showCompletions)
-    {
-        float lineNumberWidth = 60.0f;
-        ImVec2 textOrigin = ImVec2(childOrigin.x + lineNumberWidth, childOrigin.y);
-        drawCompletionPopup(textOrigin);
-    }
-
-    return childOrigin;
-}
-
 #include <Util/ErrorStream.hpp>
 #include <Util/StandardStream.hpp>
 
@@ -2529,422 +1955,47 @@ JavaEditor &JavaEditor::get()
     return instance;
 }
 
-void JavaEditor::handleKeyboardInput()
+void JavaEditor::beginTokenize(size_t startLine)
 {
-    ImGuiIO &io = ImGui::GetIO();
-
-    // Only handle input if we have focus
-    if (!editorState.hasFocus)
+    javaInMultiLineComment = false;
+    // Pre-scan lines before the visible range for multi-line comment state
+    for (size_t lineNum = 0; lineNum < startLine && lineNum < editorState.lines.size(); ++lineNum)
     {
-        return;
-    }
-
-    // Handle special keys
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter))
-    {
-        // Hide completions when Enter is pressed
-        if (showCompletions)
+        const std::string& line = editorState.lines[lineNum];
+        size_t pos = 0;
+        while (pos < line.length())
         {
-            showCompletions = false;
-        }
-
-        if (editorState.hasSelection)
-        {
-            deleteSelection();
-        }
-
-        // Split the current line at cursor position
-        if (editorState.cursorLine >= editorState.lines.size())
-        {
-            editorState.lines.resize(editorState.cursorLine + 1);
-        }
-
-        std::string &currentLine = editorState.lines[editorState.cursorLine];
-        
-        // Calculate indentation of the current line
-        std::string indentation = "";
-        for (size_t i = 0; i < currentLine.length(); ++i)
-        {
-            if (currentLine[i] == ' ' || currentLine[i] == '\t')
+            if (javaInMultiLineComment)
             {
-                indentation += currentLine[i];
+                size_t endPos = line.find("*/", pos);
+                if (endPos != std::string::npos) { javaInMultiLineComment = false; pos = endPos + 2; }
+                else break;
             }
-            else
+            else if (pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '/')
             {
-                break; // Stop at first non-whitespace character
+                break; // single-line comment
             }
-        }
-        
-        std::string newLine = currentLine.substr(editorState.cursorColumn);
-        currentLine = currentLine.substr(0, editorState.cursorColumn);
-
-        // Add indentation to the new line if it's not empty or if we're not at the start
-        if (!newLine.empty() || editorState.cursorColumn > 0)
-        {
-            newLine = indentation + newLine;
-        }
-
-        // Insert new line
-        editorState.lines.insert(editorState.lines.begin() + editorState.cursorLine + 1, newLine);
-        editorState.cursorLine++;
-        editorState.cursorColumn = indentation.length(); // Position cursor after indentation
-        editorState.isDirty = true;
-        editorState.needsScrollToCursor = true;
-
-        updateSyntaxErrors();
-        updateLiveProgramStructure(); // Update program structure with live content
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace))
-    {
-        if (editorState.hasSelection)
-        {
-            deleteSelection();
-        }
-        else if (editorState.cursorColumn > 0)
-        {
-            editorState.lines[editorState.cursorLine].erase(editorState.cursorColumn - 1, 1);
-            editorState.cursorColumn--;
-            editorState.isDirty = true;
-            updateSyntaxErrors();
-            updateLiveProgramStructure(); // Update program structure with live content
-        }
-        else if (editorState.cursorLine > 0)
-        {
-            // Merge with previous line
-            editorState.cursorColumn = editorState.lines[editorState.cursorLine - 1].length();
-            editorState.lines[editorState.cursorLine - 1] += editorState.lines[editorState.cursorLine];
-            editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine);
-            editorState.cursorLine--;
-            editorState.isDirty = true;
-            updateSyntaxErrors();
-            updateLiveProgramStructure(); // Update program structure with live content
-            scrollToCursorIfNeeded();
-        }
-        
-        // Update or dismiss completions after backspace
-        if (showCompletions)
-        {
-            updateCompletions(); // Recalculate completions with new content
-            if (completionItems.empty())
+            else if (pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '*')
             {
-                showCompletions = false; // Dismiss if no completions available
+                javaInMultiLineComment = true; pos += 2;
+                size_t endPos = line.find("*/", pos);
+                if (endPos != std::string::npos) { javaInMultiLineComment = false; pos = endPos + 2; }
+                else break;
             }
-        }
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete))
-    {
-        if (editorState.hasSelection)
-        {
-            deleteSelection();
-        }
-        else if (editorState.cursorLine < editorState.lines.size())
-        {
-            if (editorState.cursorColumn < editorState.lines[editorState.cursorLine].length())
+            else if (line[pos] == '"' || line[pos] == '\'')
             {
-                // Delete character at cursor
-                editorState.lines[editorState.cursorLine].erase(editorState.cursorColumn, 1);
-                editorState.isDirty = true;
-                updateSyntaxErrors();
-                updateLiveProgramStructure(); // Update program structure with live content
+                char q = line[pos]; size_t s = pos + 1; bool esc = false;
+                while (s < line.length()) { if (!esc && line[s] == q) { s++; break; } esc = (line[s] == '\\' && !esc); s++; }
+                pos = s;
             }
-            else if (editorState.cursorLine < editorState.lines.size() - 1)
-            {
-                // At end of line, merge with next line
-                editorState.lines[editorState.cursorLine] += editorState.lines[editorState.cursorLine + 1];
-                editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine + 1);
-                editorState.isDirty = true;
-                updateSyntaxErrors();
-                updateLiveProgramStructure(); // Update program structure with live content
-            }
-        }
-    }
-
-    // Arrow keys
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
-    {
-        if (editorState.cursorColumn > 0)
-        {
-            editorState.cursorColumn--;
-        }
-        else if (editorState.cursorLine > 0)
-        {
-            editorState.cursorLine--;
-            editorState.cursorColumn = editorState.lines[editorState.cursorLine].length();
-        }
-        // Only scroll if cursor moves outside current viewport (strict check)
-        float cursorY = editorState.cursorLine * lineHeight;
-        if (cursorY < editorState.scrollY || cursorY + lineHeight > editorState.scrollY + visibleHeight)
-        {
-            editorState.needsScrollToCursor = true;
-        }
-        editorState.hasSelection = false;
-        // Hide completions when cursor moves
-        if (showCompletions)
-        {
-            showCompletions = false;
-        }
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
-    {
-        if (editorState.cursorLine < editorState.lines.size() &&
-            editorState.cursorColumn < editorState.lines[editorState.cursorLine].length())
-        {
-            editorState.cursorColumn++;
-        }
-        else if (editorState.cursorLine < editorState.lines.size() - 1)
-        {
-            editorState.cursorLine++;
-            editorState.cursorColumn = 0;
-        }
-        // Only scroll if cursor moves outside current viewport (strict check)
-        float cursorY = editorState.cursorLine * lineHeight;
-        if (cursorY < editorState.scrollY || cursorY + lineHeight > editorState.scrollY + visibleHeight)
-        {
-            editorState.needsScrollToCursor = true;
-        }
-        editorState.hasSelection = false;
-        // Hide completions when cursor moves
-        if (showCompletions)
-        {
-            showCompletions = false;
-        }
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-    {
-        if (showCompletions && io.KeyCtrl)
-        {
-            // Navigate completions when Ctrl is held
-            selectedCompletion = (selectedCompletion > 0) ? selectedCompletion - 1 : completionItems.size() - 1;
-        }
-        else
-        {
-            // Move cursor normally
-            if (editorState.cursorLine > 0)
-            {
-                editorState.cursorLine--;
-                if (editorState.cursorLine < editorState.lines.size())
-                {
-                    editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length());
-                }
-                // Only scroll if cursor moves above visible area (strict check)
-                float cursorY = editorState.cursorLine * lineHeight;
-                if (cursorY < editorState.scrollY)
-                {
-                    editorState.needsScrollToCursor = true;
-                }
-            }
-            editorState.hasSelection = false;
-            // Hide completions when cursor moves
-            if (showCompletions)
-            {
-                showCompletions = false;
-            }
-        }
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-    {
-        if (showCompletions && io.KeyCtrl)
-        {
-            // Navigate completions when Ctrl is held
-            selectedCompletion = (selectedCompletion + 1) % completionItems.size();
-        }
-        else
-        {
-            // Move cursor normally
-            if (editorState.cursorLine < editorState.lines.size() - 1)
-            {
-                editorState.cursorLine++;
-                if (editorState.cursorLine < editorState.lines.size())
-                {
-                    editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length());
-                }
-                // Only scroll if cursor moves below visible area (strict check)
-                float cursorY = editorState.cursorLine * lineHeight;
-                if (cursorY + lineHeight > editorState.scrollY + visibleHeight)
-                {
-                    editorState.needsScrollToCursor = true;
-                }
-            }
-            editorState.hasSelection = false;
-            // Hide completions when cursor moves
-            if (showCompletions)
-            {
-                showCompletions = false;
-            }
-        }
-    }
-
-    // Handle Tab key for indentation
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !showCompletions)
-    {
-        if (editorState.hasSelection)
-        {
-            deleteSelection();
-        }
-        insertTextAtCursor("    "); // Insert 4 spaces for tab
-        return;                     // Don't process other input after tab
-    }
-
-    // Handle Ctrl+S for save
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
-    {
-        saveEditorToFile();
-    }
-
-    // Handle completion navigation
-    if (showCompletions)
-    {
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab))
-        {
-            if (selectedCompletion < completionItems.size())
-            {
-                // Find the word being completed
-                const std::string &line = editorState.lines[editorState.cursorLine];
-                size_t wordStart = editorState.cursorColumn;
-                while (wordStart > 0 && (std::isalnum(line[wordStart - 1]) || line[wordStart - 1] == '_'))
-                {
-                    wordStart--;
-                }
-
-                // Replace the partial word with the completion
-                std::string &currentLine = editorState.lines[editorState.cursorLine];
-                currentLine.erase(wordStart, editorState.cursorColumn - wordStart);
-                currentLine.insert(wordStart, completionItems[selectedCompletion].text);
-                editorState.cursorColumn = wordStart + completionItems[selectedCompletion].text.length();
-                editorState.isDirty = true;
-                updateLiveProgramStructure(); // Update program structure with live content
-            }
-            showCompletions = false;
-        }
-        else if (ImGui::IsKeyPressed(ImGuiKey_Escape))
-        {
-            showCompletions = false;
-        }
-    }
-
-    // Handle text input
-    for (int i = 0; i < io.InputQueueCharacters.Size; i++)
-    {
-        ImWchar c = io.InputQueueCharacters[i];
-        if (c == '\t')
-        {
-            // Handle tab character explicitly
-            if (editorState.hasSelection)
-            {
-                deleteSelection();
-            }
-            insertTextAtCursor("    "); // Insert 4 spaces for tab
-        }
-        else if (c != 0 && c >= 32)
-        {
-            std::string input(1, static_cast<char>(c));
-            
-            // Handle auto-pairing for brackets, quotes, and backticks
-            bool shouldAutoPair = false;
-            std::string closingChar = "";
-            
-            switch (c)
-            {
-                case '(':
-                    shouldAutoPair = true;
-                    closingChar = ")";
-                    break;
-                case '{':
-                    shouldAutoPair = true;
-                    closingChar = "}";
-                    break;
-                case '[':
-                    shouldAutoPair = true;
-                    closingChar = "]";
-                    break;
-                case '"':
-                    shouldAutoPair = true;
-                    closingChar = "\"";
-                    break;
-                case '\'':
-                    shouldAutoPair = true;
-                    closingChar = "'";
-                    break;
-                case '`':
-                    shouldAutoPair = true;
-                    closingChar = "`";
-                    break;
-            }
-            
-            if (shouldAutoPair)
-            {
-                if (editorState.hasSelection)
-                {
-                    deleteSelection();
-                }
-                
-                // Insert opening character
-                insertTextAtCursor(input);
-                
-                // Store cursor position before inserting closing character
-                size_t savedCursorLine = editorState.cursorLine;
-                size_t savedCursorColumn = editorState.cursorColumn;
-                
-                // Insert closing character
-                insertTextAtCursor(closingChar);
-                
-                // Move cursor back between the paired characters
-                editorState.cursorLine = savedCursorLine;
-                editorState.cursorColumn = savedCursorColumn;
-                
-                // Sync changes back to active tab
-                syncEditorToActiveTab();
-            }
-            else
-            {
-                insertTextAtCursor(input);
-            }
-
-            // Trigger completions on certain characters
-            if (c == '.' || std::isalpha(c))
-            {
-                updateCompletions();
-            }
+            else pos++;
         }
     }
 }
 
-void JavaEditor::drawLineNumbers(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
+std::vector<Editors::SyntaxToken> JavaEditor::tokenizeLine(const std::string& line, size_t lineIndex)
 {
-    float y = origin.y - editorState.scrollY;
-    size_t startLine = static_cast<size_t>(std::max(0.0f, editorState.scrollY / lineHeight));
-    size_t endLine = std::min(editorState.lines.size(), startLine + static_cast<size_t>(visibleHeight / lineHeight) + 2);
-
-    for (size_t lineNum = startLine; lineNum < endLine; ++lineNum)
-    {
-        float lineY = y + lineNum * lineHeight;
-        if (lineY > origin.y + visibleHeight)
-            break;
-        if (lineY + lineHeight < origin.y)
-            continue;
-
-        std::string lineNumStr = std::to_string(lineNum + 1);
-        drawList->AddText(ImVec2(origin.x + 5, lineY), lineNumberColor, lineNumStr.c_str());
-    }
-}
-
-void JavaEditor::drawTextContent(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
-{
-    drawTextContentWithSyntaxHighlighting(drawList, origin, visibleHeight);
-}
-
-void JavaEditor::drawTextContentWithSyntaxHighlighting(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
-{
-    float y = origin.y - editorState.scrollY;
-    size_t startLine = static_cast<size_t>(std::max(0.0f, editorState.scrollY / lineHeight));
-    size_t endLine = std::min(editorState.lines.size(), startLine + static_cast<size_t>(visibleHeight / lineHeight) + 2);
-
-    // Java keywords for syntax highlighting
+    using Editors::SyntaxToken;
     static const std::unordered_set<std::string> javaKeywords = {
         "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char",
         "class", "const", "continue", "default", "do", "double", "else", "enum",
@@ -2955,517 +2006,157 @@ void JavaEditor::drawTextContentWithSyntaxHighlighting(ImDrawList *drawList, con
         "transient", "try", "void", "volatile", "while", "true", "false", "null"
     };
 
-    ImFont *font = ImGui::GetFont();
-    if (!font) return;
+    std::vector<SyntaxToken> tokens;
+    if (line.empty()) return tokens;
 
-    // Track multi-line comment state across all lines
-    bool globalInMultiLineComment = false;
-    
-    // First pass: determine multi-line comment state from the beginning of the file
-    for (size_t lineNum = 0; lineNum < startLine; ++lineNum)
+    size_t pos = 0;
+
+    while (pos < line.length())
     {
-        const std::string &line = editorState.lines[lineNum];
-        size_t pos = 0;
-        bool inSingleLineComment = false;
-        
-        while (pos < line.length())
+        size_t start = pos;
+        ImU32 color = textColor;
+
+        // Handle existing multi-line comment state
+        if (javaInMultiLineComment)
         {
-            if (globalInMultiLineComment)
+            size_t endPos = line.find("*/", pos);
+            if (endPos != std::string::npos)
             {
-                size_t endPos = line.find("*/", pos);
-                if (endPos != std::string::npos)
-                {
-                    globalInMultiLineComment = false;
-                    pos = endPos + 2;
-                }
-                else
-                {
-                    break; // Rest of line is in comment
-                }
-            }
-            else if (!inSingleLineComment && pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '/')
-            {
-                inSingleLineComment = true;
-                break; // Rest of line is comment
-            }
-            else if (!inSingleLineComment && pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '*')
-            {
-                globalInMultiLineComment = true;
-                pos += 2;
-                // Look for immediate end on same line
-                size_t endPos = line.find("*/", pos);
-                if (endPos != std::string::npos)
-                {
-                    globalInMultiLineComment = false;
-                    pos = endPos + 2;
-                }
-                else
-                {
-                    break; // Rest of line is in comment
-                }
+                tokens.push_back({pos, endPos + 2 - pos, commentColor});
+                pos = endPos + 2;
+                javaInMultiLineComment = false;
             }
             else
             {
-                pos++;
-            }
-        }
-    }
-
-    // Second pass: render visible lines with proper comment state
-    for (size_t lineNum = startLine; lineNum < endLine; ++lineNum)
-    {
-        float lineY = y + lineNum * lineHeight;
-        if (lineY > origin.y + visibleHeight)
-            break;
-        if (lineY + lineHeight < origin.y)
-            continue;
-
-        const std::string &line = editorState.lines[lineNum];
-        if (line.empty())
-            continue;
-
-        float x = origin.x;
-        size_t pos = 0;
-        bool inSingleLineComment = false;
-        bool lineStartsInMultiLineComment = globalInMultiLineComment;
-
-        while (pos < line.length())
-        {
-            std::string token;
-            ImU32 color = textColor;
-
-            // Handle existing multi-line comment state
-            if (globalInMultiLineComment)
-            {
-                // Look for end of multi-line comment
-                size_t endPos = line.find("*/", pos);
-                if (endPos != std::string::npos)
-                {
-                    token = line.substr(pos, endPos + 2 - pos);
-                    pos = endPos + 2;
-                    globalInMultiLineComment = false;
-                    color = commentColor;
-                }
-                else
-                {
-                    token = line.substr(pos);
-                    pos = line.length();
-                    color = commentColor;
-                }
-            }
-            // Handle single-line comments
-            else if (!inSingleLineComment && pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '/')
-            {
-                token = line.substr(pos);
+                tokens.push_back({pos, line.length() - pos, commentColor});
                 pos = line.length();
-                inSingleLineComment = true;
-                color = commentColor;
             }
-            // Handle multi-line comment start
-            else if (!inSingleLineComment && pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '*')
+            continue;
+        }
+        // Single-line comment
+        if (pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '/')
+        {
+            tokens.push_back({pos, line.length() - pos, commentColor});
+            break;
+        }
+        // Multi-line comment start
+        if (pos + 1 < line.length() && line[pos] == '/' && line[pos + 1] == '*')
+        {
+            size_t endPos = line.find("*/", pos + 2);
+            if (endPos != std::string::npos)
             {
-                size_t endPos = line.find("*/", pos + 2);
-                if (endPos != std::string::npos)
-                {
-                    // Complete comment on same line
-                    token = line.substr(pos, endPos + 2 - pos);
-                    pos = endPos + 2;
-                }
+                tokens.push_back({pos, endPos + 2 - pos, commentColor});
+                pos = endPos + 2;
+            }
+            else
+            {
+                tokens.push_back({pos, line.length() - pos, commentColor});
+                javaInMultiLineComment = true;
+                pos = line.length();
+            }
+            continue;
+        }
+        // String and character literals
+        if (line[pos] == '"' || line[pos] == '\'')
+        {
+            char quoteChar = line[pos];
+            bool escaped = false;
+            size_t endPos = pos + 1;
+            while (endPos < line.length())
+            {
+                if (escaped) { escaped = false; }
+                else if (line[endPos] == '\\') { escaped = true; }
+                else if (line[endPos] == quoteChar) { endPos++; break; }
+                endPos++;
+            }
+            tokens.push_back({pos, endPos - pos, stringColor});
+            pos = endPos;
+            continue;
+        }
+        // Numbers
+        if (std::isdigit(line[pos]) || (line[pos] == '.' && pos + 1 < line.length() && std::isdigit(line[pos + 1])))
+        {
+            while (pos < line.length() && (std::isdigit(line[pos]) || line[pos] == '.' ||
+                   line[pos] == 'f' || line[pos] == 'F' || line[pos] == 'l' || line[pos] == 'L' ||
+                   line[pos] == 'd' || line[pos] == 'D'))
+                pos++;
+            tokens.push_back({start, pos - start, numberColor});
+            continue;
+        }
+        // Identifiers
+        if (std::isalpha(line[pos]) || line[pos] == '_' || line[pos] == '$')
+        {
+            while (pos < line.length() && (std::isalnum(line[pos]) || line[pos] == '_' || line[pos] == '$'))
+                pos++;
+            std::string word = line.substr(start, pos - start);
+
+            if (javaKeywords.count(word))
+            {
+                color = keywordColor;
+            }
+            else
+            {
+                // Check if followed by '(' → method call
+                size_t next = pos;
+                while (next < line.length() && std::isspace(line[next])) next++;
+                if (next < line.length() && line[next] == '(')
+                    color = methodColor;
                 else
                 {
-                    // Comment continues to next line
-                    token = line.substr(pos);
-                    pos = line.length();
-                    globalInMultiLineComment = true;
-                }
-                color = commentColor;
-            }
-            // Handle string and character literals (when starting a new string/char)
-            else if ((line[pos] == '"' || line[pos] == '\'') && !inSingleLineComment)
-            {
-                char quoteChar = line[pos];
-                
-                bool escaped = false;
-                size_t endPos = pos + 1;
-                
-                // Find the end of the string/character literal
-                while (endPos < line.length())
-                {
-                    if (escaped)
-                    {
-                        escaped = false;
-                    }
-                    else if (line[endPos] == '\\')
-                    {
-                        escaped = true;
-                    }
-                    else if (line[endPos] == quoteChar)
-                    {
-                        endPos++; // Include the closing quote
-                        break;
-                    }
-                    endPos++;
-                }
-                
-                token = line.substr(pos, endPos - pos);
-                pos = endPos;
-                color = stringColor;
-            }
-            // Handle numbers
-            else if (std::isdigit(line[pos]) || (line[pos] == '.' && pos + 1 < line.length() && std::isdigit(line[pos + 1])))
-            {
-                while (pos < line.length() && (std::isdigit(line[pos]) || line[pos] == '.' || 
-                       line[pos] == 'f' || line[pos] == 'F' || line[pos] == 'l' || line[pos] == 'L' ||
-                       line[pos] == 'd' || line[pos] == 'D'))
-                {
-                    token += line[pos++];
-                }
-                color = numberColor;
-            }
-            // Handle identifiers (keywords, class names, method names, variables)
-            else if (std::isalpha(line[pos]) || line[pos] == '_' || line[pos] == '$')
-            {
-                size_t tokenStart = pos;
-                while (pos < line.length() && (std::isalnum(line[pos]) || line[pos] == '_' || line[pos] == '$'))
-                {
-                    token += line[pos++];
-                }
-                
-                // Check if it's a keyword
-                if (javaKeywords.count(token))
-                {
-                    color = keywordColor;
-                }
-                else
-                {
-                    // Check if this identifier is followed by an opening parenthesis (function call)
-                    size_t nextNonWhitespace = pos;
-                    while (nextNonWhitespace < line.length() && std::isspace(line[nextNonWhitespace]))
-                    {
-                        nextNonWhitespace++;
-                    }
-                    
-                    bool isFunctionCall = (nextNonWhitespace < line.length() && line[nextNonWhitespace] == '(');
-                    
-                    if (isFunctionCall)
-                    {
-                        // Color as method call
-                        color = methodColor;
-                    }
+                    std::string currentPackage = getCurrentPackageName();
+                    const Class* cls = programStructure.findClass(word, currentPackage);
+                    if (!cls) cls = programStructure.findClass(word);
+                    if (cls) color = classColor;
                     else
                     {
-                        // Use program structure to determine token type
-                        std::string currentPackage = getCurrentPackageName();
-                        const Class* cls = programStructure.findClass(token, currentPackage);
-                        if (!cls)
+                        std::string currentClass = getCurrentClassName();
+                        if (!currentClass.empty())
                         {
-                            cls = programStructure.findClass(token); // Try without package
-                        }
-                        
-                        if (cls)
-                        {
-                            color = classColor;
-                        }
-                        else
-                        {
-                            // Check if it's a method or variable in current context
-                            std::string currentClass = getCurrentClassName();
-                            if (!currentClass.empty())
+                            const Class* currentCls = resolveClass(currentClass);
+                            if (currentCls)
                             {
-                                const Class* currentCls = resolveClass(currentClass);
-                                if (currentCls)
-                                {
-                                    // Check if it's a method
-                                    bool isMethod = false;
-                                    for (const auto& method : currentCls->methods)
-                                    {
-                                        if (method.name == token)
-                                        {
-                                            color = methodColor;
-                                            isMethod = true;
-                                            break;
-                                        }
-                                    }
-                                    
-                                    // Check if it's a variable
-                                    if (!isMethod)
-                                    {
-                                        for (const auto& variable : currentCls->variables)
-                                        {
-                                            if (variable.name == token)
-                                            {
-                                                color = variableColor;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            // If still not identified, keep default text color
-                            if (color == textColor)
-                            {
-                                color = textColor;
+                                for (const auto& m : currentCls->methods)
+                                    if (m.name == word) { color = methodColor; break; }
+                                if (color == textColor)
+                                    for (const auto& v : currentCls->variables)
+                                        if (v.name == word) { color = variableColor; break; }
                             }
                         }
                     }
                 }
             }
-            // Handle operators and punctuation
-            else if (line[pos] == '+' || line[pos] == '-' || line[pos] == '*' || line[pos] == '/' ||
-                     line[pos] == '=' || line[pos] == '<' || line[pos] == '>' || line[pos] == '!' ||
-                     line[pos] == '&' || line[pos] == '|' || line[pos] == '^' || line[pos] == '%' ||
-                     line[pos] == '?' || line[pos] == ':' || line[pos] == ';' || line[pos] == ',' ||
-                     line[pos] == '(' || line[pos] == ')' || line[pos] == '{' || line[pos] == '}' ||
-                     line[pos] == '[' || line[pos] == ']')
-            {
-                token += line[pos++];
-                color = operatorColor;
-            }
-            // Handle whitespace
-            else if (std::isspace(line[pos]))
-            {
-                while (pos < line.length() && std::isspace(line[pos]))
-                {
-                    token += line[pos++];
-                }
-                color = textColor; // Whitespace keeps default color
-            }
-            // Handle any other character
-            else
-            {
-                token += line[pos++];
-                color = textColor;
-            }
-
-            // Draw the token if it's not empty
-            if (!token.empty())
-            {
-                drawList->AddText(ImVec2(x, lineY), color, token.c_str());
-                x += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, token.c_str()).x;
-            }
-        }
-    }
-}
-
-void JavaEditor::drawCursor(ImDrawList *drawList, const ImVec2 &origin)
-{
-    ImVec2 cursorPos = getCursorScreenPos(origin);
-    drawList->AddLine(cursorPos, ImVec2(cursorPos.x, cursorPos.y + lineHeight), cursorColor, 2.0f);
-}
-
-void JavaEditor::drawSelection(ImDrawList *drawList, const ImVec2 &origin)
-{
-    if (!editorState.hasSelection)
-    {
-        return;
-    }
-
-    size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-    size_t endCol = editorState.selectionStartLine < editorState.selectionEndLine ? editorState.selectionEndColumn : editorState.selectionStartColumn;
-
-    ImFont *font = ImGui::GetFont();
-
-    for (size_t lineNum = startLine; lineNum <= endLine; ++lineNum)
-    {
-        if (lineNum >= editorState.lines.size())
-            break;
-
-        float lineY = origin.y + lineNum * lineHeight - editorState.scrollY;
-        size_t lineStartCol = (lineNum == startLine) ? startCol : 0;
-        size_t lineEndCol = (lineNum == endLine) ? endCol : editorState.lines[lineNum].length();
-
-        const std::string &line = editorState.lines[lineNum];
-
-        float startX = origin.x;
-        float endX = origin.x;
-
-        if (font)
-        {
-            // Calculate accurate positions using text measurement
-            if (lineStartCol > 0 && lineStartCol <= line.length())
-            {
-                std::string textToStart = line.substr(0, lineStartCol);
-                startX += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, textToStart.c_str()).x;
-            }
-
-            if (lineEndCol > 0 && lineEndCol <= line.length())
-            {
-                std::string textToEnd = line.substr(0, lineEndCol);
-                endX += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, textToEnd.c_str()).x;
-            }
-            else if (lineEndCol > line.length())
-            {
-                endX += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, line.c_str()).x;
-            }
-        }
-        else
-        {
-            // Fallback to simple calculation
-            startX += lineStartCol * charWidth;
-            endX += lineEndCol * charWidth;
-        }
-
-        drawList->AddRectFilled(ImVec2(startX, lineY), ImVec2(endX, lineY + lineHeight), selectionColor);
-    }
-}
-
-void JavaEditor::drawSyntaxErrors(ImDrawList *drawList, const ImVec2 &origin)
-{
-    ImFont *font = ImGui::GetFont();
-
-    for (const auto &error : syntaxErrors)
-    {
-        size_t lineNum = error.getLine() - 1; // Convert to 0-based
-        if (lineNum >= editorState.lines.size())
+            tokens.push_back({start, pos - start, color});
             continue;
-
-        const std::string &line = editorState.lines[lineNum];
-        float lineY = origin.y + lineNum * lineHeight - editorState.scrollY + lineHeight - 2;
-
-        float startX = origin.x;
-        if (font && error.getColumn() > 1 && error.getColumn() - 1 <= line.length())
-        {
-            std::string textToError = line.substr(0, error.getColumn() - 1);
-            startX += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, textToError.c_str()).x;
         }
-        else
+        // Operators / punctuation
+        if (line[pos] == '+' || line[pos] == '-' || line[pos] == '*' || line[pos] == '/' ||
+            line[pos] == '=' || line[pos] == '<' || line[pos] == '>' || line[pos] == '!' ||
+            line[pos] == '&' || line[pos] == '|' || line[pos] == '^' || line[pos] == '%' ||
+            line[pos] == '?' || line[pos] == ':' || line[pos] == ';' || line[pos] == ',' ||
+            line[pos] == '(' || line[pos] == ')' || line[pos] == '{' || line[pos] == '}' ||
+            line[pos] == '[' || line[pos] == ']')
         {
-            startX += (error.getColumn() - 1) * charWidth; // Fallback
+            tokens.push_back({pos, 1, operatorColor});
+            pos++;
+            continue;
         }
-
-        float endX = startX + charWidth * 5; // Draw a short underline
-
-        // Draw wavy red line under the error
-        for (float x = startX; x < endX; x += 4.0f)
+        // Whitespace
+        if (std::isspace(line[pos]))
         {
-            float wave = sin((x - startX) * 0.5f) * 2.0f;
-            drawList->AddLine(ImVec2(x, lineY + wave), ImVec2(x + 2, lineY - wave), errorColor, 1.0f);
+            while (pos < line.length() && std::isspace(line[pos])) pos++;
+            tokens.push_back({start, pos - start, textColor});
+            continue;
         }
+        // Any other character
+        tokens.push_back({pos, 1, textColor});
+        pos++;
     }
+
+    return tokens;
 }
 
-void JavaEditor::drawCompletionPopup(const ImVec2 &textOrigin)
+void JavaEditor::onTextChanged()
 {
-    if (completionItems.empty())
-    {
-        return;
-    }
-
-    ImVec2 cursorScreenPos = getCursorScreenPos(textOrigin);
-    ImVec2 popupPos = ImVec2(cursorScreenPos.x, cursorScreenPos.y + lineHeight);
-
-    ImGui::SetNextWindowPos(popupPos);
-    ImGui::SetNextWindowSize(ImVec2(300, std::min(200.0f, completionItems.size() * 20.0f)));
-
-    if (ImGui::Begin("##Completions", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-    {
-        for (size_t i = 0; i < completionItems.size(); ++i)
-        {
-            bool isSelected = (i == selectedCompletion);
-            if (isSelected)
-            {
-                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 255, 255, 255));
-                ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(100, 150, 200, 255));
-            }
-
-            if (ImGui::Selectable(completionItems[i].text.c_str(), isSelected))
-            {
-                selectedCompletion = i;
-                // Apply the completion
-                const std::string &line = editorState.lines[editorState.cursorLine];
-                size_t wordStart = editorState.cursorColumn;
-                while (wordStart > 0 && (std::isalnum(line[wordStart - 1]) || line[wordStart - 1] == '_'))
-                {
-                    wordStart--;
-                }
-
-                std::string &currentLine = editorState.lines[editorState.cursorLine];
-                currentLine.erase(wordStart, editorState.cursorColumn - wordStart);
-                currentLine.insert(wordStart, completionItems[i].text);
-                editorState.cursorColumn = wordStart + completionItems[i].text.length();
-                editorState.isDirty = true;
-                showCompletions = false;
-            }
-
-            if (isSelected)
-            {
-                ImGui::PopStyleColor(2);
-            }
-
-            ImGui::SameLine();
-            ImGui::TextDisabled(" - %s", completionItems[i].description.c_str());
-        }
-    }
-    ImGui::End();
-}
-
-ImVec2 JavaEditor::getCursorScreenPos(const ImVec2 &origin) const
-{
-    // Calculate X position by measuring the actual text width up to cursor position
-    float x = origin.x;
-    if (editorState.cursorLine < editorState.lines.size())
-    {
-        const std::string &line = editorState.lines[editorState.cursorLine];
-        if (editorState.cursorColumn > 0 && editorState.cursorColumn <= line.length())
-        {
-            std::string textToCursor = line.substr(0, editorState.cursorColumn);
-            ImFont *font = ImGui::GetFont();
-            if (font)
-            {
-                x += font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, textToCursor.c_str()).x;
-            }
-            else
-            {
-                x += editorState.cursorColumn * charWidth; // Fallback
-            }
-        }
-    }
-
-    float y = origin.y + editorState.cursorLine * lineHeight - editorState.scrollY;
-    return ImVec2(x, y);
-}
-
-void JavaEditor::ensureCursorVisible()
-{
-    float cursorY = editorState.cursorLine * lineHeight;
-
-    // Only scroll if cursor is completely outside visible area
-    // Add a small margin to prevent scrolling when cursor is just at the edge
-    float margin = lineHeight * 0.5f;
-
-    if (cursorY < editorState.scrollY)
-    {
-        // Cursor is above visible area - scroll up just enough to show it
-        editorState.scrollY = cursorY - margin;
-        editorState.scrollY = std::max(0.0f, editorState.scrollY);
-    }
-    else if (cursorY + lineHeight > editorState.scrollY + visibleHeight)
-    {
-        // Cursor is below visible area - scroll down just enough to show it
-        editorState.scrollY = cursorY + lineHeight - visibleHeight + margin;
-        editorState.scrollY = std::max(0.0f, editorState.scrollY);
-    }
-    // If cursor is within visible area, don't change scroll position
-}
-
-bool JavaEditor::isCursorVisible() const
-{
-    float cursorY = editorState.cursorLine * lineHeight;
-
-    // Be more conservative - only consider cursor invisible if it's well outside the viewport
-    float margin = lineHeight * 2.0f; // Larger margin to avoid premature scrolling
-
-    return (cursorY >= editorState.scrollY - margin &&
-            cursorY + lineHeight <= editorState.scrollY + visibleHeight + margin);
-}
-
-void JavaEditor::scrollToCursorIfNeeded()
-{
-    if (!isCursorVisible())
-    {
-        editorState.needsScrollToCursor = true;
-    }
+    updateSyntaxErrors();
+    updateLiveProgramStructure();
 }

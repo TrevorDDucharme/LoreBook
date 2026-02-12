@@ -20,6 +20,9 @@
 #include <imgui_internal.h>
 
 using namespace Lua;
+using Editors::EditorTab;
+using Editors::CompletionItem;
+using Editors::EditorState;
 
 LuaEditor::LuaEditor()
 {
@@ -121,198 +124,6 @@ ImVec2 LuaEditor::drawConsole()
     ImGui::PopStyleVar();
     return childOrigin;
 }
-
-ImVec2 LuaEditor::drawEditor()
-{
-    ImVec2 avail = ImGui::GetContentRegionAvail();
-    ImVec2 origin = ImGui::GetCursorScreenPos();
-    ImDrawList *drawList = ImGui::GetWindowDrawList();
-
-    // Update metrics and ensure we have active tab state
-    updateFontMetrics();
-    visibleHeight = avail.y;
-    EditorTab *active = getActiveTab();
-    if (!active)
-    {
-        // nothing to draw
-        ImGui::Dummy(avail);
-        return origin;
-    }
-
-    // If the editor requested focus, apply it
-    if (editorState.wantsFocus)
-    {
-        ImGui::SetKeyboardFocusHere();
-        editorState.wantsFocus = false;
-        editorState.hasFocus = true;
-    }
-
-    // Draw background
-    drawList->AddRectFilled(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), backgroundColor);
-
-    // Reserve the area so ImGui can manage input
-    ImGui::InvisibleButton("#LuaTextArea", avail);
-    bool isHovered = ImGui::IsItemHovered();
-
-    // Layout: left gutter for line numbers, right for text
-    float gutterWidth = 60.0f;
-    ImVec2 gutterOrigin = origin;
-    float baseTextX = origin.x + gutterWidth + 8.0f;
-    // compute visible text area width and apply horizontal scroll offset
-    visibleWidth = std::max(0.0f, avail.x - gutterWidth - 8.0f);
-    ImVec2 textOrigin = ImVec2(baseTextX - editorState.scrollX, origin.y + 4.0f);
-
-    // Handle mouse clicks to place cursor / start selection
-    ImVec2 mouse = ImGui::GetIO().MousePos;
-    bool inTextArea = mouse.x >= textOrigin.x && mouse.x <= origin.x + avail.x && mouse.y >= origin.y && mouse.y <= origin.y + avail.y;
-    if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-    {
-        // compute clicked line (account for baseline offset used when drawing text)
-        ImFont *font = ImGui::GetFont();
-        float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-        float relY = mouse.y - (origin.y + baselineOffset) + editorState.scrollY;
-        int line = static_cast<int>(std::floor(relY / lineHeight));
-        line = std::max(0, std::min(line, static_cast<int>(editorState.lines.size()) - 1));
-
-        // approximate column by measuring text widths (reuse `font` declared above)
-        int col = 0;
-        if (line >= 0 && line < static_cast<int>(editorState.lines.size()))
-        {
-            const std::string &ln = editorState.lines[line];
-            float x = textOrigin.x;
-            for (size_t i = 0; i <= ln.size(); ++i)
-            {
-                float nextX = x;
-                if (i < ln.size()) nextX += font ? font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, ln.substr(i,1).c_str()).x : charWidth;
-                float mid = (x + nextX) * 0.5f;
-                if (mouse.x < mid) { col = static_cast<int>(i); break; }
-                x = nextX;
-                col = static_cast<int>(i+1);
-            }
-        }
-
-        int clampedLine = std::max(0, std::min(line, static_cast<int>(editorState.lines.size()) - 1));
-        int clampedCol = std::max(0, std::min(col, static_cast<int>(editorState.lines[clampedLine].length())));
-
-        // Ctrl+Alt+Click: add an extra cursor instead of replacing the main one
-        ImGuiIO &clickIo = ImGui::GetIO();
-        if (clickIo.KeyCtrl && clickIo.KeyAlt)
-        {
-            ExtraCursor ec;
-            ec.line = static_cast<size_t>(clampedLine);
-            ec.column = static_cast<size_t>(clampedCol);
-            extraCursors.push_back(ec);
-        }
-        else
-        {
-            extraCursors.clear();
-            editorState.cursorLine = clampedLine;
-            editorState.cursorColumn = clampedCol;
-            editorState.hasSelection = false;
-            editorState.selectionStartLine = editorState.cursorLine;
-            editorState.selectionStartColumn = editorState.cursorColumn;
-            editorState.selectionEndLine = editorState.cursorLine;
-            editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        editorState.needsScrollToCursor = true;
-        editorState.hasFocus = true;
-    }
-
-    // Drag to select
-    if (isHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-    {
-        ImFont *font = ImGui::GetFont();
-        float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-        float relY = mouse.y - (origin.y + baselineOffset) + editorState.scrollY;
-        int line = static_cast<int>(std::floor(relY / lineHeight));
-        line = std::max(0, std::min(line, static_cast<int>(editorState.lines.size()) - 1));
-        int col = 0;
-        const std::string &ln = editorState.lines[line];
-        float x = textOrigin.x;
-        for (size_t i = 0; i <= ln.size(); ++i)
-        {
-            float nextX = x;
-            if (i < ln.size()) nextX += font ? font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, ln.substr(i,1).c_str()).x : charWidth;
-            float mid = (x + nextX) * 0.5f;
-            if (mouse.x < mid) { col = static_cast<int>(i); break; }
-            x = nextX;
-            col = static_cast<int>(i+1);
-        }
-        editorState.selectionEndLine = line;
-        editorState.selectionEndColumn = col;
-        editorState.hasSelection = !(editorState.selectionStartLine == editorState.selectionEndLine && editorState.selectionStartColumn == editorState.selectionEndColumn);
-        editorState.cursorLine = editorState.selectionEndLine;
-        editorState.cursorColumn = editorState.selectionEndColumn;
-        editorState.needsScrollToCursor = true;
-    }
-
-    // Mouse wheel scrolling
-    ImGuiIO &io = ImGui::GetIO();
-    // When hovered, capture mouse input so the editor owns wheel/drag events.
-    if (isHovered)
-        io.WantCaptureMouse = true;
-
-    // Ctrl+wheel: change editor scale; Shift+wheel: horizontal scroll; otherwise wheel scrolls vertically.
-    if (isHovered && io.MouseWheel != 0.0f)
-    {
-        if (io.KeyCtrl)
-        {
-            // Adjust multiplier with a small step and clamp
-            editorScaleMultiplier += io.MouseWheel * 0.05f;
-            if (editorScaleMultiplier < 0.6f) editorScaleMultiplier = 0.6f;
-            if (editorScaleMultiplier > 1.2f) editorScaleMultiplier = 1.2f;
-            updateFontMetrics();
-        }
-        else if (io.KeyShift)
-        {
-            // Horizontal scroll (Shift + wheel)
-            editorState.scrollX = std::max(0.0f, editorState.scrollX - io.MouseWheel * charWidth * 8.0f);
-            // Clamp to content width so we don't overscroll
-            ImFont *font = ImGui::GetFont();
-            float maxWidth = 0.0f;
-            for (const auto &l : editorState.lines)
-            {
-                float w = font ? font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, l.c_str()).x : l.length() * charWidth;
-                if (w > maxWidth) maxWidth = w;
-            }
-            float maxScroll = std::max(0.0f, maxWidth - visibleWidth + charWidth * 4.0f);
-            if (editorState.scrollX > maxScroll) editorState.scrollX = maxScroll;
-        }
-        else
-        {
-            editorState.scrollY = std::max(0.0f, editorState.scrollY - io.MouseWheel * lineHeight * 3.0f);
-        }
-    }
-
-    // Draw gutter and text
-    drawLineNumbers(drawList, ImVec2(gutterOrigin.x + 4.0f, gutterOrigin.y + 4.0f), visibleHeight);
-    drawTextContent(drawList, textOrigin, visibleHeight - 4.0f);
-    drawSelection(drawList, textOrigin);
-    drawCursor(drawList, textOrigin);
-    drawSyntaxErrors(drawList, textOrigin);
-
-    // Keyboard handling
-    handleKeyboardInput();
-
-    // Keep state in sync
-    if (editorState.needsScrollToCursor) { ensureCursorVisible(); editorState.needsScrollToCursor = false; }
-    syncEditorToActiveTab();
-
-    // small API docs toggle
-    ImGui::SameLine(); ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 120);
-    if (ImGui::Button("API Docs", ImVec2(100, 0))) showDocViewer = !showDocViewer;
-
-    // Completion popup
-    drawCompletionPopup(textOrigin);
-
-    // show docs viewer if requested
-    if (showDocViewer) drawClassInvestigator();
-
-    // keep ImGui cursor at the end of the area
-    ImGui::SetCursorScreenPos(ImVec2(origin.x + avail.x, origin.y + avail.y));
-    return origin;
-}
-
 void LuaEditor::setSrc(std::filesystem::path source)
 {
     src = std::move(source);
@@ -325,36 +136,8 @@ void LuaEditor::setClassPath(std::vector<std::filesystem::path> path)
 
 void LuaEditor::openFile(std::filesystem::path file)
 {
-    int idx = findTabByPath(file);
-    if (idx >= 0)
-    {
-        setActiveTab(idx);
-        return;
-    }
-
-    EditorTab t(file);
-    tabs.push_back(std::move(t));
-    // Load the content into the newly created tab before activating it so
-    // that syncActiveTabToEditor() copies populated editorState into the
-    // active editorState used by the UI.
-    loadTabContent(tabs.back());
-    setActiveTab(static_cast<int>(tabs.size()) - 1);
+    openTab(file);
 }
-
-
-
-Lua::EditorTab *LuaEditor::getActiveTab()
-{
-    if (activeTabIndex < 0 || activeTabIndex >= static_cast<int>(tabs.size())) return nullptr;
-    return &tabs[activeTabIndex];
-}
-
-const Lua::EditorTab *LuaEditor::getActiveTab() const
-{
-    if (activeTabIndex < 0 || activeTabIndex >= static_cast<int>(tabs.size())) return nullptr;
-    return &tabs[activeTabIndex];
-}
-
 void LuaEditor::loadTabContent(EditorTab &tab)
 {
     if (!fileBackend)
@@ -411,29 +194,6 @@ void LuaEditor::updateFileWatcher()
                 programStructure.startWatching(p);
         }
 }
-
-void LuaEditor::updateFontMetrics()
-{
-    ImFont *font = ImGui::GetFont();
-    if (font)
-    {
-        // scale by the editor multiplier to allow runtime adjustments (Ctrl+wheel)
-        renderFontSize = font->FontSize * editorScaleMultiplier;
-        charWidth = font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, "M").x;
-        lineHeight = renderFontSize + ImGui::GetStyle().ItemSpacing.y * 0.2f;
-    }
-    else
-    {
-        charWidth = 8.0f;
-        lineHeight = 18.0f;
-    }
-}
-
-void LuaEditor::saveEditorToFile()
-{
-    saveActiveTab();
-}
-
 void LuaEditor::saveActiveTab()
 {
     EditorTab *activeTab = getActiveTab();
@@ -463,754 +223,6 @@ void LuaEditor::saveActiveTab()
             editorState.isDirty = false;
     }
 }
-
-void LuaEditor::insertTextAtCursor(const std::string &text)
-{
-    if (editorState.hasSelection)
-    {
-        deleteSelection();
-    }
-
-    if (editorState.cursorLine >= editorState.lines.size())
-        editorState.lines.resize(editorState.cursorLine + 1);
-
-    if (text.find('\n') != std::string::npos)
-    {
-        std::vector<std::string> lines;
-        std::string cur;
-        for (char c : text)
-        {
-            if (c == '\n') { lines.push_back(cur); cur.clear(); }
-            else cur.push_back(c);
-        }
-        lines.push_back(cur);
-
-        std::string &line = editorState.lines[editorState.cursorLine];
-        std::string after = line.substr(editorState.cursorColumn);
-        line = line.substr(0, editorState.cursorColumn) + lines[0];
-        for (size_t i = 1; i < lines.size(); ++i)
-            editorState.lines.insert(editorState.lines.begin() + editorState.cursorLine + i, lines[i]);
-
-        editorState.cursorLine += lines.size() - 1;
-        editorState.cursorColumn = lines.back().length();
-        editorState.lines[editorState.cursorLine] += after;
-    }
-    else
-    {
-        std::string &line = editorState.lines[editorState.cursorLine];
-        line.insert(editorState.cursorColumn, text);
-        editorState.cursorColumn += text.length();
-    }
-
-    editorState.isDirty = true;
-    editorState.needsScrollToCursor = true;
-    syncEditorToActiveTab();
-    updateSyntaxErrors();
-    updateLiveProgramStructure();
-    updateCompletions();
-}
-
-void LuaEditor::deleteSelection()
-{
-    if (!editorState.hasSelection) return;
-
-    size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol, endCol;
-    if (startLine == endLine)
-    {
-        startCol = std::min(editorState.selectionStartColumn, editorState.selectionEndColumn);
-        endCol = std::max(editorState.selectionStartColumn, editorState.selectionEndColumn);
-    }
-    else
-    {
-        startCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-        endCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionEndColumn : editorState.selectionStartColumn;
-    }
-
-    if (startLine == endLine)
-    {
-        editorState.lines[startLine].erase(startCol, endCol - startCol);
-    }
-    else
-    {
-        std::string newLine = editorState.lines[startLine].substr(0, startCol) + editorState.lines[endLine].substr(endCol);
-        editorState.lines[startLine] = newLine;
-        editorState.lines.erase(editorState.lines.begin() + startLine + 1, editorState.lines.begin() + endLine + 1);
-    }
-
-    editorState.cursorLine = startLine;
-    editorState.cursorColumn = startCol;
-    editorState.hasSelection = false;
-    editorState.isDirty = true;
-    syncEditorToActiveTab();
-    updateSyntaxErrors();
-    updateLiveProgramStructure();
-}
-
-void LuaEditor::moveCursor(int deltaLine, int deltaColumn)
-{
-    int newLine = static_cast<int>(editorState.cursorLine) + deltaLine;
-    int newColumn = static_cast<int>(editorState.cursorColumn) + deltaColumn;
-    newLine = std::max(0, std::min(newLine, static_cast<int>(editorState.lines.size()) - 1));
-    if (newLine >= 0 && newLine < static_cast<int>(editorState.lines.size()))
-        newColumn = std::max(0, std::min(newColumn, static_cast<int>(editorState.lines[newLine].length())));
-    else newColumn = 0;
-    editorState.cursorLine = newLine;
-    editorState.cursorColumn = newColumn;
-    editorState.needsScrollToCursor = true;
-    syncEditorToActiveTab();
-}
-
-void LuaEditor::pushUndo()
-{
-    UndoEntry entry;
-    entry.lines = editorState.lines;
-    entry.cursorLine = editorState.cursorLine;
-    entry.cursorColumn = editorState.cursorColumn;
-    undoStack.push_back(std::move(entry));
-    if (undoStack.size() > maxUndoHistory)
-        undoStack.erase(undoStack.begin());
-    redoStack.clear(); // new edit invalidates redo history
-}
-
-void LuaEditor::handleKeyboardInput()
-{
-    ImGuiIO &io = ImGui::GetIO();
-    if (!editorState.hasFocus) return;
-
-    // Capture keyboard so Tab/arrow keys don't navigate ImGui widgets
-    io.WantCaptureKeyboard = true;
-    io.WantTextInput = true;
-
-    // --- Clipboard shortcuts: Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A ---
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
-    {
-        // Select all
-        editorState.selectionStartLine = 0;
-        editorState.selectionStartColumn = 0;
-        editorState.selectionEndLine = editorState.lines.size() - 1;
-        editorState.selectionEndColumn = editorState.lines.back().length();
-        editorState.cursorLine = editorState.selectionEndLine;
-        editorState.cursorColumn = editorState.selectionEndColumn;
-        editorState.hasSelection = true;
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
-    {
-        // Copy selection to clipboard
-        if (editorState.hasSelection)
-        {
-            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionStartColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionEndColumn;
-            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionEndColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionStartColumn;
-            std::string selected;
-            if (sL == eL)
-            {
-                selected = editorState.lines[sL].substr(sC, eC - sC);
-            }
-            else
-            {
-                selected = editorState.lines[sL].substr(sC) + "\n";
-                for (size_t l = sL + 1; l < eL; ++l)
-                    selected += editorState.lines[l] + "\n";
-                selected += editorState.lines[eL].substr(0, eC);
-            }
-            ImGui::SetClipboardText(selected.c_str());
-        }
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
-    {
-        // Cut selection to clipboard (copy then delete)
-        if (editorState.hasSelection)
-        {
-            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionStartColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionEndColumn;
-            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionEndColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionStartColumn;
-            std::string selected;
-            if (sL == eL)
-            {
-                selected = editorState.lines[sL].substr(sC, eC - sC);
-            }
-            else
-            {
-                selected = editorState.lines[sL].substr(sC) + "\n";
-                for (size_t l = sL + 1; l < eL; ++l)
-                    selected += editorState.lines[l] + "\n";
-                selected += editorState.lines[eL].substr(0, eC);
-            }
-            ImGui::SetClipboardText(selected.c_str());
-            pushUndo();
-            deleteSelection();
-        }
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
-    {
-        // Paste from clipboard
-        const char *clip = ImGui::GetClipboardText();
-        if (clip && clip[0] != '\0')
-        {
-            pushUndo();
-            if (editorState.hasSelection) deleteSelection();
-            insertTextAtCursor(std::string(clip));
-        }
-        return;
-    }
-
-    // Capture keyboard so Tab/arrow keys don't navigate ImGui widgets
-    io.WantCaptureKeyboard = true;
-    io.WantTextInput = true;
-
-    // --- Clipboard shortcuts: Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A ---
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A))
-    {
-        // Select all
-        editorState.selectionStartLine = 0;
-        editorState.selectionStartColumn = 0;
-        editorState.selectionEndLine = editorState.lines.size() - 1;
-        editorState.selectionEndColumn = editorState.lines.back().length();
-        editorState.cursorLine = editorState.selectionEndLine;
-        editorState.cursorColumn = editorState.selectionEndColumn;
-        editorState.hasSelection = true;
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
-    {
-        // Copy selection to clipboard
-        if (editorState.hasSelection)
-        {
-            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionStartColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionEndColumn;
-            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionEndColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionStartColumn;
-            std::string selected;
-            if (sL == eL)
-            {
-                selected = editorState.lines[sL].substr(sC, eC - sC);
-            }
-            else
-            {
-                selected = editorState.lines[sL].substr(sC) + "\n";
-                for (size_t l = sL + 1; l < eL; ++l)
-                    selected += editorState.lines[l] + "\n";
-                selected += editorState.lines[eL].substr(0, eC);
-            }
-            ImGui::SetClipboardText(selected.c_str());
-        }
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
-    {
-        // Cut selection to clipboard (copy then delete)
-        if (editorState.hasSelection)
-        {
-            size_t sL = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t eL = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-            size_t sC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionStartColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::min(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionEndColumn;
-            size_t eC = (editorState.selectionStartLine < editorState.selectionEndLine)
-                            ? editorState.selectionEndColumn
-                        : (editorState.selectionStartLine == editorState.selectionEndLine)
-                            ? std::max(editorState.selectionStartColumn, editorState.selectionEndColumn)
-                            : editorState.selectionStartColumn;
-            std::string selected;
-            if (sL == eL)
-            {
-                selected = editorState.lines[sL].substr(sC, eC - sC);
-            }
-            else
-            {
-                selected = editorState.lines[sL].substr(sC) + "\n";
-                for (size_t l = sL + 1; l < eL; ++l)
-                    selected += editorState.lines[l] + "\n";
-                selected += editorState.lines[eL].substr(0, eC);
-            }
-            ImGui::SetClipboardText(selected.c_str());
-            deleteSelection();
-        }
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
-    {
-        // Paste from clipboard
-        const char *clip = ImGui::GetClipboardText();
-        if (clip && clip[0] != '\0')
-        {
-            if (editorState.hasSelection) deleteSelection();
-            insertTextAtCursor(std::string(clip));
-        }
-        return;
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter))
-    {
-        pushUndo();
-        if (showCompletions) showCompletions = false;
-        if (editorState.hasSelection) deleteSelection();
-        if (editorState.cursorLine >= editorState.lines.size()) editorState.lines.resize(editorState.cursorLine + 1);
-        std::string &cur = editorState.lines[editorState.cursorLine];
-        // simple indentation: preserve leading whitespace
-        std::string indent;
-        for (char c : cur) { if (c == ' ' || c == '\t') indent.push_back(c); else break; }
-        std::string newLine = cur.substr(editorState.cursorColumn);
-        cur = cur.substr(0, editorState.cursorColumn);
-        if (!newLine.empty() || editorState.cursorColumn > 0) newLine = indent + newLine;
-        editorState.lines.insert(editorState.lines.begin() + editorState.cursorLine + 1, newLine);
-        editorState.cursorLine++;
-        editorState.cursorColumn = indent.length();
-        editorState.isDirty = true; editorState.needsScrollToCursor = true;
-        updateSyntaxErrors(); updateLiveProgramStructure();
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Backspace))
-    {
-        pushUndo();
-        // Multi-cursor backspace: process extra cursors bottom-to-top
-        if (!extraCursors.empty())
-        {
-            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
-                return a.line > b.line || (a.line == b.line && a.column > b.column);
-            });
-            for (auto &ec : extraCursors)
-            {
-                if (ec.column > 0 && ec.line < editorState.lines.size())
-                {
-                    editorState.lines[ec.line].erase(ec.column - 1, 1);
-                    ec.column--;
-                    // Adjust main cursor if on same line and after this position
-                    if (ec.line == editorState.cursorLine && editorState.cursorColumn > ec.column)
-                        editorState.cursorColumn--;
-                }
-            }
-            editorState.isDirty = true;
-        }
-        if (editorState.hasSelection) { deleteSelection(); }
-        else if (editorState.cursorColumn > 0)
-        {
-            editorState.lines[editorState.cursorLine].erase(editorState.cursorColumn - 1, 1);
-            editorState.cursorColumn--; editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure();
-        }
-        else if (editorState.cursorLine > 0)
-        {
-            editorState.cursorColumn = editorState.lines[editorState.cursorLine - 1].length();
-            editorState.lines[editorState.cursorLine - 1] += editorState.lines[editorState.cursorLine];
-            editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine);
-            editorState.cursorLine--; editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure(); scrollToCursorIfNeeded();
-            // Adjust extra cursor line indices after line removal
-            for (auto &ec : extraCursors)
-                if (ec.line > editorState.cursorLine) ec.line--;
-        }
-        if (showCompletions) { updateCompletions(); if (completionItems.empty()) showCompletions = false; }
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete))
-    {
-        pushUndo();
-        // Multi-cursor delete: process extra cursors bottom-to-top
-        if (!extraCursors.empty())
-        {
-            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
-                return a.line > b.line || (a.line == b.line && a.column > b.column);
-            });
-            for (auto &ec : extraCursors)
-            {
-                if (ec.line < editorState.lines.size() && ec.column < editorState.lines[ec.line].length())
-                {
-                    editorState.lines[ec.line].erase(ec.column, 1);
-                    // Adjust main cursor if on same line and after this position
-                    if (ec.line == editorState.cursorLine && editorState.cursorColumn > ec.column)
-                        editorState.cursorColumn--;
-                }
-            }
-            editorState.isDirty = true;
-        }
-        if (editorState.hasSelection) deleteSelection();
-        else if (editorState.cursorLine < editorState.lines.size())
-        {
-            if (editorState.cursorColumn < editorState.lines[editorState.cursorLine].length())
-            {
-                editorState.lines[editorState.cursorLine].erase(editorState.cursorColumn, 1);
-                editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure();
-            }
-            else if (editorState.cursorLine < editorState.lines.size() - 1)
-            {
-                editorState.lines[editorState.cursorLine] += editorState.lines[editorState.cursorLine + 1];
-                editorState.lines.erase(editorState.lines.begin() + editorState.cursorLine + 1);
-                editorState.isDirty = true; updateSyntaxErrors(); updateLiveProgramStructure();
-                for (auto &ec : extraCursors)
-                    if (ec.line > editorState.cursorLine) ec.line--;
-            }
-        }
-    }
-
-    // Escape clears extra cursors
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !extraCursors.empty())
-    {
-        extraCursors.clear();
-    }
-
-    // Ctrl+Alt+Up/Down: add extra cursor on adjacent line
-    if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-    {
-        // Add a cursor one line above the topmost cursor
-        size_t topLine = editorState.cursorLine;
-        for (const auto &ec : extraCursors)
-            if (ec.line < topLine) topLine = ec.line;
-        if (topLine > 0)
-        {
-            ExtraCursor ec;
-            ec.line = topLine - 1;
-            ec.column = std::min(editorState.cursorColumn, editorState.lines[ec.line].length());
-            extraCursors.push_back(ec);
-        }
-        return;
-    }
-    if (io.KeyCtrl && io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-    {
-        // Add a cursor one line below the bottommost cursor
-        size_t botLine = editorState.cursorLine;
-        for (const auto &ec : extraCursors)
-            if (ec.line > botLine) botLine = ec.line;
-        if (botLine + 1 < editorState.lines.size())
-        {
-            ExtraCursor ec;
-            ec.line = botLine + 1;
-            ec.column = std::min(editorState.cursorColumn, editorState.lines[ec.line].length());
-            extraCursors.push_back(ec);
-        }
-        return;
-    }
-
-    // When completion popup is open, Ctrl+Up/Down navigate the popup selection
-    if (showCompletions && io.KeyCtrl)
-    {
-        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-        {
-            if (selectedCompletion > 0) selectedCompletion--;
-            return;
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-        {
-            if (selectedCompletion < (int)completionItems.size() - 1) selectedCompletion++;
-            return;
-        }
-    }
-
-    // Arrows (always move the cursor; Shift extends selection)
-    if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow))
-    {
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            if (editorState.cursorColumn > 0) editorState.cursorColumn--;
-            else if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = editorState.lines[editorState.cursorLine].length(); }
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            if (editorState.cursorColumn > 0) editorState.cursorColumn--;
-            else if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = editorState.lines[editorState.cursorLine].length(); }
-            editorState.hasSelection = false;
-        }
-        // Move extra cursors left too
-        for (auto &ec : extraCursors)
-        {
-            if (ec.column > 0) ec.column--;
-            else if (ec.line > 0) { ec.line--; ec.column = editorState.lines[ec.line].length(); }
-        }
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_RightArrow))
-    {
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            if (editorState.cursorLine < editorState.lines.size() && editorState.cursorColumn < editorState.lines[editorState.cursorLine].length()) editorState.cursorColumn++;
-            else if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = 0; }
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            if (editorState.cursorLine < editorState.lines.size() && editorState.cursorColumn < editorState.lines[editorState.cursorLine].length()) editorState.cursorColumn++;
-            else if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = 0; }
-            editorState.hasSelection = false;
-        }
-        for (auto &ec : extraCursors)
-        {
-            if (ec.line < editorState.lines.size() && ec.column < editorState.lines[ec.line].length()) ec.column++;
-            else if (ec.line < editorState.lines.size()-1) { ec.line++; ec.column = 0; }
-        }
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow))
-    {
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            if (editorState.cursorLine > 0) { editorState.cursorLine--; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
-            editorState.hasSelection = false;
-        }
-        for (auto &ec : extraCursors)
-        {
-            if (ec.line > 0) { ec.line--; ec.column = std::min(ec.column, editorState.lines[ec.line].length()); }
-        }
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow))
-    {
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            if (editorState.cursorLine < editorState.lines.size()-1) { editorState.cursorLine++; editorState.cursorColumn = std::min(editorState.cursorColumn, editorState.lines[editorState.cursorLine].length()); }
-            editorState.hasSelection = false;
-        }
-        for (auto &ec : extraCursors)
-        {
-            if (ec.line < editorState.lines.size()-1) { ec.line++; ec.column = std::min(ec.column, editorState.lines[ec.line].length()); }
-        }
-    }
-
-    // Close completion popup if cursor moved away from where it was triggered
-    if (showCompletions && editorState.cursorLine != completionOriginLine)
-    {
-        showCompletions = false;
-        completionItems.clear();
-    }
-
-    // Home key: move to start of line (Shift+Home extends selection)
-    if (ImGui::IsKeyPressed(ImGuiKey_Home))
-    {
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            editorState.cursorColumn = 0;
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            editorState.cursorColumn = 0;
-            editorState.hasSelection = false;
-        }
-        for (auto &ec : extraCursors) ec.column = 0;
-        editorState.needsScrollToCursor = true;
-    }
-
-    // End key: move to end of line (Shift+End extends selection)
-    if (ImGui::IsKeyPressed(ImGuiKey_End))
-    {
-        size_t lineLen = editorState.cursorLine < editorState.lines.size() ? editorState.lines[editorState.cursorLine].length() : 0;
-        if (io.KeyShift)
-        {
-            if (!editorState.hasSelection) { editorState.selectionStartLine = editorState.cursorLine; editorState.selectionStartColumn = editorState.cursorColumn; editorState.hasSelection = true; }
-            editorState.cursorColumn = lineLen;
-            editorState.selectionEndLine = editorState.cursorLine; editorState.selectionEndColumn = editorState.cursorColumn;
-        }
-        else
-        {
-            editorState.cursorColumn = lineLen;
-            editorState.hasSelection = false;
-        }
-        for (auto &ec : extraCursors)
-            ec.column = ec.line < editorState.lines.size() ? editorState.lines[ec.line].length() : 0;
-        editorState.needsScrollToCursor = true;
-    }
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !showCompletions)
-    {
-        pushUndo();
-        if (editorState.hasSelection) deleteSelection();
-        // Insert at extra cursors first (process bottom-to-top to keep line numbers valid)
-        std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
-            return a.line > b.line || (a.line == b.line && a.column > b.column);
-        });
-        for (auto &ec : extraCursors)
-        {
-            if (ec.line < editorState.lines.size())
-            {
-                editorState.lines[ec.line].insert(ec.column, "    ");
-                ec.column += 4;
-            }
-        }
-        insertTextAtCursor("    ");
-        // Consume the event so ImGui doesn't move focus to another widget
-        io.InputQueueCharacters.clear();
-        return;
-    }
-
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveEditorToFile();
-
-    // Undo: Ctrl+Z
-    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z))
-    {
-        if (!undoStack.empty())
-        {
-            // Push current state to redo
-            UndoEntry redo;
-            redo.lines = editorState.lines;
-            redo.cursorLine = editorState.cursorLine;
-            redo.cursorColumn = editorState.cursorColumn;
-            redoStack.push_back(std::move(redo));
-
-            // Pop undo
-            const UndoEntry &u = undoStack.back();
-            editorState.lines = u.lines;
-            editorState.cursorLine = u.cursorLine;
-            editorState.cursorColumn = u.cursorColumn;
-            undoStack.pop_back();
-            editorState.hasSelection = false;
-            editorState.isDirty = true;
-            extraCursors.clear();
-            syncEditorToActiveTab();
-            updateSyntaxErrors();
-        }
-        return;
-    }
-
-    // Redo: Ctrl+Y or Ctrl+Shift+Z
-    if ((io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) ||
-        (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))
-    {
-        if (!redoStack.empty())
-        {
-            // Push current state to undo
-            UndoEntry u;
-            u.lines = editorState.lines;
-            u.cursorLine = editorState.cursorLine;
-            u.cursorColumn = editorState.cursorColumn;
-            undoStack.push_back(std::move(u));
-
-            // Pop redo
-            const UndoEntry &r = redoStack.back();
-            editorState.lines = r.lines;
-            editorState.cursorLine = r.cursorLine;
-            editorState.cursorColumn = r.cursorColumn;
-            redoStack.pop_back();
-            editorState.hasSelection = false;
-            editorState.isDirty = true;
-            extraCursors.clear();
-            syncEditorToActiveTab();
-            updateSyntaxErrors();
-        }
-        return;
-    }
-
-    if (showCompletions)
-    {
-        if (ImGui::IsKeyPressed(ImGuiKey_Tab) || ImGui::IsKeyPressed(ImGuiKey_Enter))
-        {
-            if (selectedCompletion < (int)completionItems.size())
-            {
-                const std::string &line = editorState.lines[editorState.cursorLine];
-                size_t wordStart = editorState.cursorColumn;
-                while (wordStart > 0 && (std::isalnum(line[wordStart-1]) || line[wordStart-1]=='_')) wordStart--;
-                std::string &cur = editorState.lines[editorState.cursorLine];
-                cur.erase(wordStart, editorState.cursorColumn - wordStart);
-                cur.insert(wordStart, completionItems[selectedCompletion].text);
-                editorState.cursorColumn = wordStart + completionItems[selectedCompletion].text.length();
-                editorState.isDirty = true; updateLiveProgramStructure();
-            }
-            showCompletions = false;
-            io.InputQueueCharacters.clear();
-            return; // consume: don't also insert a newline/tab
-        }
-        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) showCompletions = false;
-    }
-
-    // Snapshot undo once before processing typed characters
-    if (io.InputQueueCharacters.Size > 0) pushUndo();
-
-    for (int i = 0; i < io.InputQueueCharacters.Size; ++i)
-    {
-        ImWchar c = io.InputQueueCharacters[i];
-        if (c == '\t') { if (editorState.hasSelection) deleteSelection(); insertTextAtCursor("    "); }
-        else if (c != 0 && c >= 32)
-        {
-            std::string s(1, static_cast<char>(c));
-            bool shouldAutoPair = false; std::string closing;
-            switch (c) { case '(' : shouldAutoPair=true; closing=")"; break; case '{': shouldAutoPair=true; closing="}"; break; case '[': shouldAutoPair=true; closing="]"; break; case '"': shouldAutoPair=true; closing="\""; break; case '\'': shouldAutoPair=true; closing="'"; break; }
-
-            // Insert at extra cursors (process bottom-to-top to keep positions valid)
-            // Sort extra cursors bottom-to-top for safe insertion
-            std::sort(extraCursors.begin(), extraCursors.end(), [](const ExtraCursor &a, const ExtraCursor &b){
-                return a.line > b.line || (a.line == b.line && a.column > b.column);
-            });
-            for (auto &ec : extraCursors)
-            {
-                if (ec.line < editorState.lines.size())
-                {
-                    std::string &eline = editorState.lines[ec.line];
-                    if (shouldAutoPair)
-                    {
-                        eline.insert(ec.column, s + closing);
-                        ec.column += 1; // place cursor between pair
-                    }
-                    else
-                    {
-                        eline.insert(ec.column, s);
-                        ec.column += 1;
-                    }
-                }
-            }
-
-            if (shouldAutoPair)
-            {
-                if (editorState.hasSelection) deleteSelection();
-                insertTextAtCursor(s);
-                size_t sl = editorState.cursorLine, sc = editorState.cursorColumn;
-                insertTextAtCursor(closing);
-                editorState.cursorLine = sl; editorState.cursorColumn = sc;
-                syncEditorToActiveTab();
-            }
-            else { insertTextAtCursor(s); }
-            if (c == '.' || std::isalpha(c)) updateCompletions();
-        }
-    }
-}
-
 void LuaEditor::updateCompletions()
 {
     completionItems.clear();
@@ -1261,48 +273,6 @@ void LuaEditor::updateSyntaxErrors()
     if (brace>0) syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed brace");
     if (bracket>0) syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed bracket");
 }
-
-// --- Tab management ---
-int LuaEditor::findTabByPath(const std::filesystem::path &path)
-{
-    for (size_t i=0;i<tabs.size();++i) if (tabs[i].filePath==path) return static_cast<int>(i);
-    return -1;
-}
-
-void LuaEditor::openTab(const std::filesystem::path &path)
-{
-    // forward to openFile which handles switching to existing tab or creating a new one
-    openFile(path);
-}
-
-void LuaEditor::closeTab(int tabIndex)
-{
-    if (tabIndex<0 || tabIndex>=static_cast<int>(tabs.size())) return;
-    tabs.erase(tabs.begin()+tabIndex);
-    if (tabs.empty()) activeTabIndex=-1;
-    else if (activeTabIndex>=tabs.size()) activeTabIndex = static_cast<int>(tabs.size())-1;
-    else if (activeTabIndex>tabIndex) activeTabIndex--;
-    if (activeTabIndex>=0 && activeTabIndex<tabs.size()) tabs[activeTabIndex].isActive=true;
-}
-
-void LuaEditor::setActiveTab(int tabIndex)
-{
-    if (tabIndex<0 || tabIndex>=static_cast<int>(tabs.size())) return;
-    syncEditorToActiveTab();
-    for (auto &t: tabs) t.isActive=false;
-    activeTabIndex = tabIndex; tabs[activeTabIndex].isActive = true; syncActiveTabToEditor();
-}
-
-void LuaEditor::syncActiveTabToEditor()
-{
-    EditorTab *t = getActiveTab(); if (t) { editorState = t->editorState; syntaxErrors = t->syntaxErrors; }
-}
-
-void LuaEditor::syncEditorToActiveTab()
-{
-    EditorTab *t = getActiveTab(); if (t) { t->editorState = editorState; t->syntaxErrors = syntaxErrors; if (t->editorState.isDirty) { if (!t->displayName.empty() && t->displayName.back()!='*') t->displayName += "*"; } else { if (!t->displayName.empty() && t->displayName.back()=='*') t->displayName.pop_back(); } }
-}
-
 // --- Rendering helpers adapted from JavaEditor ---
 
 void LuaEditor::drawLiveConsole()
@@ -1332,12 +302,15 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
     std::string src;
     for (size_t i = 0; i < t->editorState.lines.size(); ++i) { src += t->editorState.lines[i]; if (i + 1 < t->editorState.lines.size()) src += '\n'; }
 
+    std::string tabKey = t->filePath.string();
+    auto &enginePtr = tabEngines[tabKey];
+
     // Create or reload per-tab engine when missing or file changed
-    if (!t->liveEngine || t->editorState.isDirty)
+    if (!enginePtr || t->editorState.isDirty)
     {
-        t->liveEngine = std::make_unique<LuaEngine>();
+        enginePtr = std::make_unique<LuaEngine>();
         // Register bindings BEFORE loading the script, since top-level code may reference os, vault, etc.
-        lua_State *L = t->liveEngine->L();
+        lua_State *L = enginePtr->L();
         Vault *fsVault = nullptr;
         if (L)
         {
@@ -1357,14 +330,14 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
             }
             registerLuaFSBindings(L, fsVault);
         }
-        if (!t->liveEngine->loadScript(src))
+        if (!enginePtr->loadScript(src))
         {
-            std::string err = t->liveEngine->lastError();
+            std::string err = enginePtr->lastError();
             return std::string("(load error) ") + err;
         }
     }
 
-    LuaEngine *eng = t->liveEngine.get();
+    LuaEngine *eng = enginePtr.get();
     lua_State *L = eng ? eng->L() : nullptr;
     if (!L) return std::string("(no lua state)");
 
@@ -1452,7 +425,8 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
 {
     // If we have an active tab with a live engine, reuse that environment
     EditorTab *t = getActiveTab();
-    if (t && t->liveEngine && !t->editorState.isDirty) {
+    std::string tabKey = t ? t->filePath.string() : std::string();
+    if (t && tabEngines.count(tabKey) && tabEngines[tabKey] && !t->editorState.isDirty) {
         // Use executeLuaCode which uses the active tab engine
         return executeLuaCode(code);
     }
@@ -1791,288 +765,138 @@ std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin,
         return std::string("(exception) ") + ex.what();
     }
 }
-
-// Simple syntax highlighting and drawing functions
-void LuaEditor::drawLineNumbers(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
+void LuaEditor::beginTokenize(size_t startLine)
 {
-    ImFont *font = ImGui::GetFont();
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    float y = origin.y - editorState.scrollY + baselineOffset;
-    size_t startLine = static_cast<size_t>(std::max(0.0f, editorState.scrollY / lineHeight));
-    size_t endLine = std::min(editorState.lines.size(), startLine + static_cast<size_t>(visibleHeight / lineHeight) + 2);
-    for (size_t ln = startLine; ln < endLine; ++ln)
+    luaInMultiComment = false;
+    // Pre-scan lines before the visible range to determine multi-line comment state
+    for (size_t i = 0; i < startLine && i < editorState.lines.size(); ++i)
     {
-        float lineY = y + ln * lineHeight;
-        if (lineY > origin.y + visibleHeight) break;
-        if (lineY + lineHeight < origin.y) continue;
-        std::string num = std::to_string(ln+1);
-        drawList->AddText(font, renderFontSize, ImVec2(origin.x + 5, lineY), lineNumberColor, num.c_str());
-    }
-}
-
-void LuaEditor::drawTextContent(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
-{
-    drawTextContentWithSyntaxHighlighting(drawList, origin, visibleHeight);
-}
-
-void LuaEditor::drawTextContentWithSyntaxHighlighting(ImDrawList *drawList, const ImVec2 &origin, float visibleHeight)
-{
-    static const std::unordered_set<std::string> luaKeywords = {"and","break","do","else","elseif","end","false","for","function","if","in","local","nil","not","or","repeat","return","then","true","until","while"};
-    ImFont *font = ImGui::GetFont(); if (!font) return;
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    float y = origin.y - editorState.scrollY + baselineOffset;
-    size_t startLine = static_cast<size_t>(std::max(0.0f, editorState.scrollY / lineHeight));
-    size_t endLine = std::min(editorState.lines.size(), startLine + static_cast<size_t>(visibleHeight / lineHeight) + 2);
-
-    bool inMultiComment = false; // track --[[ ... ]] across lines within this render
-
-    for (size_t ln = startLine; ln < endLine; ++ln)
-    {
-        float lineY = y + ln * lineHeight; if (lineY > origin.y + visibleHeight) break; if (lineY + lineHeight < origin.y) continue;
-        const std::string &line = editorState.lines[ln]; if (line.empty()) { inMultiComment = false; continue; }
-        float x = origin.x; size_t pos = 0;
-
-        // If we're inside a multi-line comment from previous line, handle it first
-        if (inMultiComment)
-        {
-            size_t end = line.find("]]", pos);
-            if (end == std::string::npos)
-            {
-                // whole line is comment
-                drawList->AddText(font, renderFontSize, ImVec2(x, lineY), commentColor, line.c_str());
-                // stay in multi-line comment
-                continue;
-            }
-            else
-            {
-                std::string tok = line.substr(0, end + 2);
-                drawList->AddText(font, renderFontSize, ImVec2(x, lineY), commentColor, tok.c_str());
-                x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, tok.c_str()).x;
-                pos = end + 2;
-                inMultiComment = false;
-            }
-        }
-
+        const std::string& line = editorState.lines[i];
+        size_t pos = 0;
         while (pos < line.length())
         {
-            // detect single-line '--' and multi-line '--[[' comments
-            if (line[pos] == '-' && pos + 1 < line.length() && line[pos+1] == '-')
+            if (luaInMultiComment)
             {
-                // check for '--[[' start
+                size_t end = line.find("]]", pos);
+                if (end != std::string::npos) { luaInMultiComment = false; pos = end + 2; }
+                else break;
+            }
+            else if (line[pos] == '-' && pos + 1 < line.length() && line[pos+1] == '-')
+            {
                 if (pos + 3 < line.length() && line[pos+2] == '[' && line[pos+3] == '[')
                 {
                     size_t end = line.find("]]", pos + 4);
-                    if (end == std::string::npos)
-                    {
-                        std::string tok = line.substr(pos);
-                        drawList->AddText(font, renderFontSize, ImVec2(x, lineY), commentColor, tok.c_str());
-                        inMultiComment = true; // continues to next lines
-                        break; // rest of line handled
-                    }
-                    else
-                    {
-                        std::string tok = line.substr(pos, end - pos + 2);
-                        drawList->AddText(font, renderFontSize, ImVec2(x, lineY), commentColor, tok.c_str());
-                        x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, tok.c_str()).x;
-                        pos = end + 2;
-                        continue;
-                    }
+                    if (end != std::string::npos) { pos = end + 2; }
+                    else { luaInMultiComment = true; break; }
+                }
+                else break; // single-line comment, skip rest
+            }
+            else if (line[pos] == '"' || line[pos] == '\'')
+            {
+                char q = line[pos]; size_t s = pos + 1; bool esc = false;
+                while (s < line.length()) { if (!esc && line[s] == q) { s++; break; } esc = (line[s] == '\\' && !esc); s++; }
+                pos = s;
+            }
+            else pos++;
+        }
+    }
+}
+
+std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string& line, size_t lineIndex)
+{
+    using Editors::SyntaxToken;
+    static const std::unordered_set<std::string> luaKeywords = {"and","break","do","else","elseif","end","false","for","function","if","in","local","nil","not","or","repeat","return","then","true","until","while"};
+
+    std::vector<SyntaxToken> tokens;
+    if (line.empty()) return tokens;
+
+    size_t pos = 0;
+
+    // If inside a multi-line comment from a previous line
+    if (luaInMultiComment)
+    {
+        size_t end = line.find("]]", pos);
+        if (end == std::string::npos)
+        {
+            tokens.push_back({0, line.size(), commentColor});
+            return tokens;
+        }
+        else
+        {
+            tokens.push_back({0, end + 2, commentColor});
+            pos = end + 2;
+            luaInMultiComment = false;
+        }
+    }
+
+    while (pos < line.length())
+    {
+        // Detect single-line '--' and multi-line '--[[' comments
+        if (line[pos] == '-' && pos + 1 < line.length() && line[pos+1] == '-')
+        {
+            if (pos + 3 < line.length() && line[pos+2] == '[' && line[pos+3] == '[')
+            {
+                size_t end = line.find("]]", pos + 4);
+                if (end == std::string::npos)
+                {
+                    tokens.push_back({pos, line.size() - pos, commentColor});
+                    luaInMultiComment = true;
+                    break;
                 }
                 else
                 {
-                    // simple single-line comment; consume rest of line
-                    std::string tok = line.substr(pos);
-                    drawList->AddText(font, renderFontSize, ImVec2(x, lineY), commentColor, tok.c_str());
-                    break;
+                    tokens.push_back({pos, end + 2 - pos, commentColor});
+                    pos = end + 2;
+                    continue;
                 }
             }
-
-            std::string token; ImU32 color = textColor;
-            if (std::isspace((unsigned char)line[pos])) { size_t s = pos; while (s<line.length() && std::isspace((unsigned char)line[s])) s++; token = line.substr(pos, s-pos); color = textColor; pos = s; }
-            else if (line[pos] == '"' || line[pos]=='\'') { char q=line[pos]; size_t s=pos+1; bool esc=false; while (s<line.length()) { if (!esc && line[s]==q) { s++; break; } esc = (line[s]=='\\' && !esc); s++; } token = line.substr(pos, s-pos); color = stringColor; pos = s; }
-            else if (std::isdigit((unsigned char)line[pos])) { size_t s=pos; while (s<line.length() && (std::isdigit((unsigned char)line[s])||line[s]=='.')) s++; token=line.substr(pos,s-pos); color=numberColor; pos=s; }
-            else if (std::isalpha((unsigned char)line[pos]) || line[pos]=='_') { size_t s=pos; while (s<line.length() && (std::isalnum((unsigned char)line[s])||line[s]=='_')) s++; token=line.substr(pos,s-pos); if (luaKeywords.count(token)) color = keywordColor; else color = textColor; pos=s; }
-            else { token.push_back(line[pos]); color = operatorColor; pos++; }
-
-            if (!token.empty()) {
-                const char *b = token.c_str(); const char *e = b + token.size();
-                drawList->AddText(font, renderFontSize, ImVec2(x, lineY), color, b, e);
-                x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, b, e).x;
-            }
-        }
-    }
-}
-
-void LuaEditor::drawCursor(ImDrawList *drawList, const ImVec2 &origin)
-{
-    ImVec2 p = getCursorScreenPos(origin);
-    drawList->AddLine(p, ImVec2(p.x, p.y + lineHeight), cursorColor, 2.0f);
-
-    // Draw extra cursors
-    ImFont *font = ImGui::GetFont();
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    for (const auto &ec : extraCursors)
-    {
-        float x = origin.x;
-        if (ec.line < editorState.lines.size() && font)
-        {
-            const std::string &ln = editorState.lines[ec.line];
-            size_t col = std::min(ec.column, ln.length());
-            if (col > 0)
-                x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, ln.substr(0, col).c_str()).x;
-        }
-        float y = origin.y + ec.line * lineHeight - editorState.scrollY + baselineOffset;
-        drawList->AddLine(ImVec2(x, y), ImVec2(x, y + lineHeight), cursorColor, 2.0f);
-    }
-}
-
-void LuaEditor::drawSelection(ImDrawList *drawList, const ImVec2 &origin)
-{
-    if (!editorState.hasSelection) return;
-    size_t startLine = std::min(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t endLine = std::max(editorState.selectionStartLine, editorState.selectionEndLine);
-    size_t startCol, endCol;
-    if (startLine == endLine)
-    {
-        startCol = std::min(editorState.selectionStartColumn, editorState.selectionEndColumn);
-        endCol = std::max(editorState.selectionStartColumn, editorState.selectionEndColumn);
-    }
-    else
-    {
-        startCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionStartColumn : editorState.selectionEndColumn;
-        endCol = (editorState.selectionStartLine < editorState.selectionEndLine) ? editorState.selectionEndColumn : editorState.selectionStartColumn;
-    }
-    ImFont *font = ImGui::GetFont();
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    for (size_t ln = startLine; ln <= endLine; ++ln)
-    {
-        if (ln >= editorState.lines.size()) break;
-        float lineY = origin.y + ln * lineHeight - editorState.scrollY + baselineOffset;
-        size_t ls = (ln==startLine)?startCol:0; size_t le=(ln==endLine)?endCol:editorState.lines[ln].length();
-        float startX = origin.x; float endX = origin.x;
-        if (font)
-        {
-            if (ls>0) startX += font->CalcTextSizeA(renderFontSize, FLT_MAX,0.0f, editorState.lines[ln].substr(0, ls).c_str()).x;
-            if (le>0) endX += font->CalcTextSizeA(renderFontSize, FLT_MAX,0.0f, editorState.lines[ln].substr(0, le).c_str()).x;
-        }
-        else { startX += ls*charWidth; endX += le*charWidth; }
-        drawList->AddRectFilled(ImVec2(startX, lineY), ImVec2(endX, lineY+lineHeight), selectionColor);
-    }
-}
-
-void LuaEditor::drawSyntaxErrors(ImDrawList *drawList, const ImVec2 &origin)
-{
-    ImFont *font = ImGui::GetFont();
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    for (const auto &err : syntaxErrors)
-    {
-        size_t ln = err.getLine()-1; if (ln>=editorState.lines.size()) continue;
-        const std::string &line = editorState.lines[ln]; float lineY = origin.y + ln*lineHeight - editorState.scrollY + baselineOffset + lineHeight - 2;
-        float startX = origin.x; if (font && err.getColumn()>1 && err.getColumn()-1<=line.length()) startX += font->CalcTextSizeA(renderFontSize,FLT_MAX,0.0f,line.substr(0, err.getColumn()-1).c_str()).x; else startX += (err.getColumn()-1)*charWidth;
-        float endX = startX + charWidth*5; for (float x = startX; x<endX; x+=4.0f) { float wave = sin((x-startX)*0.5f)*2.0f; drawList->AddLine(ImVec2(x, lineY+wave), ImVec2(x+2, lineY-wave), errorColor, 1.0f); }
-    }
-}
-
-void LuaEditor::drawCompletionPopup(const ImVec2 &textOrigin)
-{
-    if (!showCompletions || completionItems.empty()) return;
-    ImVec2 cursor = getCursorScreenPos(textOrigin);
-    ImVec2 pos = ImVec2(cursor.x, cursor.y + lineHeight);
-    ImGui::SetNextWindowPos(pos); ImGui::SetNextWindowSize(ImVec2(300, std::min(200.0f, completionItems.size()*20.0f)));
-    if (ImGui::Begin("##LuaCompletions", nullptr, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove))
-    {
-        for (size_t i=0;i<completionItems.size();++i)
-        {
-            bool sel = (i==selectedCompletion);
-            if (sel) { ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255,255,255,255)); ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(100,150,200,255)); }
-            if (ImGui::Selectable(completionItems[i].text.c_str(), sel))
+            else
             {
-                selectedCompletion = i; const std::string &line = editorState.lines[editorState.cursorLine]; size_t ws = editorState.cursorColumn; while (ws>0 && (std::isalnum(line[ws-1])||line[ws-1]=='_')) ws--; std::string &cur = editorState.lines[editorState.cursorLine]; cur.erase(ws, editorState.cursorColumn-ws); cur.insert(ws, completionItems[i].text); editorState.cursorColumn = ws + completionItems[i].text.length(); editorState.isDirty = true; showCompletions = false;
+                tokens.push_back({pos, line.size() - pos, commentColor});
+                break;
             }
-            if (sel) ImGui::PopStyleColor(2);
-            ImGui::SameLine(); ImGui::TextDisabled(" - %s", completionItems[i].description.c_str());
         }
-    }
-    ImGui::End();
-}
 
+        ImU32 color = textColor;
+        size_t start = pos;
+        if (std::isspace((unsigned char)line[pos]))
+        {
+            while (pos < line.length() && std::isspace((unsigned char)line[pos])) pos++;
+            color = textColor;
+        }
+        else if (line[pos] == '"' || line[pos] == '\'')
+        {
+            char q = line[pos]; size_t s = pos + 1; bool esc = false;
+            while (s < line.length()) { if (!esc && line[s] == q) { s++; break; } esc = (line[s] == '\\' && !esc); s++; }
+            pos = s; color = stringColor;
+        }
+        else if (std::isdigit((unsigned char)line[pos]))
+        {
+            while (pos < line.length() && (std::isdigit((unsigned char)line[pos]) || line[pos] == '.')) pos++;
+            color = numberColor;
+        }
+        else if (std::isalpha((unsigned char)line[pos]) || line[pos] == '_')
+        {
+            while (pos < line.length() && (std::isalnum((unsigned char)line[pos]) || line[pos] == '_')) pos++;
+            std::string word = line.substr(start, pos - start);
+            color = luaKeywords.count(word) ? keywordColor : textColor;
+        }
+        else
+        {
+            pos++;
+            color = operatorColor;
+        }
+
+        tokens.push_back({start, pos - start, color});
+    }
+
+    return tokens;
+}
 // API docs window controls (open/close/query/render)
 void LuaEditor::openApiDocs() { showDocViewer = true; }
 void LuaEditor::closeApiDocs() { showDocViewer = false; }
 bool LuaEditor::isApiDocsOpen() const { return showDocViewer; }
 void LuaEditor::renderApiDocsIfOpen() { if (showDocViewer) drawClassInvestigator(); }
-ImVec2 LuaEditor::getCursorScreenPos(const ImVec2 &origin) const
-{
-    float x = origin.x;
-    if (editorState.cursorLine < editorState.lines.size()) {
-        const std::string &line = editorState.lines[editorState.cursorLine];
-        if (editorState.cursorColumn>0 && editorState.cursorColumn<=line.length()) {
-            std::string to = line.substr(0, editorState.cursorColumn);
-            ImFont *font = ImGui::GetFont();
-            if (font) x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, to.c_str()).x;
-            else x += editorState.cursorColumn*charWidth;
-        }
-    }
-    ImFont *font = ImGui::GetFont();
-    float baselineOffset = (lineHeight - renderFontSize) * 0.5f;
-    float y = origin.y + editorState.cursorLine*lineHeight - editorState.scrollY + baselineOffset;
-    return ImVec2(x,y);
-}
-
-void LuaEditor::ensureCursorVisible()
-{
-    float cursorY = editorState.cursorLine * lineHeight;
-    float margin = lineHeight * 0.5f;
-    if (cursorY < editorState.scrollY)
-        editorState.scrollY = std::max(0.0f, cursorY - margin);
-    else if (cursorY + lineHeight > editorState.scrollY + visibleHeight)
-        editorState.scrollY = std::max(0.0f, cursorY + lineHeight - visibleHeight + margin);
-
-    // Horizontal visibility
-    float cursorX = 0.0f;
-    if (editorState.cursorLine < editorState.lines.size())
-    {
-        const std::string &line = editorState.lines[editorState.cursorLine];
-        std::string to = line.substr(0, editorState.cursorColumn);
-        ImFont *font = ImGui::GetFont();
-        cursorX = font ? font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, to.c_str()).x : editorState.cursorColumn * charWidth;
-    }
-    float marginX = charWidth * 4.0f;
-    if (cursorX < editorState.scrollX + marginX)
-        editorState.scrollX = std::max(0.0f, cursorX - marginX);
-    else if (cursorX + charWidth > editorState.scrollX + visibleWidth - marginX)
-    {
-        float target = std::max(0.0f, cursorX + charWidth - visibleWidth + marginX);
-        editorState.scrollX = target;
-    }
-}
-
-bool LuaEditor::isCursorVisible() const
-{
-    float cursorY = editorState.cursorLine * lineHeight;
-    float margin = lineHeight * 2.0f;
-    bool verticallyVisible = (cursorY >= editorState.scrollY - margin && cursorY + lineHeight <= editorState.scrollY + visibleHeight + margin);
-
-    // Horizontal visibility
-    float cursorX = 0.0f;
-    if (editorState.cursorLine < editorState.lines.size())
-    {
-        const std::string &line = editorState.lines[editorState.cursorLine];
-        std::string to = line.substr(0, editorState.cursorColumn);
-        ImFont *font = ImGui::GetFont();
-        cursorX = font ? font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, to.c_str()).x : editorState.cursorColumn * charWidth;
-    }
-    float marginX = charWidth * 4.0f;
-    bool horizontallyVisible = (cursorX >= editorState.scrollX - marginX && cursorX + charWidth <= editorState.scrollX + visibleWidth + marginX);
-
-    return verticallyVisible && horizontallyVisible;
-}
-
-void LuaEditor::scrollToCursorIfNeeded()
-{
-    if (!isCursorVisible()) editorState.needsScrollToCursor = true;
-}
-
 // Stubs for program-structure related functions
 void LuaEditor::updateLiveProgramStructure() { /* minimal: update current file in programStructure if needed */ }
 void LuaEditor::updateLiveProgramStructureForAllTabs() { /* minimal placeholder */ }
@@ -2501,5 +1325,73 @@ void LuaEditor::drawClassInvestigator()
     ImGui::End();
 }
 
+// --- Missing method implementations required by header ---
 
+void LuaEditor::onTextChanged()
+{
+    updateSyntaxErrors();
+    updateLiveProgramStructure();
+}
 
+void LuaEditor::drawEditorOverlay(const ImVec2 &textOrigin)
+{
+    (void)textOrigin;
+    // API Docs button in the editor overlay area
+    if (ImGui::SmallButton("API Docs"))
+        showDocViewer = !showDocViewer;
+}
+
+void LuaEditor::setWorkingFile(std::filesystem::path file)
+{
+    openFile(file);
+}
+
+void LuaEditor::forceReloadFromDisk()
+{
+    EditorTab *t = getActiveTab();
+    if (t)
+        loadTabContent(*t);
+    syncActiveTabToEditor();
+}
+
+void LuaEditor::updateProjectDirectories()
+{
+    updateFileWatcher();
+}
+
+std::string LuaEditor::getCurrentTableName() const
+{
+    return std::string();
+}
+
+std::string LuaEditor::getCurrentModuleName() const
+{
+    return std::string();
+}
+
+void LuaEditor::parseCurrentFileForContext()
+{
+    updateLiveProgramStructure();
+}
+
+std::vector<std::string> LuaEditor::getCurrentImports() const
+{
+    return {};
+}
+
+const Table *LuaEditor::resolveTable(const std::string &tableName) const
+{
+    (void)tableName;
+    return nullptr;
+}
+
+LuaEngine* LuaEditor::getOrCreateTabEngine()
+{
+    EditorTab *t = getActiveTab();
+    if (!t) return nullptr;
+    std::string key = t->filePath.string();
+    auto &eng = tabEngines[key];
+    if (!eng)
+        eng = std::make_unique<LuaEngine>();
+    return eng.get();
+}

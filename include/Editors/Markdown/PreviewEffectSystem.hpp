@@ -179,6 +179,10 @@ public:
     EffectDef* currentEffect() const;
     float currentWeight() const;
     
+    /// Get the full active effect stack (bottom to top)
+    const std::vector<ActiveEffect>& getStack() const { return m_stack; }
+    size_t size() const { return m_stack.size(); }
+    
     void clear();
     bool empty() const { return m_stack.empty(); }
 
@@ -225,6 +229,9 @@ public:
     
     // Upload effect uniforms to shader
     void uploadEffectUniforms(GLuint shader, const EffectDef* effect, float time);
+    
+    // Get combined shader program (vertex from one type, fragment from another)
+    GLuint getCombinedShaderProgram(EffectShaderType vertType, EffectShaderType fragType);
 
 private:
     void registerBuiltinEffects();
@@ -238,8 +245,11 @@ private:
     // Effect registry
     std::unordered_map<std::string, EffectDef> m_effects;
     
-    // Shader cache
+    // Shader cache (single type)
     std::unordered_map<EffectShaderType, GLuint> m_shaderCache;
+    
+    // Combined shader cache (vertex_type * 100 + frag_type)
+    std::unordered_map<int, GLuint> m_combinedShaderCache;
     
     // Particle kernel cache
     std::unordered_map<std::string, std::unique_ptr<ParticleKernel>> m_kernelCache;

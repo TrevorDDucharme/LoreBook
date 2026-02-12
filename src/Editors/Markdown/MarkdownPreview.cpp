@@ -456,7 +456,25 @@ void MarkdownPreview::ensureFBO(int width, int height) {
 
 ImVec2 MarkdownPreview::render() {
     if (!m_initialized) {
+        // Save GL state before init (which creates shaders, VAOs, textures)
+        GLint preInitProgram, preInitVAO, preInitVBO, preInitTex, preInitActiveTex;
+        GLint preInitFBO;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &preInitProgram);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &preInitVAO);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &preInitVBO);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &preInitTex);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &preInitActiveTex);
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &preInitFBO);
+        
         init();
+        
+        // Restore GL state after init
+        glUseProgram(preInitProgram);
+        glBindVertexArray(preInitVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, preInitVBO);
+        glActiveTexture(preInitActiveTex);
+        glBindTexture(GL_TEXTURE_2D, preInitTex);
+        glBindFramebuffer(GL_FRAMEBUFFER, preInitFBO);
     }
     
     float dt = ImGui::GetIO().DeltaTime;
@@ -476,6 +494,11 @@ ImVec2 MarkdownPreview::render() {
     m_overlayWidgets.clear();
     m_layoutEngine.layout(m_document, avail.x, m_layoutGlyphs, m_overlayWidgets);
     
+    // Clamp scroll to content bounds
+    float contentHeight = m_layoutEngine.getContentHeight();
+    float maxScroll = std::max(0.0f, contentHeight - avail.y);
+    m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
+    
     // 3. Batch glyphs by effect
     std::vector<EffectBatch> batches;
     m_effectSystem.buildBatches(m_layoutGlyphs, batches);
@@ -483,22 +506,42 @@ ImVec2 MarkdownPreview::render() {
     // 4. Resize FBOs if needed
     ensureFBO(static_cast<int>(avail.x), static_cast<int>(avail.y));
     
-    // 5. Save GL state
+    // 5. Save ALL relevant GL state to prevent corruption of other renderers
     GLint prevFBO;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
     GLint prevViewport[4];
     glGetIntegerv(GL_VIEWPORT, prevViewport);
+    GLint prevProgram;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+    GLint prevVAO;
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
+    GLint prevVBO;
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevVBO);
+    GLint prevTex;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    GLint prevActiveTex;
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTex);
+    GLboolean prevDepthTest = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean prevBlend = glIsEnabled(GL_BLEND);
+    GLint prevBlendSrc, prevBlendDst;
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &prevBlendSrc);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &prevBlendDst);
+    GLint prevBlendSrcRGB, prevBlendDstRGB;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &prevBlendSrcRGB);
+    glGetIntegerv(GL_BLEND_DST_RGB, &prevBlendDstRGB);
     
     // 6. Render collision mask
     renderCollisionMask(batches);
     m_collisionMask.readback();
     
-    // 7. Setup 2.5D camera
+    // 7. Setup 2.5D camera – compute Z so viewport dimensions match layout at Z=0
     float aspect = avail.x / avail.y;
-    m_projection = glm::perspective(glm::radians(m_fovY), aspect, 0.1f, 2000.0f);
+    float halfFovRad = glm::radians(m_fovY) * 0.5f;
+    float viewCameraZ = (avail.y * 0.5f) / std::tan(halfFovRad);
+    m_projection = glm::perspective(glm::radians(m_fovY), aspect, 0.1f, viewCameraZ * 4.0f);
     m_view = glm::lookAt(
-        glm::vec3(avail.x / 2, avail.y / 2, m_cameraZ),
-        glm::vec3(avail.x / 2, avail.y / 2, 0),
+        glm::vec3(avail.x / 2, avail.y / 2 + m_scrollY, viewCameraZ),
+        glm::vec3(avail.x / 2, avail.y / 2 + m_scrollY, 0),
         glm::vec3(0, -1, 0)
     );
     glm::mat4 mvp = m_projection * m_view;
@@ -527,17 +570,49 @@ ImVec2 MarkdownPreview::render() {
     // 13. Render particles
     renderParticlesFromGPU(mvp);
     
-    // 14. Restore GL state
+    // 14. Restore ALL GL state
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    glUseProgram(prevProgram);
+    glBindVertexArray(prevVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, prevVBO);
+    glActiveTexture(prevActiveTex);
+    glBindTexture(GL_TEXTURE_2D, prevTex);
+    if (prevDepthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (prevBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    glBlendFuncSeparate(prevBlendSrcRGB, prevBlendDstRGB, prevBlendSrc, prevBlendDst);
     
     // 15. Display via ImGui
     ImGui::Image((ImTextureID)(intptr_t)m_colorTex, avail, ImVec2(1, 1), ImVec2(0, 0));
     
+    // Handle mouse wheel scrolling on preview
+    if (ImGui::IsItemHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f) {
+            m_scrollY -= wheel * 40.0f;
+            m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
+        }
+    }
+    
+    // Draw scrollbar indicator when content exceeds viewport
+    if (contentHeight > avail.y && contentHeight > 0.0f) {
+        ImVec2 imgMin = ImGui::GetItemRectMin();
+        ImVec2 imgMax = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float barW = 6.0f;
+        float trackH = imgMax.y - imgMin.y;
+        float thumbH = std::max(20.0f, trackH * (avail.y / contentHeight));
+        float thumbY = imgMin.y + (m_scrollY / contentHeight) * trackH;
+        dl->AddRectFilled(ImVec2(imgMax.x - barW, imgMin.y), imgMax,
+                          IM_COL32(40, 40, 40, 100), barW * 0.5f);
+        dl->AddRectFilled(ImVec2(imgMax.x - barW, thumbY),
+                          ImVec2(imgMax.x, thumbY + thumbH),
+                          IM_COL32(180, 180, 180, 150), barW * 0.5f);
+    }
+    
     // 16. Overlay ImGui widgets
     ImVec2 origin = ImGui::GetItemRectMin();
-    float scrollY = ImGui::GetScrollY();
-    renderOverlayWidgets(origin, scrollY);
+    renderOverlayWidgets(origin, m_scrollY);
     
     return avail;
 }
@@ -550,8 +625,10 @@ void MarkdownPreview::renderCollisionMask(const std::vector<EffectBatch>& batche
     
     glUseProgram(m_collisionShader);
     
-    // Simple orthographic projection for collision mask
-    glm::mat4 ortho = glm::ortho(0.0f, (float)m_fboWidth, (float)m_fboHeight, 0.0f, -1.0f, 1.0f);
+    // Orthographic projection offset by scroll position
+    glm::mat4 ortho = glm::ortho(0.0f, (float)m_fboWidth,
+                                 m_scrollY + (float)m_fboHeight, m_scrollY,
+                                 -1.0f, 1.0f);
     glUniformMatrix4fv(glGetUniformLocation(m_collisionShader, "uMVP"), 1, GL_FALSE, &ortho[0][0]);
     
     glActiveTexture(GL_TEXTURE0);
@@ -581,7 +658,18 @@ void MarkdownPreview::renderGlyphBatches(const std::vector<EffectBatch>& batches
         if (batch.vertices.empty()) continue;
         
         EffectShaderType shaderType = batch.effect ? batch.effect->shaderType : EffectShaderType::None;
-        GLuint shader = m_effectSystem.getShaderProgram(shaderType);
+        GLuint shader = 0;
+        
+        // Check if this is a composite effect (has __composite_ prefix in name)
+        // If so, use the combined shader with vert from shaderType and frag from customShaderProgram
+        if (batch.effect && batch.effect->name.rfind("__composite_", 0) == 0) {
+            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
+            shader = m_effectSystem.getCombinedShaderProgram(shaderType, fragType);
+        }
+        
+        if (!shader) {
+            shader = m_effectSystem.getShaderProgram(shaderType);
+        }
         
         if (!shader) continue;
         

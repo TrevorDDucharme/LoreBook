@@ -272,12 +272,15 @@ void main() {
     
     // Pulsing glow
     float pulse = 0.5 + 0.5 * sin(uTime * 3.0);
-    float glowStrength = uIntensity * (0.5 + 0.5 * pulse);
+    float glowStrength = clamp(uIntensity * (0.5 + 0.5 * pulse), 0.0, 1.0);
     
+    // Tint the glyph color toward the glow color
     vec3 glowColor = mix(v_color.rgb, uColor1.rgb, glowStrength);
-    float glowAlpha = alpha + (1.0 - alpha) * glowStrength * 0.3;
     
-    fragColor = vec4(glowColor, glowAlpha * v_color.a);
+    // Brighten within the glyph shape only — never fill transparent areas
+    float glowAlpha = alpha * (1.0 + glowStrength * 0.5);
+    
+    fragColor = vec4(glowColor, clamp(glowAlpha, 0.0, 1.0) * v_color.a);
 }
 )";
 
@@ -323,6 +326,14 @@ void PreviewEffectSystem::cleanup() {
         }
     }
     m_shaderCache.clear();
+    
+    // Release combined shaders
+    for (auto& [key, program] : m_combinedShaderCache) {
+        if (program) {
+            glDeleteProgram(program);
+        }
+    }
+    m_combinedShaderCache.clear();
     
     // Release kernels
     m_kernelCache.clear();
@@ -445,6 +456,286 @@ void PreviewEffectSystem::registerBuiltinEffects() {
         snow.emission.lifetime = 3.0f;
         snow.emission.size = 2.5f;
         registerEffect("snow", snow);
+    }
+    
+    // Pulse effect (alpha oscillation)
+    {
+        EffectDef pulse;
+        pulse.shaderType = EffectShaderType::Glow;
+        pulse.color1 = {1.0f, 1.0f, 1.0f, 1.0f};
+        pulse.intensity = 0.5f;
+        pulse.speed = 1.0f;
+        registerEffect("pulse", pulse);
+    }
+    
+    // Bounce effect (wave with abs bounce)
+    {
+        EffectDef bounce;
+        bounce.shaderType = EffectShaderType::Wave;
+        bounce.speed = 2.0f;
+        bounce.amplitude = 4.0f;
+        bounce.frequency = 2.0f;
+        registerEffect("bounce", bounce);
+    }
+    
+    // Blood effect (red drip particles)
+    {
+        EffectDef blood;
+        blood.shaderType = EffectShaderType::None;
+        blood.color1 = {0.8f, 0.0f, 0.0f, 1.0f};
+        blood.color2 = {0.4f, 0.0f, 0.0f, 1.0f};
+        blood.hasParticles = true;
+        blood.emission.rate = 10.0f;
+        blood.emission.velocity = {0, 60};
+        blood.emission.velocityVar = {5, 15};
+        blood.emission.lifetime = 2.0f;
+        blood.emission.size = 3.0f;
+        registerEffect("blood", blood);
+    }
+    
+    // Ice/frost effect (blue glow with snow particles)
+    {
+        EffectDef ice;
+        ice.shaderType = EffectShaderType::Glow;
+        ice.color1 = {0.6f, 0.85f, 1.0f, 1.0f};
+        ice.intensity = 0.6f;
+        ice.hasParticles = true;
+        ice.emission.rate = 12.0f;
+        ice.emission.velocity = {0, 30};
+        ice.emission.velocityVar = {15, 10};
+        ice.emission.lifetime = 2.0f;
+        ice.emission.size = 2.0f;
+        registerEffect("ice", ice);
+        registerEffect("frost", ice);
+    }
+    
+    // Magic effect (purple glow with sparkle particles)
+    {
+        EffectDef magic;
+        magic.shaderType = EffectShaderType::Glow;
+        magic.color1 = {0.7f, 0.3f, 1.0f, 1.0f};
+        magic.intensity = 0.9f;
+        magic.hasParticles = true;
+        magic.emission.rate = 20.0f;
+        magic.emission.velocity = {0, -25};
+        magic.emission.velocityVar = {25, 15};
+        magic.emission.lifetime = 1.2f;
+        magic.emission.size = 2.5f;
+        registerEffect("magic", magic);
+    }
+    
+    // Ghost effect (fading glow)
+    {
+        EffectDef ghost;
+        ghost.shaderType = EffectShaderType::Glow;
+        ghost.color1 = {0.7f, 0.8f, 0.9f, 0.6f};
+        ghost.intensity = 0.4f;
+        ghost.speed = 0.5f;
+        registerEffect("ghost", ghost);
+    }
+    
+    // Underwater/bubbles effect
+    {
+        EffectDef underwater;
+        underwater.shaderType = EffectShaderType::Wave;
+        underwater.color1 = {0.3f, 0.6f, 1.0f, 1.0f};
+        underwater.speed = 0.5f;
+        underwater.amplitude = 2.0f;
+        underwater.frequency = 0.8f;
+        underwater.hasParticles = true;
+        underwater.emission.rate = 8.0f;
+        underwater.emission.velocity = {0, -40};
+        underwater.emission.velocityVar = {10, 10};
+        underwater.emission.lifetime = 2.5f;
+        underwater.emission.size = 3.5f;
+        registerEffect("underwater", underwater);
+    }
+    
+    // Golden glow effect
+    {
+        EffectDef golden;
+        golden.shaderType = EffectShaderType::Glow;
+        golden.color1 = {1.0f, 0.84f, 0.0f, 1.0f};
+        golden.intensity = 1.0f;
+        registerEffect("golden", golden);
+    }
+    
+    // Toxic/poison effect (green shake)
+    {
+        EffectDef toxic;
+        toxic.shaderType = EffectShaderType::Shake;
+        toxic.color1 = {0.2f, 0.9f, 0.1f, 1.0f};
+        toxic.speed = 0.8f;
+        toxic.intensity = 1.0f;
+        toxic.hasParticles = true;
+        toxic.emission.rate = 10.0f;
+        toxic.emission.velocity = {0, -20};
+        toxic.emission.velocityVar = {15, 10};
+        toxic.emission.lifetime = 1.5f;
+        toxic.emission.size = 2.0f;
+        registerEffect("toxic", toxic);
+    }
+    
+    // Crystal shimmer effect
+    {
+        EffectDef crystal;
+        crystal.shaderType = EffectShaderType::Rainbow;
+        crystal.color1 = {0.8f, 0.9f, 1.0f, 1.0f};
+        crystal.speed = 0.3f;
+        registerEffect("crystal", crystal);
+    }
+    
+    // Storm/lightning effect
+    {
+        EffectDef storm;
+        storm.shaderType = EffectShaderType::Shake;
+        storm.color1 = {0.8f, 0.85f, 1.0f, 1.0f};
+        storm.speed = 3.0f;
+        storm.intensity = 3.0f;
+        storm.hasParticles = true;
+        storm.emission.rate = 15.0f;
+        storm.emission.velocity = {0, 50};
+        storm.emission.velocityVar = {40, 20};
+        storm.emission.lifetime = 0.5f;
+        storm.emission.size = 2.0f;
+        registerEffect("storm", storm);
+    }
+    
+    // Ethereal glow
+    {
+        EffectDef ethereal;
+        ethereal.shaderType = EffectShaderType::Glow;
+        ethereal.color1 = {0.5f, 0.8f, 1.0f, 0.8f};
+        ethereal.intensity = 0.7f;
+        ethereal.speed = 0.3f;
+        registerEffect("ethereal", ethereal);
+    }
+    
+    // Lava effect (slow fire)
+    {
+        EffectDef lava;
+        lava.shaderType = EffectShaderType::Fire;
+        lava.color1 = {1.0f, 0.2f, 0.0f, 1.0f};
+        lava.color2 = {1.0f, 0.5f, 0.0f, 1.0f};
+        lava.speed = 0.4f;
+        lava.intensity = 0.8f;
+        lava.hasParticles = true;
+        lava.emission.rate = 15.0f;
+        lava.emission.velocity = {0, -30};
+        lava.emission.lifetime = 1.5f;
+        lava.emission.size = 5.0f;
+        registerEffect("lava", lava);
+    }
+    
+    // Void effect (dark with inverse glow)
+    {
+        EffectDef voidEffect;
+        voidEffect.shaderType = EffectShaderType::Glow;
+        voidEffect.color1 = {0.1f, 0.0f, 0.2f, 1.0f};
+        voidEffect.intensity = 0.6f;
+        voidEffect.speed = 0.4f;
+        registerEffect("void", voidEffect);
+    }
+    
+    // Holy light effect
+    {
+        EffectDef holy;
+        holy.shaderType = EffectShaderType::Glow;
+        holy.color1 = {1.0f, 1.0f, 0.8f, 1.0f};
+        holy.intensity = 1.2f;
+        holy.speed = 0.5f;
+        holy.hasParticles = true;
+        holy.emission.rate = 10.0f;
+        holy.emission.velocity = {0, -15};
+        holy.emission.velocityVar = {15, 10};
+        holy.emission.lifetime = 2.0f;
+        holy.emission.size = 2.0f;
+        registerEffect("holy", holy);
+    }
+    
+    // Matrix style (green rain + shake)
+    {
+        EffectDef matrix;
+        matrix.shaderType = EffectShaderType::None;
+        matrix.color1 = {0.0f, 1.0f, 0.0f, 1.0f};
+        matrix.hasParticles = true;
+        matrix.emission.rate = 30.0f;
+        matrix.emission.velocity = {0, 80};
+        matrix.emission.velocityVar = {5, 20};
+        matrix.emission.lifetime = 1.5f;
+        matrix.emission.size = 2.0f;
+        registerEffect("matrix", matrix);
+    }
+    
+    // Disco effect (fast rainbow)
+    {
+        EffectDef disco;
+        disco.shaderType = EffectShaderType::Rainbow;
+        disco.speed = 3.0f;
+        registerEffect("disco", disco);
+    }
+    
+    // Glitch effect (fast shake)
+    {
+        EffectDef glitch;
+        glitch.shaderType = EffectShaderType::Shake;
+        glitch.speed = 5.0f;
+        glitch.intensity = 3.0f;
+        registerEffect("glitch", glitch);
+    }
+    
+    // Gradient effect (slow color wave)
+    {
+        EffectDef gradient;
+        gradient.shaderType = EffectShaderType::Rainbow;
+        gradient.speed = 0.1f;
+        registerEffect("gradient", gradient);
+    }
+    
+    // Shadow effect (dark glow)
+    {
+        EffectDef shadow;
+        shadow.shaderType = EffectShaderType::Glow;
+        shadow.color1 = {0.0f, 0.0f, 0.0f, 0.8f};
+        shadow.intensity = 0.5f;
+        shadow.speed = 0.0f;
+        registerEffect("shadow", shadow);
+    }
+    
+    // Outline effect (bright glow, high intensity)
+    {
+        EffectDef outline;
+        outline.shaderType = EffectShaderType::Glow;
+        outline.color1 = {1.0f, 1.0f, 1.0f, 1.0f};
+        outline.intensity = 1.5f;
+        outline.speed = 0.0f;
+        registerEffect("outline", outline);
+    }
+    
+    // Typewriter effect (slow wave reveal)
+    {
+        EffectDef typewriter;
+        typewriter.shaderType = EffectShaderType::Wave;
+        typewriter.speed = 0.3f;
+        typewriter.amplitude = 1.0f;
+        typewriter.frequency = 0.5f;
+        registerEffect("typewriter", typewriter);
+    }
+    
+    // Dissolve effect
+    {
+        EffectDef dissolve;
+        dissolve.shaderType = EffectShaderType::Glow;
+        dissolve.color1 = {1.0f, 0.5f, 0.0f, 0.7f};
+        dissolve.intensity = 0.4f;
+        dissolve.speed = 1.0f;
+        dissolve.hasParticles = true;
+        dissolve.emission.rate = 20.0f;
+        dissolve.emission.velocity = {0, -15};
+        dissolve.emission.velocityVar = {20, 15};
+        dissolve.emission.lifetime = 1.0f;
+        dissolve.emission.size = 1.5f;
+        registerEffect("dissolve", dissolve);
     }
 }
 
@@ -579,6 +870,54 @@ GLuint PreviewEffectSystem::getShaderProgram(EffectShaderType type) {
     compileShader(type);
     it = m_shaderCache.find(type);
     return it != m_shaderCache.end() ? it->second : 0;
+}
+
+// Helpers for shader source selection by type
+static const char* getVertexSource(EffectShaderType type) {
+    switch (type) {
+        case EffectShaderType::Fire:  return s_fireVert;
+        case EffectShaderType::Shake: return s_shakeVert;
+        case EffectShaderType::Wave:  return s_waveVert;
+        default:                      return s_baseGlyphVert;
+    }
+}
+
+static const char* getFragmentSource(EffectShaderType type) {
+    switch (type) {
+        case EffectShaderType::Fire:    return s_fireFrag;
+        case EffectShaderType::Rainbow: return s_rainbowFrag;
+        case EffectShaderType::Glow:    return s_glowFrag;
+        default:                        return s_baseGlyphFrag;
+    }
+}
+
+static bool isVertexEffect(EffectShaderType type) {
+    return type == EffectShaderType::Fire || type == EffectShaderType::Shake || type == EffectShaderType::Wave;
+}
+
+static bool isFragmentEffect(EffectShaderType type) {
+    return type == EffectShaderType::Fire || type == EffectShaderType::Rainbow || type == EffectShaderType::Glow;
+}
+
+GLuint PreviewEffectSystem::getCombinedShaderProgram(EffectShaderType vertType, EffectShaderType fragType) {
+    // If both are the same, just return the standard program
+    if (vertType == fragType) return getShaderProgram(vertType);
+    
+    int key = static_cast<int>(vertType) * 100 + static_cast<int>(fragType);
+    auto it = m_combinedShaderCache.find(key);
+    if (it != m_combinedShaderCache.end()) {
+        return it->second;
+    }
+    
+    // Compile combined shader
+    const char* vertSrc = getVertexSource(vertType);
+    const char* fragSrc = getFragmentSource(fragType);
+    
+    GLuint program = compileShaderProgram(vertSrc, fragSrc);
+    if (program) {
+        m_combinedShaderCache[key] = program;
+    }
+    return program;
 }
 
 void PreviewEffectSystem::buildBatches(const std::vector<LayoutGlyph>& glyphs,

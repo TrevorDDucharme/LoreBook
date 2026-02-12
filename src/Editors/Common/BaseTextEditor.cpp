@@ -190,6 +190,53 @@ void BaseTextEditor::drawLineNumbers(ImDrawList* drawList, const ImVec2& origin,
     }
 }
 
+void BaseTextEditor::drawTextContentWithSyntaxHighlighting(ImDrawList* drawList,
+                                                           const ImVec2& origin,
+                                                           float visibleHeight)
+{
+    ImFont* font = ImGui::GetFont();
+    if (!font) return;
+
+    float baselineOffset = getBaselineOffset();
+    float y = origin.y - editorState.scrollY + baselineOffset;
+    size_t startLine = static_cast<size_t>(std::max(0.0f, editorState.scrollY / lineHeight));
+    size_t endLine = std::min(editorState.lines.size(),
+                              startLine + static_cast<size_t>(visibleHeight / lineHeight) + 2);
+
+    beginTokenize(startLine);
+
+    for (size_t ln = startLine; ln < endLine; ++ln)
+    {
+        float lineY = y + ln * lineHeight;
+        if (lineY > origin.y + visibleHeight) break;
+        if (lineY + lineHeight < origin.y) continue;
+
+        const std::string& line = editorState.lines[ln];
+        if (line.empty()) { tokenizeLine(line, ln); continue; } // advance tokenizer state
+
+        auto tokens = tokenizeLine(line, ln);
+        float x = origin.x;
+
+        if (tokens.empty())
+        {
+            drawList->AddText(font, renderFontSize, ImVec2(x, lineY), textColor,
+                              line.c_str());
+        }
+        else
+        {
+            for (const auto& tok : tokens)
+            {
+                if (tok.start >= line.size()) break;
+                size_t end = std::min(tok.start + tok.length, line.size());
+                const char* b = line.c_str() + tok.start;
+                const char* e = line.c_str() + end;
+                drawList->AddText(font, renderFontSize, ImVec2(x, lineY), tok.color, b, e);
+                x += font->CalcTextSizeA(renderFontSize, FLT_MAX, 0.0f, b, e).x;
+            }
+        }
+    }
+}
+
 void BaseTextEditor::drawCursor(ImDrawList* drawList, const ImVec2& origin)
 {
     ImVec2 p = getCursorScreenPos(origin);
@@ -1393,6 +1440,15 @@ void BaseTextEditor::saveActiveTab()
 
 void BaseTextEditor::setContent(const std::string& content)
 {
+    // Ensure there is an active tab so drawEditor() won't bail out
+    if (tabs.empty())
+    {
+        EditorTab t(std::filesystem::path(""));
+        t.displayName = "Content";
+        tabs.push_back(std::move(t));
+        activeTabIndex = 0;
+    }
+
     editorState.lines.clear();
     
     if (content.empty())
@@ -1427,6 +1483,8 @@ void BaseTextEditor::setContent(const std::string& content)
     
     undoStack.clear();
     redoStack.clear();
+
+    syncEditorToActiveTab();
 }
 
 std::string BaseTextEditor::getEditorContent() const
