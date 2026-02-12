@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 #include <GL/glew.h>
 #include <CL/cl.h>
+#include <Editors/Markdown/ShaderCompositor.hpp>
 
 namespace Markdown {
 
@@ -190,15 +191,23 @@ public:
     // Get OpenCL kernel for an Effect's particle physics
     cl_kernel getEffectKernel(const EffectDef* def);
     
-    // Upload effect uniforms to shader (delegates to Effect::uploadGlyphUniforms)
+    // Upload effect uniforms to shader
     void uploadEffectUniforms(GLuint shader, const EffectDef* effect, float time);
     
-    // Upload composite snippet uniforms for a stacked effect
-    void uploadCompositeUniforms(GLuint shader, const EffectDef* effect, float time);
+    // ── Snippet-based composition ──
     
-    // Get or compile a composite shader for a stack of effects
-    GLuint getOrCompileCompositeShader(const std::vector<Effect*>& stack, const std::string& signature);
+    // Get or compile a composed glyph shader from snippets
+    GLuint getOrCompileSnippetGlyphShader(const std::vector<Effect*>& stack, const std::string& signature);
     
+    // Get or compile a composed particle shader from snippets
+    GLuint getOrCompileSnippetParticleShader(const std::vector<Effect*>& stack, const std::string& signature);
+    
+    // Upload snippet uniforms for a glyph shader (all effects in stack)
+    void uploadGlyphSnippetUniforms(GLuint shader, const EffectDef* effect, float time);
+    
+    // Upload snippet uniforms for a particle shader (all effects in stack)
+    void uploadParticleSnippetUniforms(GLuint shader, const EffectDef* effect, float time);
+
     // Get all active Effects that have particles
     std::vector<EffectDef*> getParticleEffects();
 
@@ -208,10 +217,6 @@ private:
     
     /// Compile shaders and kernel for an Effect instance
     void compileEffectResources(EffectDef& def);
-    
-    /// Generate composite GLSL from a stack of effect snippets
-    std::string generateCompositeVertexShader(const std::vector<Effect*>& stack);
-    std::string generateCompositeFragmentShader(const std::vector<Effect*>& stack);
     
     // OpenCL context (borrowed from OpenCLContext singleton)
     cl_context m_clContext = nullptr;
@@ -226,8 +231,15 @@ private:
     // Base glyph shader (for effects with no custom glyph shader)
     GLuint m_baseGlyphShader = 0;
     
-    // Composite shader cache: stackSignature → compiled shader program
-    std::unordered_map<std::string, GLuint> m_compositeShaderCache;
+    // Snippet-based shader caches
+    std::unordered_map<std::string, GLuint> m_snippetGlyphShaderCache;
+    std::unordered_map<std::string, GLuint> m_snippetParticleShaderCache;
+    
+    // Shader compositor for snippet-based composition
+    ShaderCompositor m_compositor;
+    
+    // Common OpenCL source for kernel compilation
+    std::string m_commonCL;
     
     bool m_initialized = false;
 };

@@ -13,18 +13,18 @@ public:
     std::unique_ptr<Effect> clone() const override { return std::make_unique<ElectricEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
-    ShaderSources getGlyphShaderSources() const override;
-    ShaderSources getParticleShaderSources() const override;
-    KernelSources getKernelSources() const override;
     EffectEmissionConfig getEmissionConfig() const override;
-    std::vector<PostProcessPass> getPostProcessPasses() const override;
     
-    void uploadGlyphUniforms(GLuint shader, float time) const override;
-    void uploadParticleUniforms(GLuint shader, float time) const override;
-    void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
-    
-    EffectSnippet getSnippet() const override;
-    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    // Snippet API
+    GlyphSnippets getGlyphSnippets() const override;
+    void uploadGlyphSnippetUniforms(GLuint shader, float time) const override;
+    ParticleSnippets getParticleSnippets() const override;
+    void uploadParticleSnippetUniforms(GLuint shader, float time) const override;
+    KernelSnippet getKernelSnippet() const override;
+    void bindKernelSnippetParams(cl_kernel kernel, const KernelParams& params,
+                                  int firstArgIndex) const override;
+    std::vector<PostProcessSnippet> getPostProcessSnippets() const override;
+    void uploadPostProcessSnippetUniforms(GLuint shader, int passIndex, float time) const override;
     
     // Electric-specific parameters
     float arcFrequency = 3.0f;

@@ -13,17 +13,9 @@ public:
     std::unique_ptr<Effect> clone() const override { return std::make_unique<GlowEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
-    ShaderSources getGlyphShaderSources() const override;
-    ShaderSources getParticleShaderSources() const override { return {}; }
-    KernelSources getKernelSources() const override { return {}; }
-    EffectEmissionConfig getEmissionConfig() const override { return {}; }
     
-    void uploadGlyphUniforms(GLuint shader, float time) const override;
-    void uploadParticleUniforms(GLuint, float) const override {}
-    void bindKernelParams(cl_kernel, const KernelParams&) const override {}
-    
-    EffectSnippet getSnippet() const override;
-    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    GlyphSnippets getGlyphSnippets() const override;
+    void uploadGlyphSnippetUniforms(GLuint shader, float time) const override;
 };
 
 } // namespace Markdown

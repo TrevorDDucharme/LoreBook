@@ -1,6 +1,7 @@
 #include <Editors/Markdown/PreviewEffectSystem.hpp>
 #include <Editors/Markdown/Effect.hpp>
 #include <Editors/Markdown/Effects/AllEffects.hpp>
+#include <Editors/Markdown/ShaderCompositor.hpp>
 #include <OpenCLContext.hpp>
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include <plog/Log.h>
@@ -103,6 +104,11 @@ bool PreviewEffectSystem::init(cl_context clContext, cl_device_id clDevice) {
     // Compile the base glyph shader
     m_baseGlyphShader = compileShaderProgram(s_baseGlyphVert, s_baseGlyphFrag);
     
+    // Load common.cl once for kernel compilation
+    if (existsLoreBook_ResourcesEmbeddedFile("Kernels/particles/common.cl")) {
+        m_commonCL = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/particles/common.cl");
+    }
+    
     // Register all effects from the EffectRegistry (auto-registered via REGISTER_EFFECT macro)
     registerBuiltinEffects();
     
@@ -141,11 +147,16 @@ void PreviewEffectSystem::cleanup() {
     m_effects.clear();
     m_ownedEffects.clear();
     
-    // Release composite shader cache
-    for (auto& [sig, shader] : m_compositeShaderCache) {
+    // Release snippet shader caches
+    for (auto& [sig, shader] : m_snippetGlyphShaderCache) {
         if (shader) glDeleteProgram(shader);
     }
-    m_compositeShaderCache.clear();
+    m_snippetGlyphShaderCache.clear();
+    
+    for (auto& [sig, shader] : m_snippetParticleShaderCache) {
+        if (shader) glDeleteProgram(shader);
+    }
+    m_snippetParticleShaderCache.clear();
     
     m_initialized = false;
 }
@@ -351,191 +362,44 @@ void PreviewEffectSystem::compileEffectResources(EffectDef& def) {
     
     auto caps = def.effect->getCapabilities();
     
+    // Glyph shader (from snippets)
     if (caps.hasGlyphShader) {
-        auto src = def.effect->getGlyphShaderSources();
-        if (src.isValid()) {
-            const char* geom = src.hasGeometry() ? src.geometry.c_str() : nullptr;
-            def.effectGlyphShader = compileShaderProgram(src.vertex.c_str(), src.fragment.c_str(), geom);
-            if (def.effectGlyphShader) {
+        auto glyphSnippets = def.effect->getGlyphSnippets();
+        if (!glyphSnippets.empty()) {
+            std::vector<Effect*> stack = {def.effect};
+            auto sources = m_compositor.composeGlyphShader(stack);
+            def.effectGlyphShader = ShaderCompositor::compileProgram(
+                def.name + "_glyph", sources);
+            if (def.effectGlyphShader)
                 PLOG_DEBUG << "Compiled glyph shader for " << def.name;
-            }
         }
     }
     
+    // Particle shader (from snippets)
     if (caps.hasParticleShader) {
-        auto src = def.effect->getParticleShaderSources();
-        if (src.isValid()) {
-            const char* geom = src.hasGeometry() ? src.geometry.c_str() : nullptr;
-            def.effectParticleShader = compileShaderProgram(src.vertex.c_str(), src.fragment.c_str(), geom);
-            if (def.effectParticleShader) {
+        auto particleSnippets = def.effect->getParticleSnippets();
+        if (!particleSnippets.empty()) {
+            std::vector<Effect*> stack = {def.effect};
+            auto sources = m_compositor.composeParticleShader(stack);
+            def.effectParticleShader = ShaderCompositor::compileProgram(
+                def.name + "_particle", sources);
+            if (def.effectParticleShader)
                 PLOG_DEBUG << "Compiled particle shader for " << def.name;
-            }
         }
     }
     
+    // Kernel (from snippets)
     if (caps.hasParticles && m_clContext) {
-        auto ksrc = def.effect->getKernelSources();
-        if (ksrc.isValid()) {
-            std::string commonCL;
-            if (existsLoreBook_ResourcesEmbeddedFile("Kernels/particles/common.cl")) {
-                commonCL = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/particles/common.cl");
-            }
-            
-            std::string fullSource = ksrc.source;
-            size_t includePos = fullSource.find("#include \"common.cl\"");
-            if (includePos != std::string::npos) {
-                fullSource.replace(includePos, 20, commonCL);
-            }
-            
-            const char* src = fullSource.c_str();
-            size_t len = fullSource.size();
-            cl_int err;
-            
-            def.effectProgram = clCreateProgramWithSource(m_clContext, 1, &src, &len, &err);
-            if (err == CL_SUCCESS) {
-                err = clBuildProgram(def.effectProgram, 1, &m_clDevice, "-cl-fast-relaxed-math", nullptr, nullptr);
-                if (err == CL_SUCCESS) {
-                    def.effectKernel = clCreateKernel(def.effectProgram, ksrc.entryPoint.c_str(), &err);
-                    if (err == CL_SUCCESS) {
-                        PLOG_DEBUG << "Compiled kernel '" << ksrc.entryPoint << "' for " << def.name;
-                    } else {
-                        PLOG_ERROR << "clCreateKernel failed for " << def.name << ": " << err;
-                    }
-                } else {
-                    size_t logSize;
-                    clGetProgramBuildInfo(def.effectProgram, m_clDevice, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logSize);
-                    std::string log(logSize, '\0');
-                    clGetProgramBuildInfo(def.effectProgram, m_clDevice, CL_PROGRAM_BUILD_LOG, logSize, &log[0], nullptr);
-                    PLOG_ERROR << "Kernel build failed for " << def.name << ": " << log;
-                    clReleaseProgram(def.effectProgram);
-                    def.effectProgram = nullptr;
-                }
-            } else {
-                PLOG_ERROR << "clCreateProgramWithSource failed for " << def.name << ": " << err;
+        auto kernelSnippet = def.effect->getKernelSnippet();
+        if (!kernelSnippet.empty()) {
+            std::vector<Effect*> stack = {def.effect};
+            auto composed = m_compositor.composeKernel(stack);
+            if (ShaderCompositor::compileKernelProgram(composed, m_commonCL,
+                    m_clContext, m_clDevice, def.effectProgram, def.effectKernel)) {
+                PLOG_DEBUG << "Compiled kernel for " << def.name;
             }
         }
     }
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Composite Shader Generation
-// ────────────────────────────────────────────────────────────────────
-
-std::string PreviewEffectSystem::generateCompositeVertexShader(const std::vector<Effect*>& stack) {
-    std::ostringstream vs;
-    vs << "#version 330 core\n"
-       << "layout(location = 0) in vec3 in_pos;\n"
-       << "layout(location = 1) in vec2 in_uv;\n"
-       << "layout(location = 2) in vec4 in_color;\n"
-       << "layout(location = 3) in uint in_effectID;\n\n"
-       << "uniform mat4 uMVP;\n"
-       << "uniform float uTime;\n";
-
-    // Collect uniform declarations from all effects
-    for (const auto* fx : stack) {
-        auto snippet = fx->getSnippet();
-        if (!snippet.uniformDecls.empty())
-            vs << snippet.uniformDecls;
-    }
-
-    vs << "\nout vec2 v_uv;\n"
-       << "out vec4 v_color;\n"
-       << "out vec3 v_worldPos;\n"
-       << "flat out uint v_effectID;\n\n";
-
-    // Collect helper functions (vertex-relevant)
-    for (const auto* fx : stack) {
-        auto snippet = fx->getSnippet();
-        if (snippet.hasVertex() && !snippet.helpers.empty())
-            vs << snippet.helpers << "\n";
-    }
-
-    vs << "void main() {\n"
-       << "    vec3 pos = in_pos;\n";
-
-    // Apply vertex modifications in stack order (outer→inner)
-    for (const auto* fx : stack) {
-        auto snippet = fx->getSnippet();
-        if (snippet.hasVertex())
-            vs << "    " << snippet.vertexCode << "\n";
-    }
-
-    vs << "    gl_Position = uMVP * vec4(pos, 1.0);\n"
-       << "    v_uv = in_uv;\n"
-       << "    v_color = in_color;\n"
-       << "    v_worldPos = in_pos;\n"
-       << "    v_effectID = in_effectID;\n"
-       << "}\n";
-
-    return vs.str();
-}
-
-std::string PreviewEffectSystem::generateCompositeFragmentShader(const std::vector<Effect*>& stack) {
-    std::ostringstream fs;
-    fs << "#version 330 core\n"
-       << "uniform sampler2D uFontAtlas;\n"
-       << "uniform float uTime;\n";
-
-    // Collect uniform declarations
-    for (const auto* fx : stack) {
-        auto snippet = fx->getSnippet();
-        if (!snippet.uniformDecls.empty())
-            fs << snippet.uniformDecls;
-    }
-
-    fs << "\nin vec2 v_uv;\n"
-       << "in vec4 v_color;\n"
-       << "in vec3 v_worldPos;\n"
-       << "flat in uint v_effectID;\n\n"
-       << "out vec4 fragColor;\n\n";
-
-    // Collect helper functions (fragment-relevant)
-    for (const auto* fx : stack) {
-        auto snippet = fx->getSnippet();
-        if (snippet.hasFragment() && !snippet.helpers.empty())
-            fs << snippet.helpers << "\n";
-    }
-
-    fs << "void main() {\n"
-       << "    float alpha = texture(uFontAtlas, v_uv).a;\n"
-       << "    vec4 color = vec4(v_color.rgb, v_color.a * alpha);\n";
-
-    // Apply fragment modifications in reverse stack order (inner first, outer last)
-    for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i) {
-        auto snippet = stack[i]->getSnippet();
-        if (snippet.hasFragment())
-            fs << "    " << snippet.fragmentCode << "\n";
-    }
-
-    fs << "    fragColor = color;\n"
-       << "}\n";
-
-    return fs.str();
-}
-
-GLuint PreviewEffectSystem::getOrCompileCompositeShader(const std::vector<Effect*>& stack, const std::string& signature) {
-    // Check cache
-    auto it = m_compositeShaderCache.find(signature);
-    if (it != m_compositeShaderCache.end()) {
-        return it->second;
-    }
-
-    // Generate and compile
-    std::string vertSrc = generateCompositeVertexShader(stack);
-    std::string fragSrc = generateCompositeFragmentShader(stack);
-
-    GLuint shader = compileShaderProgram(vertSrc.c_str(), fragSrc.c_str());
-    if (shader) {
-        PLOG_INFO << "Compiled composite shader for stack: " << signature;
-    } else {
-        PLOG_ERROR << "Failed to compile composite shader for stack: " << signature;
-        // Log sources for debugging
-        PLOG_ERROR << "Vertex:\n" << vertSrc;
-        PLOG_ERROR << "Fragment:\n" << fragSrc;
-    }
-
-    m_compositeShaderCache[signature] = shader;
-    return shader;
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -545,10 +409,10 @@ GLuint PreviewEffectSystem::getOrCompileCompositeShader(const std::vector<Effect
 GLuint PreviewEffectSystem::getGlyphShader(const EffectDef* def) {
     if (!def) return m_baseGlyphShader;
     
-    // If this is a composite EffectDef with a stacked signature, use composite shader
+    // If this is a composite EffectDef with a stacked signature, use composed shader
     if (def->effectStack.size() > 1 && !def->stackSignature.empty()) {
-        GLuint composite = getOrCompileCompositeShader(def->effectStack, def->stackSignature);
-        if (composite) return composite;
+        GLuint snippetShader = getOrCompileSnippetGlyphShader(def->effectStack, def->stackSignature);
+        if (snippetShader) return snippetShader;
     }
     
     if (def->effectGlyphShader) {
@@ -559,6 +423,13 @@ GLuint PreviewEffectSystem::getGlyphShader(const EffectDef* def) {
 
 GLuint PreviewEffectSystem::getParticleShader(const EffectDef* def) {
     if (!def) return 0;
+    
+    // If this is a composite EffectDef with a stacked signature, try composed shader
+    if (def->effectStack.size() > 1 && !def->stackSignature.empty()) {
+        GLuint snippetShader = getOrCompileSnippetParticleShader(def->effectStack, def->stackSignature);
+        if (snippetShader) return snippetShader;
+    }
+    
     return def->effectParticleShader;
 }
 
@@ -571,24 +442,102 @@ void PreviewEffectSystem::uploadEffectUniforms(GLuint shader, const EffectDef* e
     if (effect && effect->effect) {
         // If composite stack, upload snippet uniforms for each effect in stack
         if (effect->effectStack.size() > 1) {
-            uploadCompositeUniforms(shader, effect, time);
+            uploadGlyphSnippetUniforms(shader, effect, time);
             return;
         }
-        effect->effect->uploadGlyphUniforms(shader, time);
+        
+        // Single effect
+        glUniform1f(glGetUniformLocation(shader, "uTime"), time);
+        effect->effect->uploadGlyphSnippetUniforms(shader, time);
     } else {
         glUniform1f(glGetUniformLocation(shader, "uTime"), time);
     }
 }
 
-void PreviewEffectSystem::uploadCompositeUniforms(GLuint shader, const EffectDef* effect, float time) {
-    // Upload shared uTime
+// ────────────────────────────────────────────────────────────────────
+// Snippet-based shader composition
+// ────────────────────────────────────────────────────────────────────
+
+GLuint PreviewEffectSystem::getOrCompileSnippetGlyphShader(
+    const std::vector<Effect*>& stack, const std::string& signature) {
+    
+    // Check if any effect in the stack provides new-style snippets
+    bool hasSnippets = false;
+    for (auto* fx : stack) {
+        if (fx && !fx->getGlyphSnippets().empty()) {
+            hasSnippets = true;
+            break;
+        }
+    }
+    if (!hasSnippets) return 0;
+    
+    std::string cacheKey = "sg_" + signature;
+    auto it = m_snippetGlyphShaderCache.find(cacheKey);
+    if (it != m_snippetGlyphShaderCache.end())
+        return it->second;
+    
+    auto sources = m_compositor.composeGlyphShader(stack);
+    GLuint shader = ShaderCompositor::compileProgram("glyph:" + signature, sources);
+    m_snippetGlyphShaderCache[cacheKey] = shader;
+    
+    if (shader)
+        PLOG_INFO << "Compiled snippet glyph shader for stack: " << signature;
+    else
+        PLOG_ERROR << "Failed to compile snippet glyph shader for: " << signature;
+    
+    return shader;
+}
+
+GLuint PreviewEffectSystem::getOrCompileSnippetParticleShader(
+    const std::vector<Effect*>& stack, const std::string& signature) {
+    
+    bool hasSnippets = false;
+    for (auto* fx : stack) {
+        if (fx && !fx->getParticleSnippets().empty()) {
+            hasSnippets = true;
+            break;
+        }
+    }
+    if (!hasSnippets) return 0;
+    
+    std::string cacheKey = "sp_" + signature;
+    auto it = m_snippetParticleShaderCache.find(cacheKey);
+    if (it != m_snippetParticleShaderCache.end())
+        return it->second;
+    
+    auto sources = m_compositor.composeParticleShader(stack);
+    GLuint shader = ShaderCompositor::compileProgram("particle:" + signature, sources);
+    m_snippetParticleShaderCache[cacheKey] = shader;
+    
+    if (shader)
+        PLOG_INFO << "Compiled snippet particle shader for stack: " << signature;
+    else
+        PLOG_ERROR << "Failed to compile snippet particle shader for: " << signature;
+    
+    return shader;
+}
+
+void PreviewEffectSystem::uploadGlyphSnippetUniforms(GLuint shader, const EffectDef* effect, float time) {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
     
-    // Upload each effect's namespaced snippet uniforms
-    for (const auto* fx : effect->effectStack) {
-        if (fx) {
-            fx->uploadSnippetUniforms(shader, time);
+    if (effect->effectStack.size() > 1) {
+        for (auto* fx : effect->effectStack) {
+            if (fx) fx->uploadGlyphSnippetUniforms(shader, time);
         }
+    } else if (effect->effect) {
+        effect->effect->uploadGlyphSnippetUniforms(shader, time);
+    }
+}
+
+void PreviewEffectSystem::uploadParticleSnippetUniforms(GLuint shader, const EffectDef* effect, float time) {
+    glUniform1f(glGetUniformLocation(shader, "uTime"), time);
+    
+    if (effect->effectStack.size() > 1) {
+        for (auto* fx : effect->effectStack) {
+            if (fx) fx->uploadParticleSnippetUniforms(shader, time);
+        }
+    } else if (effect->effect) {
+        effect->effect->uploadParticleSnippetUniforms(shader, time);
     }
 }
 

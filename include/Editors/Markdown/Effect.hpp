@@ -22,51 +22,7 @@ struct EffectCapabilities {
 };
 
 // ────────────────────────────────────────────────────────────────────
-// Shader Sources - GLSL source code for an effect's shaders
-// ────────────────────────────────────────────────────────────────────
-
-struct ShaderSources {
-    std::string vertex;
-    std::string fragment;
-    std::string geometry;  // Optional
-    
-    bool hasGeometry() const { return !geometry.empty(); }
-    bool isValid() const { return !vertex.empty() && !fragment.empty(); }
-};
-
-// ────────────────────────────────────────────────────────────────────
-// Kernel Sources - OpenCL source code for particle physics
-// ────────────────────────────────────────────────────────────────────
-
-struct KernelSources {
-    std::string source;           // OpenCL source code
-    std::string entryPoint;       // Kernel function name (e.g., "updateFire")
-    std::string includePath;      // Path to common.cl include directory
-    
-    bool isValid() const { return !source.empty() && !entryPoint.empty(); }
-};
-
-// ────────────────────────────────────────────────────────────────────
-// Post Process Pass - single post-processing pass definition
-// ────────────────────────────────────────────────────────────────────
-
-struct PostProcessPass {
-    enum class BlendMode { Replace, Additive, Alpha };
-    
-    std::string name;             // For debugging
-    std::string fragmentShader;   // Fragment shader source
-    std::string vertexShader;     // Vertex shader source (optional, uses fullscreen quad)
-    BlendMode blendMode = BlendMode::Replace;
-    float downsampleFactor = 1.0f;  // 0.5 = half resolution
-    int iterations = 1;             // For multi-pass blur
-    std::unordered_map<std::string, float> uniforms;  // Uniform values
-    
-    bool isValid() const { return !fragmentShader.empty(); }
-};
-
-// ────────────────────────────────────────────────────────────────────
 // Emission Config - particle emission parameters (for Effect interface)
-// Named differently to avoid conflict with PreviewEffectSystem::EmissionConfig
 // ────────────────────────────────────────────────────────────────────
 
 struct EffectEmissionConfig {
@@ -98,19 +54,105 @@ struct KernelParams {
     uint32_t particleCount;
 };
 
+// ════════════════════════════════════════════════════════════════════
+// SNIPPET COMPOSITION SYSTEM
+// All shader/kernel code expressed as composable snippets
+// ════════════════════════════════════════════════════════════════════
+
 // ────────────────────────────────────────────────────────────────────
-// Effect Snippet - composable shader fragments for effect stacking
+// ShaderSnippet - a reusable fragment of GLSL code for one stage
 // ────────────────────────────────────────────────────────────────────
 
-struct EffectSnippet {
+struct ShaderSnippet {
     std::string uniformDecls;     // Namespaced uniform declarations
+    std::string varyingDecls;     // Extra in/out varying declarations
     std::string helpers;          // Namespaced helper functions
-    std::string vertexCode;       // Code injected into vertex main() to modify `pos`
-    std::string fragmentCode;     // Code injected into fragment main() to modify `color`
+    std::string code;             // Code injected into main() body
 
-    bool hasVertex() const { return !vertexCode.empty(); }
-    bool hasFragment() const { return !fragmentCode.empty(); }
-    bool empty() const { return !hasVertex() && !hasFragment(); }
+    bool hasCode() const { return !code.empty(); }
+    bool empty() const { return uniformDecls.empty() && varyingDecls.empty()
+                             && helpers.empty() && code.empty(); }
+};
+
+// ────────────────────────────────────────────────────────────────────
+// GlyphSnippets - all shader stages for glyph (text) rendering
+// ────────────────────────────────────────────────────────────────────
+
+struct GlyphSnippets {
+    ShaderSnippet vertex;         // Modifies `vec3 pos` in vertex main()
+    ShaderSnippet fragment;       // Modifies `vec4 color`, has `float alpha`
+    ShaderSnippet geometry;       // Geometry processing (optional)
+    ShaderSnippet tessControl;    // Tessellation control (optional)
+    ShaderSnippet tessEval;       // Tessellation evaluation (optional)
+
+    bool empty() const {
+        return vertex.empty() && fragment.empty() && geometry.empty()
+            && tessControl.empty() && tessEval.empty();
+    }
+    bool hasGeometry() const { return geometry.hasCode(); }
+    bool hasTessellation() const { return tessControl.hasCode() || tessEval.hasCode(); }
+};
+
+// ────────────────────────────────────────────────────────────────────
+// ParticleSnippets - all shader stages for particle rendering
+// ────────────────────────────────────────────────────────────────────
+
+struct ParticleSnippets {
+    ShaderSnippet vertex;         // Modifies particle vertex pass-through
+    ShaderSnippet fragment;       // Modifies `float alpha`, `vec4 color`; has `float dist`, `vec2 uv`
+    ShaderSnippet geometry;       // Modifies `vec4 color`, `float size`, `float life` before quad emit
+    ShaderSnippet tessControl;    // Tessellation control (optional)
+    ShaderSnippet tessEval;       // Tessellation evaluation (optional)
+
+    bool empty() const {
+        return vertex.empty() && fragment.empty() && geometry.empty()
+            && tessControl.empty() && tessEval.empty();
+    }
+    bool hasGeometry() const { return geometry.hasCode(); }
+    bool hasTessellation() const { return tessControl.hasCode() || tessEval.hasCode(); }
+};
+
+// ────────────────────────────────────────────────────────────────────
+// KernelSnippet - composable OpenCL particle behavior
+// ────────────────────────────────────────────────────────────────────
+
+struct KernelSnippet {
+    // Extra kernel args as comma-prefixed string
+    // e.g. ",\n    const float2 gravity,\n    const float turbulence"
+    std::string argDecls;
+
+    // Helper functions (e.g. custom noise, color utils)
+    std::string helpers;
+
+    // Main behavior code — has access to: p (Particle), deltaTime, scrollY,
+    // maskHeight, time, gid, rngState, newPos, p.vel, p.life, p.color, p.size
+    std::string behaviorCode;
+
+    // Custom collision response (optional).
+    // Has access to: p, newPos, maskNorm (float2 doc-space normal), damping (float).
+    // If empty, the default bounce is used: reflect + damping, newPos = p.pos + p.vel * deltaTime
+    std::string collisionResponse;
+
+    // Bounce damping factor used by the default collision response
+    float defaultDamping = 0.3f;
+
+    bool empty() const { return behaviorCode.empty(); }
+};
+
+// ────────────────────────────────────────────────────────────────────
+// PostProcessSnippet - a single screen-space post-processing pass
+// ────────────────────────────────────────────────────────────────────
+
+struct PostProcessSnippet {
+    enum class BlendMode { Replace, Additive, Alpha };
+
+    std::string name;                 // For debugging / cache key
+    ShaderSnippet fragment;           // Modifies `vec4 color`; has `vec2 uv`, `sampler2D uInputTex`
+    BlendMode blendMode = BlendMode::Replace;
+    float downsampleFactor = 1.0f;    // 0.5 = half resolution
+    int iterations = 1;               // For multi-pass effects (e.g., blur)
+
+    bool empty() const { return fragment.empty(); }
 };
 
 // ────────────────────────────────────────────────────────────────────
@@ -129,36 +171,33 @@ public:
     // ── Capabilities ──
     virtual EffectCapabilities getCapabilities() const = 0;
     
-    // ── Shader Sources ──
-    // Return empty ShaderSources if not applicable
-    virtual ShaderSources getGlyphShaderSources() const { return {}; }
-    virtual ShaderSources getParticleShaderSources() const { return {}; }
-    
-    // ── Composable Snippets (for effect stacking) ──
-    virtual EffectSnippet getSnippet() const { return {}; }
-    virtual void uploadSnippetUniforms(GLuint shader, float time) const {}
-    
-    // ── Post-Processing ──
-    virtual std::vector<PostProcessPass> getPostProcessPasses() const { return {}; }
-    
-    // ── Particle Physics ──
-    virtual KernelSources getKernelSources() const { return {}; }
+    // ══════════════════════════════════════════════════════════════
+    // SNIPPET API (composable, all stages)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── Glyph (text) rendering snippets ──
+    virtual GlyphSnippets getGlyphSnippets() const { return {}; }
+    virtual void uploadGlyphSnippetUniforms(GLuint shader, float time) const {}
+
+    // ── Particle rendering snippets ──
+    virtual ParticleSnippets getParticleSnippets() const { return {}; }
+    virtual void uploadParticleSnippetUniforms(GLuint shader, float time) const {}
+
+    // ── Particle physics kernel snippet ──
+    virtual KernelSnippet getKernelSnippet() const { return {}; }
+
+    // Bind effect-specific kernel args starting at firstArgIndex.
+    // Standard args (particles, collision, dt, scrollY, maskH, time, count)
+    // are already bound at indices 0-6.
+    virtual void bindKernelSnippetParams(cl_kernel kernel, const KernelParams& params,
+                                         int firstArgIndex) const {}
+
+    // ── Post-processing snippet passes ──
+    virtual std::vector<PostProcessSnippet> getPostProcessSnippets() const { return {}; }
+    virtual void uploadPostProcessSnippetUniforms(GLuint shader, int passIndex, float time) const {}
+
+    // ── Particle emission config ──
     virtual EffectEmissionConfig getEmissionConfig() const { return {}; }
-    
-    // ── Parameter Binding ──
-    // Called before rendering glyphs with this effect
-    virtual void uploadGlyphUniforms(GLuint shader, float time) const {}
-    
-    // Called before rendering particles for this effect
-    virtual void uploadParticleUniforms(GLuint shader, float time) const {}
-    
-    // Called before dispatching particle kernel - set effect-specific args
-    // Args 0-6 are already set (particles, collision, dt, scrollY, maskH, time, count)
-    // Start binding at argIndex 7
-    virtual void bindKernelParams(cl_kernel kernel, const KernelParams& params) const {}
-    
-    // Called for post-process passes
-    virtual void uploadPostProcessUniforms(GLuint shader, int passIndex, float time) const {}
     
     // ── Effect Parameters ──
     // Common parameters that can be set at runtime

@@ -614,9 +614,12 @@ void MarkdownPreview::updateCollisionCLImage() {
         // Update existing image with new CPU data
         size_t origin[3] = {0, 0, 0};
         size_t region[3] = {static_cast<size_t>(w), static_cast<size_t>(h), 1};
-        clEnqueueWriteImage(q, m_clCollisionImage, CL_FALSE,
+        cl_int writeErr = clEnqueueWriteImage(q, m_clCollisionImage, CL_FALSE,
                             origin, region, static_cast<size_t>(w), 0,
                             data, 0, nullptr, nullptr);
+        if (writeErr != CL_SUCCESS) {
+            PLOG_WARNING << "Failed to update CL collision image: " << writeErr;
+        }
     }
 }
 
@@ -1333,7 +1336,8 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         params.maskHeight = maskH;
         params.time = time;
         params.particleCount = count;
-        def->effect->bindKernelParams(kernel, params);
+        
+        def->effect->bindKernelSnippetParams(kernel, params, 7);
         
         err = clEnqueueNDRangeKernel(q, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
@@ -1421,7 +1425,7 @@ void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
         glUniformMatrix4fv(glGetUniformLocation(shader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
         
         if (def && def->effect) {
-            def->effect->uploadParticleUniforms(shader, time);
+            def->effect->uploadParticleSnippetUniforms(shader, time);
         }
         
         // Upload index buffer and draw this behavior group

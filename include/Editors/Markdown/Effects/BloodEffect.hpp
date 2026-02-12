@@ -13,12 +13,14 @@ public:
     std::unique_ptr<Effect> clone() const override { return std::make_unique<BloodEffect>(*this); }
     
     EffectCapabilities getCapabilities() const override;
-    KernelSources getKernelSources() const override;
-    ShaderSources getParticleShaderSources() const override;
     EffectEmissionConfig getEmissionConfig() const override;
     
-    void uploadParticleUniforms(GLuint shader, float time) const override;
-    void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
+    // Snippet API
+    ParticleSnippets getParticleSnippets() const override;
+    void uploadParticleSnippetUniforms(GLuint shader, float time) const override;
+    KernelSnippet getKernelSnippet() const override;
+    void bindKernelSnippetParams(cl_kernel kernel, const KernelParams& params,
+                                  int firstArgIndex) const override;
     
     // Blood-specific parameters
     std::array<float, 2> gravity = {0.0f, 80.0f};  // Falls down
