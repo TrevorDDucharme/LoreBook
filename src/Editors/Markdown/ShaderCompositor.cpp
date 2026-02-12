@@ -636,12 +636,17 @@ ComposedKernelSource ShaderCompositor::composeKernel(const std::vector<Effect*>&
         src << "    float2 newPos = p.pos + p.vel * deltaTime;\n\n";
 
         // Collision check
-        src << "    // Two-point collision check\n"
+        src << "    // Collision detection against glyph collision mask\n"
             << "    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);\n"
             << "    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);\n"
             << "    float newCol = sampleCollision(collision, collisionSampler, newMaskPos);\n"
             << "    float curCol = sampleCollision(collision, collisionSampler, curMaskPos);\n\n"
-            << "    if (newCol > 0.5f && curCol <= 0.5f) {\n"
+            // Case 1: entering solid from free-space (standard collision)
+            // Case 2: new position in solid even if current is too
+            //         (skip for freshly spawned particles still inside birth glyph)
+            << "    float lifeElapsed = p.maxLife - p.life;\n"
+            << "    bool freshlySpawned = (lifeElapsed < 0.15f) && (curCol > 0.5f);\n"
+            << "    if (newCol > 0.5f && !freshlySpawned) {\n"
             << "        float2 maskNorm = surfaceNormal(collision, collisionSampler, newMaskPos);\n"
             << "        float2 docNorm = (float2)(maskNorm.x, -maskNorm.y);\n";
 
@@ -649,7 +654,7 @@ ComposedKernelSource ShaderCompositor::composeKernel(const std::vector<Effect*>&
             src << "        " << info.snippet.collisionResponse << "\n";
         } else {
             // Default bounce
-            src << "        p.vel = reflect(p.vel, docNorm) * "
+            src << "        p.vel = reflect_f2(p.vel, docNorm) * "
                 << info.snippet.defaultDamping << "f;\n"
                 << "        newPos = p.pos + p.vel * deltaTime;\n";
         }

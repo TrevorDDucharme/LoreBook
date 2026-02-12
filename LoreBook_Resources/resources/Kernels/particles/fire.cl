@@ -51,7 +51,7 @@ __kernel void updateFire(
         // Entering solid from outside — deflect along surface
         float2 maskNorm = surfaceNormal(collision, collisionSampler, newMaskPos);
         float2 docNorm = (float2)(maskNorm.x, -maskNorm.y);
-        p.vel = reflect(p.vel, docNorm) * 0.3f;
+        p.vel = reflect_f2(p.vel, docNorm) * 0.3f;
         newPos = p.pos; // Don't penetrate
     }
     // If both inside (just emitted) or both outside — allow movement

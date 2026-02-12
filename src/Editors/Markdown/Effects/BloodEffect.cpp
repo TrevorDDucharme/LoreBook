@@ -84,7 +84,7 @@ KernelSnippet BloodEffect::getKernelSnippet() const {
 )";
     // Custom collision: splat (expand, slow down, die faster)
     ks.collisionResponse = R"(
-    p.vel = reflect(p.vel, maskNorm) * 0.15f;
+    p.vel = reflect_f2(p.vel, maskNorm) * 0.15f;
     newPos = p.pos + p.vel * deltaTime;
     p.size = min(p.size * splatSize, 8.0f);
     p.life -= deltaTime * 3.0f;

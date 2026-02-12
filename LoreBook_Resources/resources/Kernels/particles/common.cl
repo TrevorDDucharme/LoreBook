@@ -71,6 +71,11 @@ float2 surfaceNormal(__read_only image2d_t collision, sampler_t sampler, float2 
     return len > 0.001f ? grad / len : (float2)(0, -1);
 }
 
+// OpenCL C does not provide GLSL's reflect(). Implement for float2.
+float2 reflect_f2(float2 I, float2 N) {
+    return I - 2.0f * dot(N, I) * N;
+}
+
 // Common sampler (nearest, clamp to edge)
 __constant sampler_t collisionSampler = CLK_NORMALIZED_COORDS_FALSE | 
                                         CLK_ADDRESS_CLAMP_TO_EDGE | 

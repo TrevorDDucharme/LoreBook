@@ -265,7 +265,7 @@ void PreviewEffectSystem::registerEffectAs(const std::string& name, Effect* effe
             case EffectEmissionConfig::Shape::Line:         def.emission.shape = EmissionConfig::Line; break;
             case EffectEmissionConfig::Shape::GlyphAlpha:   def.emission.shape = EmissionConfig::GlyphAlpha; break;
             case EffectEmissionConfig::Shape::GlyphOutline: def.emission.shape = EmissionConfig::GlyphAlpha; break;
-            case EffectEmissionConfig::Shape::ScreenTop:    def.emission.shape = EmissionConfig::Box; break;
+            case EffectEmissionConfig::Shape::ScreenTop:    def.emission.shape = EmissionConfig::GlyphAlpha; break;
             case EffectEmissionConfig::Shape::Box:          def.emission.shape = EmissionConfig::Box; break;
         }
     }
