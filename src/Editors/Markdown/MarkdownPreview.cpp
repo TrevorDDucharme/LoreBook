@@ -335,6 +335,10 @@ void MarkdownPreview::cleanup() {
         glDeleteBuffers(1, &m_particleVBO);
         m_particleVBO = 0;
     }
+    if (m_particleEBO) {
+        glDeleteBuffers(1, &m_particleEBO);
+        m_particleEBO = 0;
+    }
     if (m_clParticleBuffer) {
         OpenCLContext::get().releaseMem(m_clParticleBuffer);
         m_clParticleBuffer = nullptr;
@@ -531,6 +535,7 @@ void MarkdownPreview::initVAOs() {
     // Particle VAO
     glGenVertexArrays(1, &m_particleVAO);
     glGenBuffers(1, &m_particleVBO);
+    glGenBuffers(1, &m_particleEBO);
     
     glBindVertexArray(m_particleVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_particleVBO);
@@ -623,6 +628,7 @@ void MarkdownPreview::initParticleSystem() {
     // Initially, all particles are dead
     for (size_t i = 0; i < MAX_PARTICLES; ++i) {
         m_cpuParticles[i].life = 0.0f;
+        m_cpuParticles[i].maxLife = -1.0f;  // sentinel: already in dead list
         m_cpuDeadIndices[i] = static_cast<uint32_t>(i);
     }
     m_deadCount = static_cast<uint32_t>(MAX_PARTICLES);
@@ -1155,19 +1161,20 @@ void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& ba
         
         const EmissionConfig& emission = batch.effect->emission;
         
+        // Use behaviorID for accumulator index (stable across frames,
+        // unlike batchIdx which depends on unordered_map iteration order)
+        uint32_t bid = batch.effect->effect ? batch.effect->effect->getBehaviorID() : 0;
+        if (bid >= 16) bid = 0;
+        
         // Accumulate emission time
-        if (batchIdx < 16) {
-            m_emitAccumulators[batchIdx] += dt * emission.rate;
-        }
+        m_emitAccumulators[bid] += dt * emission.rate;
         
         // Emit particles based on accumulated time
-        int toEmit = static_cast<int>(m_emitAccumulators[batchIdx]);
+        int toEmit = static_cast<int>(m_emitAccumulators[bid]);
         if (toEmit <= 0) continue;
         // Cap particles emitted per batch per frame
         toEmit = std::min(toEmit, 4);
-        if (batchIdx < 16) {
-            m_emitAccumulators[batchIdx] -= toEmit;
-        }
+        m_emitAccumulators[bid] -= toEmit;
         
         // Calculate bounds of this effect batch for emission area
         glm::vec2 minPos(FLT_MAX), maxPos(-FLT_MAX);
@@ -1347,10 +1354,21 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         clReleaseMemObject(dummyImg);
     }
     
-    // 5. Mark dead particles for recycling
+    // 5. Mark dead particles for recycling (only newly-dead, using maxLife sentinel)
     for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
-        if (m_cpuParticles[i].life <= 0.0f && m_deadCount < m_cpuDeadIndices.size()) {
+        if (m_cpuParticles[i].life <= 0.0f && m_cpuParticles[i].maxLife > 0.0f
+            && m_deadCount < m_cpuDeadIndices.size()) {
             m_cpuDeadIndices[m_deadCount++] = static_cast<uint32_t>(i);
+            m_cpuParticles[i].maxLife = -1.0f;  // sentinel: already recycled
+        }
+    }
+    
+    // 5b. Build per-behaviorID index groups for per-effect rendering
+    m_particleBehaviorGroups.clear();
+    for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
+        if (m_cpuParticles[i].life > 0.0f) {
+            m_particleBehaviorGroups[m_cpuParticles[i].behaviorID].push_back(
+                static_cast<uint32_t>(i));
         }
     }
     
@@ -1363,7 +1381,7 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
 }
 
 void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
-    if (m_particleCount == 0) return;
+    if (m_particleCount == 0 || m_particleBehaviorGroups.empty()) return;
     
     // Particles should always render on top of glyphs (no depth test)
     // and use additive blending for fire/glow effects
@@ -1371,11 +1389,49 @@ void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
     glDepthMask(GL_FALSE);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // Additive blend
     
-    glUseProgram(m_particleShader);
-    glUniformMatrix4fv(glGetUniformLocation(m_particleShader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
-    
     glBindVertexArray(m_particleVAO);
-    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(m_particleCount));
+    
+    float time = static_cast<float>(glfwGetTime());
+    
+    // Build behaviorID → EffectDef* map for per-effect shader lookup
+    auto particleEffects = m_effectSystem.getParticleEffects();
+    std::unordered_map<uint32_t, EffectDef*> effectByBehavior;
+    for (auto* def : particleEffects) {
+        if (def->effect && def->effectParticleShader) {
+            uint32_t bid = def->effect->getBehaviorID();
+            if (effectByBehavior.find(bid) == effectByBehavior.end()) {
+                effectByBehavior[bid] = def;
+            }
+        }
+    }
+    
+    // Render each behavior group with its effect's particle shader
+    for (auto& [bid, indices] : m_particleBehaviorGroups) {
+        if (indices.empty()) continue;
+        
+        GLuint shader = m_particleShader;  // fallback generic shader
+        EffectDef* def = nullptr;
+        auto it = effectByBehavior.find(bid);
+        if (it != effectByBehavior.end()) {
+            shader = it->second->effectParticleShader;
+            def = it->second;
+        }
+        
+        glUseProgram(shader);
+        glUniformMatrix4fv(glGetUniformLocation(shader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
+        
+        if (def && def->effect) {
+            def->effect->uploadParticleUniforms(shader, time);
+        }
+        
+        // Upload index buffer and draw this behavior group
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_particleEBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     indices.size() * sizeof(uint32_t),
+                     indices.data(), GL_DYNAMIC_DRAW);
+        glDrawElements(GL_POINTS, static_cast<GLsizei>(indices.size()),
+                       GL_UNSIGNED_INT, nullptr);
+    }
     
     // Restore state
     glDepthMask(GL_TRUE);

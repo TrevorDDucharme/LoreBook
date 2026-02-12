@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace Markdown {
 
@@ -122,6 +123,7 @@ private:
     GLuint m_glyphVBO = 0;
     GLuint m_particleVAO = 0;
     GLuint m_particleVBO = 0;
+    GLuint m_particleEBO = 0;
     
     // ── OpenCL ──
     cl_mem m_clParticleBuffer = nullptr;
@@ -137,7 +139,8 @@ private:
     // CPU particle buffer (for CPU-side emission before GPU update)
     std::vector<Particle> m_cpuParticles;
     std::vector<uint32_t> m_cpuDeadIndices;
-    float m_emitAccumulators[16] = {0};  // Per-effect emission accumulators
+    float m_emitAccumulators[16] = {0};  // Per-effect emission accumulators (indexed by behaviorID)
+    std::unordered_map<uint32_t, std::vector<uint32_t>> m_particleBehaviorGroups;
     
     // ── State ──
     bool m_initialized = false;
