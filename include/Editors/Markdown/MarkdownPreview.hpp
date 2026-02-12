@@ -68,6 +68,7 @@ private:
     void updateParticlesGPU(float dt);
     void renderParticlesFromGPU(const glm::mat4& mvp);
     void renderOverlayWidgets(const ImVec2& origin, float scrollY);
+    void renderGlowBloom(const std::vector<EffectBatch>& batches, const glm::mat4& mvp);
     
     // Helper methods
     void uploadGlyphBatch(const std::vector<GlyphVertex>& vertices);
@@ -88,6 +89,17 @@ private:
     GLuint m_depthTex = 0;
     int m_fboWidth = 0;
     int m_fboHeight = 0;
+    
+    // ── Bloom FBOs (for glow post-process) ──
+    GLuint m_bloomFBO[2] = {0, 0};      // ping-pong FBOs for blur passes
+    GLuint m_bloomTex[2] = {0, 0};      // ping-pong color textures
+    GLuint m_bloomSrcFBO = 0;           // FBO to render glow silhouettes into
+    GLuint m_bloomSrcTex = 0;           // texture for glow silhouettes
+    GLuint m_bloomBlurShader = 0;       // Gaussian blur shader
+    GLuint m_bloomCompositeShader = 0;  // Additive compositing shader
+    GLuint m_bloomGlowShader = 0;       // Shader to render glyph as bright silhouette
+    GLuint m_quadVAO = 0;              // Full-screen quad for blur/composite
+    GLuint m_quadVBO = 0;
     
     // ── Camera (2.5D perspective) ──
     glm::mat4 m_projection;
@@ -115,7 +127,7 @@ private:
     cl_mem m_clCollisionImage = nullptr;  // CL image for collision sampling
     size_t m_particleCount = 0;
     uint32_t m_deadCount = 0;
-    static constexpr size_t MAX_PARTICLES = 100000;
+    static constexpr size_t MAX_PARTICLES = 10000;
     
     // CPU particle buffer (for CPU-side emission before GPU update)
     std::vector<Particle> m_cpuParticles;

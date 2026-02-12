@@ -270,17 +270,15 @@ out vec4 fragColor;
 void main() {
     float alpha = texture(uFontAtlas, v_uv).a;
     
-    // Pulsing glow
-    float pulse = 0.5 + 0.5 * sin(uTime * 3.0);
-    float glowStrength = clamp(uIntensity * (0.5 + 0.5 * pulse), 0.0, 1.0);
+    // Subtle pulse on the glow color
+    float pulse = 0.8 + 0.2 * sin(uTime * 3.0);
+    float strength = clamp(uIntensity * pulse, 0.0, 1.0);
     
-    // Tint the glyph color toward the glow color
-    vec3 glowColor = mix(v_color.rgb, uColor1.rgb, glowStrength);
+    // Tint text toward glow color; actual glow halo is done in bloom post-process
+    vec3 glowColor = mix(v_color.rgb, uColor1.rgb, strength * 0.7);
     
-    // Brighten within the glyph shape only — never fill transparent areas
-    float glowAlpha = alpha * (1.0 + glowStrength * 0.5);
-    
-    fragColor = vec4(glowColor, clamp(glowAlpha, 0.0, 1.0) * v_color.a);
+    // Just render the glyph — bloom pass creates the halo outside
+    fragColor = vec4(glowColor, alpha * v_color.a);
 }
 )";
 
@@ -362,9 +360,9 @@ void PreviewEffectSystem::registerBuiltinEffects() {
         fire.speed = 1.0f;
         fire.intensity = 1.0f;
         fire.hasParticles = true;
-        fire.emission.rate = 30.0f;
+        fire.emission.rate = 8.0f;
         fire.emission.velocity = {0, -80};
-        fire.emission.lifetime = 1.0f;
+        fire.emission.lifetime = 1.2f;
         fire.emission.size = 4.0f;
         registerEffect("fire", fire);
     }

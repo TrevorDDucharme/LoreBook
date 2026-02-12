@@ -63,10 +63,10 @@ struct ParticleKernel {
 struct EmissionConfig {
     enum Shape { Point, Line, Box, GlyphAlpha };
     Shape shape = GlyphAlpha;    // GlyphAlpha = emit from glyph shape
-    float rate = 50.0f;          // particles per second
+    float rate = 5.0f;           // particles per second
     glm::vec2 velocity = {0, -50};
     glm::vec2 velocityVar = {10, 20};
-    float lifetime = 1.0f;
+    float lifetime = 1.5f;
     float lifetimeVar = 0.5f;
     float size = 4.0f;
     float sizeVar = 2.0f;

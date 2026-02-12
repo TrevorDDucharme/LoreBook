@@ -130,6 +130,117 @@ void main() {
 )";
 
 // ────────────────────────────────────────────────────────────────────
+// Bloom / Glow post-processing shaders
+// ────────────────────────────────────────────────────────────────────
+
+// Renders glyph as a bright white silhouette tinted with glow color
+static const char* s_bloomGlowVert = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+
+uniform mat4 uMVP;
+
+out vec2 v_uv;
+out vec4 v_color;
+
+void main() {
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    v_uv = aUV;
+    v_color = aColor;
+}
+)";
+
+static const char* s_bloomGlowFrag = R"(
+#version 330 core
+uniform sampler2D uFontAtlas;
+uniform vec4 uColor1;
+uniform float uIntensity;
+
+in vec2 v_uv;
+in vec4 v_color;
+
+out vec4 fragColor;
+
+void main() {
+    float alpha = texture(uFontAtlas, v_uv).a;
+    // Create a bright, saturated glow source using white + tint
+    vec3 brightColor = mix(vec3(1.0), uColor1.rgb, 0.6);
+    float glowAlpha = alpha * clamp(uIntensity * 1.5, 0.0, 3.0);
+    fragColor = vec4(brightColor, glowAlpha);
+}
+)";
+
+// Gaussian blur shader (horizontal or vertical pass)
+static const char* s_bloomBlurVert = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+
+out vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    v_uv = aUV;
+}
+)";
+
+static const char* s_bloomBlurFrag = R"(
+#version 330 core
+uniform sampler2D uTexture;
+uniform vec2 uDirection;  // (1/w, 0) for horizontal, (0, 1/h) for vertical
+uniform float uRadius;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+    // 9-tap Gaussian blur with weights for sigma ~= 4
+    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    
+    vec4 result = texture(uTexture, v_uv) * weights[0];
+    
+    for (int i = 1; i < 5; ++i) {
+        vec2 offset = uDirection * float(i) * uRadius;
+        result += texture(uTexture, v_uv + offset) * weights[i];
+        result += texture(uTexture, v_uv - offset) * weights[i];
+    }
+    
+    fragColor = result;
+}
+)";
+
+// Additive composite shader (blends bloom texture onto scene)
+static const char* s_bloomCompositeVert = R"(
+#version 330 core
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+
+out vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    v_uv = aUV;
+}
+)";
+
+static const char* s_bloomCompositeFrag = R"(
+#version 330 core
+uniform sampler2D uBloom;
+uniform float uBloomStrength;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+    vec4 bloom = texture(uBloom, v_uv);
+    // Output only the bloom contribution; additive blending adds it to the scene
+    fragColor = vec4(bloom.rgb * uBloomStrength, bloom.a * uBloomStrength);
+}
+)";
+
+// ────────────────────────────────────────────────────────────────────
 // MarkdownPreview implementation
 // ────────────────────────────────────────────────────────────────────
 
@@ -227,6 +338,19 @@ void MarkdownPreview::cleanup() {
         m_clParticleBuffer = nullptr;
     }
     
+    // Cleanup bloom resources
+    for (int i = 0; i < 2; ++i) {
+        if (m_bloomFBO[i]) { glDeleteFramebuffers(1, &m_bloomFBO[i]); m_bloomFBO[i] = 0; }
+        if (m_bloomTex[i]) { glDeleteTextures(1, &m_bloomTex[i]); m_bloomTex[i] = 0; }
+    }
+    if (m_bloomSrcFBO) { glDeleteFramebuffers(1, &m_bloomSrcFBO); m_bloomSrcFBO = 0; }
+    if (m_bloomSrcTex) { glDeleteTextures(1, &m_bloomSrcTex); m_bloomSrcTex = 0; }
+    if (m_bloomBlurShader) { glDeleteProgram(m_bloomBlurShader); m_bloomBlurShader = 0; }
+    if (m_bloomCompositeShader) { glDeleteProgram(m_bloomCompositeShader); m_bloomCompositeShader = 0; }
+    if (m_bloomGlowShader) { glDeleteProgram(m_bloomGlowShader); m_bloomGlowShader = 0; }
+    if (m_quadVAO) { glDeleteVertexArrays(1, &m_quadVAO); m_quadVAO = 0; }
+    if (m_quadVBO) { glDeleteBuffers(1, &m_quadVBO); m_quadVBO = 0; }
+    
     // Clear CPU particle buffers
     m_cpuParticles.clear();
     m_cpuDeadIndices.clear();
@@ -289,6 +413,86 @@ void MarkdownPreview::initShaders() {
         glDeleteShader(vs);
         glDeleteShader(gs);
         glDeleteShader(fs);
+    }
+    
+    // Compile bloom glow shader (renders glyph silhouettes for bloom source)
+    {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &s_bloomGlowVert, nullptr);
+        glCompileShader(vs);
+        
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &s_bloomGlowFrag, nullptr);
+        glCompileShader(fs);
+        
+        m_bloomGlowShader = glCreateProgram();
+        glAttachShader(m_bloomGlowShader, vs);
+        glAttachShader(m_bloomGlowShader, fs);
+        glLinkProgram(m_bloomGlowShader);
+        
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+    }
+    
+    // Compile bloom blur shader
+    {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &s_bloomBlurVert, nullptr);
+        glCompileShader(vs);
+        
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &s_bloomBlurFrag, nullptr);
+        glCompileShader(fs);
+        
+        m_bloomBlurShader = glCreateProgram();
+        glAttachShader(m_bloomBlurShader, vs);
+        glAttachShader(m_bloomBlurShader, fs);
+        glLinkProgram(m_bloomBlurShader);
+        
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+    }
+    
+    // Compile bloom composite shader
+    {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &s_bloomCompositeVert, nullptr);
+        glCompileShader(vs);
+        
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &s_bloomCompositeFrag, nullptr);
+        glCompileShader(fs);
+        
+        m_bloomCompositeShader = glCreateProgram();
+        glAttachShader(m_bloomCompositeShader, vs);
+        glAttachShader(m_bloomCompositeShader, fs);
+        glLinkProgram(m_bloomCompositeShader);
+        
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+    }
+    
+    // Full-screen quad for bloom blur/composite
+    {
+        float quadVerts[] = {
+            // pos       uv
+            -1, -1,    0, 0,
+             1, -1,    1, 0,
+             1,  1,    1, 1,
+            -1, -1,    0, 0,
+             1,  1,    1, 1,
+            -1,  1,    0, 1,
+        };
+        glGenVertexArrays(1, &m_quadVAO);
+        glGenBuffers(1, &m_quadVBO);
+        glBindVertexArray(m_quadVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+        glBindVertexArray(0);
     }
 }
 
@@ -450,6 +654,50 @@ void MarkdownPreview::ensureFBO(int width, int height) {
     
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     
+    // Bloom FBOs at half resolution for performance
+    int bloomW = allocWidth / 2;
+    int bloomH = allocHeight / 2;
+    
+    // Cleanup old bloom resources
+    for (int i = 0; i < 2; ++i) {
+        if (m_bloomFBO[i]) { glDeleteFramebuffers(1, &m_bloomFBO[i]); m_bloomFBO[i] = 0; }
+        if (m_bloomTex[i]) { glDeleteTextures(1, &m_bloomTex[i]); m_bloomTex[i] = 0; }
+    }
+    if (m_bloomSrcFBO) { glDeleteFramebuffers(1, &m_bloomSrcFBO); m_bloomSrcFBO = 0; }
+    if (m_bloomSrcTex) { glDeleteTextures(1, &m_bloomSrcTex); m_bloomSrcTex = 0; }
+    
+    // Create bloom source FBO (full res — glow silhouettes rendered here)
+    glGenTextures(1, &m_bloomSrcTex);
+    glBindTexture(GL_TEXTURE_2D, m_bloomSrcTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, allocWidth, allocHeight, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    glGenFramebuffers(1, &m_bloomSrcFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomSrcFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomSrcTex, 0);
+    // Share depth buffer from main FBO for correct depth testing
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, m_depthTex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    
+    // Create ping-pong FBOs for blur (half res)
+    for (int i = 0; i < 2; ++i) {
+        glGenTextures(1, &m_bloomTex[i]);
+        glBindTexture(GL_TEXTURE_2D, m_bloomTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bloomW, bloomH, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        
+        glGenFramebuffers(1, &m_bloomFBO[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    
     // Resize collision mask to allocated size
     m_collisionMask.resize(allocWidth, allocHeight);
 }
@@ -570,7 +818,10 @@ ImVec2 MarkdownPreview::render() {
     // 13. Render particles
     renderParticlesFromGPU(mvp);
     
-    // 14. Restore ALL GL state
+    // 14. Glow bloom post-process
+    renderGlowBloom(batches, mvp);
+    
+    // 15. Restore ALL GL state
     glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
     glUseProgram(prevProgram);
@@ -692,6 +943,127 @@ void MarkdownPreview::uploadGlyphBatch(const std::vector<GlyphVertex>& vertices)
                  vertices.data(), GL_DYNAMIC_DRAW);
 }
 
+void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, const glm::mat4& mvp) {
+    if (!m_bloomGlowShader || !m_bloomBlurShader || !m_bloomCompositeShader ||
+        !m_bloomSrcFBO || !m_quadVAO || m_fboWidth <= 0 || m_fboHeight <= 0) {
+        return;
+    }
+    
+    // Check if any batches have Glow shader type
+    bool hasGlow = false;
+    for (const auto& batch : batches) {
+        if (!batch.effect) continue;
+        EffectShaderType st = batch.effect->shaderType;
+        if (st == EffectShaderType::Glow) { hasGlow = true; break; }
+        // Also check composite effects where the frag type is Glow
+        if (batch.effect->name.rfind("__composite_", 0) == 0) {
+            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
+            if (fragType == EffectShaderType::Glow) { hasGlow = true; break; }
+        }
+    }
+    if (!hasGlow) return;
+    
+    float time = static_cast<float>(glfwGetTime());
+    
+    // === Pass 1: Render glow glyph silhouettes to bloom source FBO ===
+    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomSrcFBO);
+    glViewport(0, 0, m_fboWidth, m_fboHeight);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    
+    glUseProgram(m_bloomGlowShader);
+    glUniformMatrix4fv(glGetUniformLocation(m_bloomGlowShader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
+    glUniform1i(glGetUniformLocation(m_bloomGlowShader, "uFontAtlas"), 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_fontAtlasTexture);
+    
+    for (const auto& batch : batches) {
+        if (!batch.effect || batch.vertices.empty()) continue;
+        
+        bool isGlow = (batch.effect->shaderType == EffectShaderType::Glow);
+        if (!isGlow && batch.effect->name.rfind("__composite_", 0) == 0) {
+            EffectShaderType fragType = static_cast<EffectShaderType>(batch.effect->customShaderProgram);
+            isGlow = (fragType == EffectShaderType::Glow);
+        }
+        if (!isGlow) continue;
+        
+        glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &batch.effect->color1[0]);
+        glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), batch.effect->intensity);
+        
+        uploadGlyphBatch(batch.vertices);
+        glBindVertexArray(m_glyphVAO);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(batch.vertices.size()));
+    }
+    
+    // === Pass 2: Downsample bloom source to half-res ping texture ===
+    int bloomW = m_fboWidth / 2;
+    int bloomH = m_fboHeight / 2;
+    
+    // Blit/downsample bloom source -> bloomTex[0] via blur shader with zero radius
+    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+    glViewport(0, 0, bloomW, bloomH);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND);
+    
+    glUseProgram(m_bloomBlurShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_bloomSrcTex);
+    glUniform1i(glGetUniformLocation(m_bloomBlurShader, "uTexture"), 0);
+    glUniform2f(glGetUniformLocation(m_bloomBlurShader, "uDirection"), 0, 0);
+    glUniform1f(glGetUniformLocation(m_bloomBlurShader, "uRadius"), 0);
+    
+    glBindVertexArray(m_quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    
+    // === Pass 3 & 4: Two-pass Gaussian blur (horizontal + vertical), repeated for wider glow ===
+    int blurPasses = 3; // Multiple passes for a very wide, soft glow
+    for (int pass = 0; pass < blurPasses; ++pass) {
+        // Horizontal blur: bloomTex[0] -> bloomFBO[1]
+        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]);
+        glViewport(0, 0, bloomW, bloomH);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
+        glUniform1i(glGetUniformLocation(m_bloomBlurShader, "uTexture"), 0);
+        glUniform2f(glGetUniformLocation(m_bloomBlurShader, "uDirection"), 1.0f / bloomW, 0);
+        glUniform1f(glGetUniformLocation(m_bloomBlurShader, "uRadius"), 2.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        
+        // Vertical blur: bloomTex[1] -> bloomFBO[0]
+        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+        glViewport(0, 0, bloomW, bloomH);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
+        glUniform2f(glGetUniformLocation(m_bloomBlurShader, "uDirection"), 0, 1.0f / bloomH);
+        glUniform1f(glGetUniformLocation(m_bloomBlurShader, "uRadius"), 2.0f);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    
+    // === Pass 5: Composite blurred bloom onto main scene FBO ===
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+    glViewport(0, 0, m_fboWidth, m_fboHeight);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE); // Additive blend
+    glDisable(GL_DEPTH_TEST);
+    
+    glUseProgram(m_bloomCompositeShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_bloomTex[0]);
+    glUniform1i(glGetUniformLocation(m_bloomCompositeShader, "uBloom"), 0);
+    glUniform1f(glGetUniformLocation(m_bloomCompositeShader, "uBloomStrength"), 1.0f);
+    
+    // Draw fullscreen quad — additive blend adds bloom glow halo onto the scene
+    glBindVertexArray(m_quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    
+    // Restore blend mode
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_DEPTH_TEST);
+    glActiveTexture(GL_TEXTURE0); // Reset active texture unit
+}
+
 void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
     // TODO: Render images, model viewers, etc.
 }
@@ -717,6 +1089,8 @@ void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& ba
         // Emit particles based on accumulated time
         int toEmit = static_cast<int>(m_emitAccumulators[batchIdx]);
         if (toEmit <= 0) continue;
+        // Cap particles emitted per batch per frame
+        toEmit = std::min(toEmit, 4);
         if (batchIdx < 16) {
             m_emitAccumulators[batchIdx] -= toEmit;
         }
