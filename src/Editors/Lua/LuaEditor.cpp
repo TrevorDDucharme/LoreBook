@@ -20,9 +20,9 @@
 #include <imgui_internal.h>
 
 using namespace Lua;
-using Editors::EditorTab;
 using Editors::CompletionItem;
 using Editors::EditorState;
+using Editors::EditorTab;
 
 LuaEditor::LuaEditor()
 {
@@ -188,11 +188,11 @@ void LuaEditor::updateFileWatcher()
     for (const auto &cp : classPaths)
         if (std::filesystem::exists(cp) && std::filesystem::is_directory(cp))
             watchDirs.push_back(cp);
-        if (!watchDirs.empty())
-        {
-            for (const auto &p : watchDirs)
-                programStructure.startWatching(p);
-        }
+    if (!watchDirs.empty())
+    {
+        for (const auto &p : watchDirs)
+            programStructure.startWatching(p);
+    }
 }
 void LuaEditor::saveActiveTab()
 {
@@ -226,18 +226,38 @@ void LuaEditor::saveActiveTab()
 void LuaEditor::updateCompletions()
 {
     completionItems.clear();
-    if (editorState.cursorLine >= editorState.lines.size()) return;
+    if (editorState.cursorLine >= editorState.lines.size())
+        return;
     std::string line = editorState.lines[editorState.cursorLine];
-    if (editorState.cursorColumn == 0) return;
+    if (editorState.cursorColumn == 0)
+        return;
 
     updateLiveProgramStructureForAllTabs();
     std::string before = line.substr(0, editorState.cursorColumn);
     size_t lastDot = before.find_last_of('.');
-    bool qualified = false; std::string objectName, prefix;
-    if (lastDot != std::string::npos) { qualified = true; size_t objStart = lastDot; while (objStart>0 && (std::isalnum(before[objStart-1])||before[objStart-1]=='_')) objStart--; objectName = before.substr(objStart, lastDot-objStart); prefix = before.substr(lastDot+1); }
-    else { size_t wordStart = editorState.cursorColumn; while (wordStart>0 && (std::isalnum(line[wordStart-1])||line[wordStart-1]=='_')) wordStart--; if (wordStart==editorState.cursorColumn) return; prefix = line.substr(wordStart, editorState.cursorColumn-wordStart); }
+    bool qualified = false;
+    std::string objectName, prefix;
+    if (lastDot != std::string::npos)
+    {
+        qualified = true;
+        size_t objStart = lastDot;
+        while (objStart > 0 && (std::isalnum(before[objStart - 1]) || before[objStart - 1] == '_'))
+            objStart--;
+        objectName = before.substr(objStart, lastDot - objStart);
+        prefix = before.substr(lastDot + 1);
+    }
+    else
+    {
+        size_t wordStart = editorState.cursorColumn;
+        while (wordStart > 0 && (std::isalnum(line[wordStart - 1]) || line[wordStart - 1] == '_'))
+            wordStart--;
+        if (wordStart == editorState.cursorColumn)
+            return;
+        prefix = line.substr(wordStart, editorState.cursorColumn - wordStart);
+    }
     generateContextAwareCompletions(prefix, qualified, objectName);
-    showCompletions = !completionItems.empty(); selectedCompletion = 0;
+    showCompletions = !completionItems.empty();
+    selectedCompletion = 0;
     if (showCompletions)
     {
         completionOriginLine = editorState.cursorLine;
@@ -248,59 +268,185 @@ void LuaEditor::updateCompletions()
 void LuaEditor::updateSyntaxErrors()
 {
     syntaxErrors.clear();
-    int paren=0, brace=0, bracket=0; bool inString=false; bool inSingle=false; bool inMulti=false;
-    for (size_t ln=0; ln<editorState.lines.size(); ++ln)
+    int paren = 0, brace = 0, bracket = 0;
+    bool inString = false;
+    bool inSingle = false;
+    bool inMulti = false;
+    for (size_t ln = 0; ln < editorState.lines.size(); ++ln)
     {
         const std::string &l = editorState.lines[ln];
         inSingle = false;
-        for (size_t c=0; c<l.size(); ++c)
+        for (size_t c = 0; c < l.size(); ++c)
         {
-            char ch = l[c]; char next = (c+1<l.size()?l[c+1]:'\0'); char prev = (c>0?l[c-1]:'\0');
+            char ch = l[c];
+            char next = (c + 1 < l.size() ? l[c + 1] : '\0');
+            char prev = (c > 0 ? l[c - 1] : '\0');
             if (!inString && !inSingle && !inMulti)
             {
-                if (ch=='-' && next=='-') { inSingle=true; c++; continue; }
-                if (ch=='[' && next=='[') { inMulti=true; c++; continue; }
+                if (ch == '-' && next == '-')
+                {
+                    inSingle = true;
+                    c++;
+                    continue;
+                }
+                if (ch == '[' && next == '[')
+                {
+                    inMulti = true;
+                    c++;
+                    continue;
+                }
             }
-            if (inMulti) { if (ch==']' && next==']') { inMulti=false; c++; } continue; }
-            if (inSingle) continue;
-            if (!inString && ch=='"' && prev!='\\') { inString=true; continue; }
-            else if (inString && ch=='"' && prev!='\\') { inString=false; continue; }
-            if (inString) continue;
-            switch (ch) { case '(' : paren++; break; case ')' : paren--; if (paren<0){ syntaxErrors.emplace_back(static_cast<int>(ln+1), static_cast<int>(c+1), "Unmatched closing parenthesis"); paren=0;} break; case '{': brace++; break; case '}': brace--; if (brace<0){ syntaxErrors.emplace_back(static_cast<int>(ln+1), static_cast<int>(c+1), "Unmatched closing brace"); brace=0;} break; case '[': bracket++; break; case ']': bracket--; if (bracket<0){ syntaxErrors.emplace_back(static_cast<int>(ln+1), static_cast<int>(c+1), "Unmatched closing bracket"); bracket=0;} break; }
+            if (inMulti)
+            {
+                if (ch == ']' && next == ']')
+                {
+                    inMulti = false;
+                    c++;
+                }
+                continue;
+            }
+            if (inSingle)
+                continue;
+            if (!inString && ch == '"' && prev != '\\')
+            {
+                inString = true;
+                continue;
+            }
+            else if (inString && ch == '"' && prev != '\\')
+            {
+                inString = false;
+                continue;
+            }
+            if (inString)
+                continue;
+            switch (ch)
+            {
+            case '(':
+                paren++;
+                break;
+            case ')':
+                paren--;
+                if (paren < 0)
+                {
+                    syntaxErrors.emplace_back(static_cast<int>(ln + 1), static_cast<int>(c + 1), "Unmatched closing parenthesis");
+                    paren = 0;
+                }
+                break;
+            case '{':
+                brace++;
+                break;
+            case '}':
+                brace--;
+                if (brace < 0)
+                {
+                    syntaxErrors.emplace_back(static_cast<int>(ln + 1), static_cast<int>(c + 1), "Unmatched closing brace");
+                    brace = 0;
+                }
+                break;
+            case '[':
+                bracket++;
+                break;
+            case ']':
+                bracket--;
+                if (bracket < 0)
+                {
+                    syntaxErrors.emplace_back(static_cast<int>(ln + 1), static_cast<int>(c + 1), "Unmatched closing bracket");
+                    bracket = 0;
+                }
+                break;
+            }
         }
     }
-    if (paren>0) syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed parenthesis");
-    if (brace>0) syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed brace");
-    if (bracket>0) syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed bracket");
+    if (paren > 0)
+        syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed parenthesis");
+    if (brace > 0)
+        syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed brace");
+    if (bracket > 0)
+        syntaxErrors.emplace_back(static_cast<int>(editorState.lines.size()), 1, "Unclosed bracket");
 }
 // --- Rendering helpers adapted from JavaEditor ---
 
 void LuaEditor::drawLiveConsole()
 {
     ImVec2 avail = ImGui::GetContentRegionAvail();
-    ImGui::Text("Live Lua Console"); ImGui::SameLine(); ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f),"(Enter Lua expressions to execute)"); ImGui::Separator();
-    ImGui::Text("Output:"); ImGui::BeginChild("LiveConsoleOutput", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing()*4), true, ImGuiWindowFlags_HorizontalScrollbar);
-    if (!liveConsoleOutput.empty()) ImGui::TextWrapped("%s", liveConsoleOutput.c_str()); else { ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150,150,150,255)); ImGui::Text("Enter Lua expressions to see results..."); ImGui::PopStyleColor(); }
-    if (ImGui::GetScrollY()>=ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
+    ImGui::Text("Live Lua Console");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(Enter Lua expressions to execute)");
+    ImGui::Separator();
+    ImGui::Text("Output:");
+    ImGui::BeginChild("LiveConsoleOutput", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 4), true, ImGuiWindowFlags_HorizontalScrollbar);
+    if (!liveConsoleOutput.empty())
+        ImGui::TextWrapped("%s", liveConsoleOutput.c_str());
+    else
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(150, 150, 150, 255));
+        ImGui::Text("Enter Lua expressions to see results...");
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+        ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
-    ImGui::SameLine(); ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 260);
-    if (ImGui::Button("Show API Docs", ImVec2(120, 0))) showDocViewer = !showDocViewer;
-    if (showDocViewer) drawClassInvestigator();
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - 260);
+    if (ImGui::Button("Show API Docs", ImVec2(120, 0)))
+        showDocViewer = !showDocViewer;
+    if (showDocViewer)
+        drawClassInvestigator();
 
-    ImGui::Text("Lua Expression:"); ImGui::PushItemWidth(-180);
-    bool inputChanged = ImGui::InputTextMultiline("##LiveConsoleInput", &liveConsoleInput, ImVec2(0, ImGui::GetTextLineHeightWithSpacing()*2), ImGuiInputTextFlags_EnterReturnsTrue);
-    ImGui::PopItemWidth(); ImGui::SameLine(); ImGui::BeginGroup(); bool shouldExecute = (ImGui::Button("Execute", ImVec2(80,0)) || inputChanged) && !liveConsoleInput.empty(); if (shouldExecute) { std::string result = executeLuaCode(liveConsoleInput); liveConsoleOutput += "Input: "+liveConsoleInput+"\n"; liveConsoleOutput += "Result: "+result+"\n\n"; liveConsoleHistory.push_back(liveConsoleInput); historyIndex = liveConsoleHistory.size(); liveConsoleInput.clear(); } if (ImGui::Button("Clear", ImVec2(80,0))) { liveConsoleOutput.clear(); liveConsoleInput.clear(); } ImGui::EndGroup(); if (!liveConsoleHistory.empty()) ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1.0f), "Use Up/Down arrows to navigate history (%zu items)", liveConsoleHistory.size()); if (ImGui::IsItemFocused() && !liveConsoleHistory.empty()) { if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && historyIndex>0) { historyIndex--; liveConsoleInput = liveConsoleHistory[historyIndex]; } else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && historyIndex < static_cast<int>(liveConsoleHistory.size())-1) { historyIndex++; liveConsoleInput = liveConsoleHistory[historyIndex]; } }
+    ImGui::Text("Lua Expression:");
+    ImGui::PushItemWidth(-180);
+    bool inputChanged = ImGui::InputTextMultiline("##LiveConsoleInput", &liveConsoleInput, ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 2), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    bool shouldExecute = (ImGui::Button("Execute", ImVec2(80, 0)) || inputChanged) && !liveConsoleInput.empty();
+    if (shouldExecute)
+    {
+        std::string result = executeLuaCode(liveConsoleInput);
+        liveConsoleOutput += "Input: " + liveConsoleInput + "\n";
+        liveConsoleOutput += "Result: " + result + "\n\n";
+        liveConsoleHistory.push_back(liveConsoleInput);
+        historyIndex = liveConsoleHistory.size();
+        liveConsoleInput.clear();
+    }
+    if (ImGui::Button("Clear", ImVec2(80, 0)))
+    {
+        liveConsoleOutput.clear();
+        liveConsoleInput.clear();
+    }
+    ImGui::EndGroup();
+    if (!liveConsoleHistory.empty())
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Use Up/Down arrows to navigate history (%zu items)", liveConsoleHistory.size());
+    if (ImGui::IsItemFocused() && !liveConsoleHistory.empty())
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && historyIndex > 0)
+        {
+            historyIndex--;
+            liveConsoleInput = liveConsoleHistory[historyIndex];
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && historyIndex < static_cast<int>(liveConsoleHistory.size()) - 1)
+        {
+            historyIndex++;
+            liveConsoleInput = liveConsoleHistory[historyIndex];
+        }
+    }
 }
 
 std::string LuaEditor::executeLuaCode(const std::string &code)
 {
     EditorTab *t = getActiveTab();
-    if (!t) return std::string("(no active tab)");
+    if (!t)
+        return std::string("(no active tab)");
 
     // Gather current editor text
     std::string src;
-    for (size_t i = 0; i < t->editorState.lines.size(); ++i) { src += t->editorState.lines[i]; if (i + 1 < t->editorState.lines.size()) src += '\n'; }
+    for (size_t i = 0; i < t->editorState.lines.size(); ++i)
+    {
+        src += t->editorState.lines[i];
+        if (i + 1 < t->editorState.lines.size())
+            src += '\n';
+    }
 
     std::string tabKey = t->filePath.string();
     auto &enginePtr = tabEngines[tabKey];
@@ -339,17 +485,21 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
 
     LuaEngine *eng = enginePtr.get();
     lua_State *L = eng ? eng->L() : nullptr;
-    if (!L) return std::string("(no lua state)");
+    if (!L)
+        return std::string("(no lua state)");
 
     // Ensure vault bindings are present in the live engine if a vault is available
     lua_getglobal(L, "vault");
     bool hasVaultGlobal = !lua_isnil(L, -1);
     lua_pop(L, 1);
-    if (!hasVaultGlobal && fileBackend) {
+    if (!hasVaultGlobal && fileBackend)
+    {
         auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
-        if (vb) {
+        if (vb)
+        {
             auto vaultPtr = vb->getVault();
-            if (vaultPtr) registerLuaVaultBindings(L, vaultPtr.get());
+            if (vaultPtr)
+                registerLuaVaultBindings(L, vaultPtr.get());
         }
     }
 
@@ -367,19 +517,21 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
             lua_pop(L, 1);
             return std::string("(compile error) ") + err;
         }
-            // Run statement
+        // Run statement
         if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK)
         {
             const char *msg = lua_tostring(L, -1);
             std::string err = msg ? msg : "(runtime error)";
             lua_pop(L, 1);
             std::string printed = eng->takeStdout();
-            if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+            if (!printed.empty())
+                return printed + std::string("(runtime error) ") + err;
             return std::string("(runtime error) ") + err;
         }
         {
             std::string printed = eng->takeStdout();
-            if (!printed.empty()) return printed;
+            if (!printed.empty())
+                return printed;
         }
         return std::string("(ok)");
     }
@@ -390,7 +542,8 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
         std::string err = msg ? msg : "(runtime error)";
         lua_pop(L, 1);
         std::string printed = eng->takeStdout();
-        if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+        if (!printed.empty())
+            return printed + std::string("(runtime error) ") + err;
         return std::string("(runtime error) ") + err;
     }
 
@@ -400,22 +553,30 @@ std::string LuaEditor::executeLuaCode(const std::string &code)
     for (int i = 1; i <= n; ++i)
     {
         const char *s = luaL_tolstring(L, i, nullptr);
-        if (s) ss << s;
-        else ss << "(non-string)";
-        if (i < n) ss << "\t";
+        if (s)
+            ss << s;
+        else
+            ss << "(non-string)";
+        if (i < n)
+            ss << "\t";
         lua_pop(L, 1); // pop string pushed by luaL_tolstring
     }
     lua_settop(L, 0);
     std::string result = ss.str();
-    if (!printed.empty() && (result.empty() || result == "nil")) return printed;
-    if (!printed.empty()) return printed + "=> " + result;
-    if (result.empty()) return std::string("(nil)");
+    if (!printed.empty() && (result.empty() || result == "nil"))
+        return printed;
+    if (!printed.empty())
+        return printed + "=> " + result;
+    if (result.empty())
+        return std::string("(nil)");
     return result;
 }
 
 std::string LuaEditor::convertLuaResultToJson(const std::string &result)
 {
-    std::ostringstream ss; ss << "{\"result\": \"" << result << "\"}"; return ss.str();
+    std::ostringstream ss;
+    ss << "{\"result\": \"" << result << "\"}";
+    return ss.str();
 }
 
 // Run an example snippet either in the active tab's engine or in a temporary engine.
@@ -426,28 +587,34 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
     // If we have an active tab with a live engine, reuse that environment
     EditorTab *t = getActiveTab();
     std::string tabKey = t ? t->filePath.string() : std::string();
-    if (t && tabEngines.count(tabKey) && tabEngines[tabKey] && !t->editorState.isDirty) {
+    if (t && tabEngines.count(tabKey) && tabEngines[tabKey] && !t->editorState.isDirty)
+    {
         // Use executeLuaCode which uses the active tab engine
         return executeLuaCode(code);
     }
 
     // No active tab or no live engine: create a temporary engine and register bindings
-    try {
+    try
+    {
         LuaEngine eng;
         lua_State *L = eng.L();
-        if (!L) return std::string("(no lua state)");
+        if (!L)
+            return std::string("(no lua state)");
 
         // Register common bindings so examples can run
         registerLuaImGuiBindings(L);
-        registerLuaCanvasBindings(L, ImVec2(0,0), 320, 240);
+        registerLuaCanvasBindings(L, ImVec2(0, 0), 320, 240);
 
         // If file backend is a VaultFileBackend, also register vault bindings so examples can access vault (and possibly modify it)
         Vault *fsVault2 = nullptr;
-        if (fileBackend) {
-            auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
-            if (vb) {
+        if (fileBackend)
+        {
+            auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+            if (vb)
+            {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) {
+                if (vaultPtr)
+                {
                     registerLuaVaultBindings(L, vaultPtr.get());
                     fsVault2 = vaultPtr.get();
                 }
@@ -491,14 +658,16 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
                 ImGui::ErrorRecoveryTryToRecoverState(&errState);
                 ImGui::GetIO().ConfigErrorRecoveryEnableAssert = oldAssert;
                 ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = oldTooltip;
-                if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+                if (!printed.empty())
+                    return printed + std::string("(runtime error) ") + err;
                 return std::string("(runtime error) ") + err;
             }
             std::string printed = eng.takeStdout();
             ImGui::ErrorRecoveryTryToRecoverState(&errState);
             ImGui::GetIO().ConfigErrorRecoveryEnableAssert = oldAssert;
             ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = oldTooltip;
-            if (!printed.empty()) return printed;
+            if (!printed.empty())
+                return printed;
             return std::string("(ok)");
         }
         if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK)
@@ -507,7 +676,8 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
             std::string err = msg ? msg : "(runtime error)";
             lua_pop(L, 1);
             std::string printed = eng.takeStdout();
-            if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+            if (!printed.empty())
+                return printed + std::string("(runtime error) ") + err;
             return std::string("(runtime error) ") + err;
         }
 
@@ -517,19 +687,26 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
         for (int i = 1; i <= n; ++i)
         {
             const char *s = luaL_tolstring(L, i, nullptr);
-            if (s) ss << s;
-            else ss << "(non-string)";
-            if (i < n) ss << "\t";
+            if (s)
+                ss << s;
+            else
+                ss << "(non-string)";
+            if (i < n)
+                ss << "\t";
             lua_pop(L, 1);
         }
         lua_settop(L, 0);
         std::string result = ss.str();
-        if (!printed.empty() && (result.empty() || result == "nil")) return printed;
-        if (!printed.empty()) return printed + "=> " + result;
-        if (result.empty()) return std::string("(nil)");
+        if (!printed.empty() && (result.empty() || result == "nil"))
+            return printed;
+        if (!printed.empty())
+            return printed + "=> " + result;
+        if (result.empty())
+            return std::string("(nil)");
         return result;
     }
-    catch (const std::exception &ex) {
+    catch (const std::exception &ex)
+    {
         return std::string("(exception) ") + ex.what();
     }
 }
@@ -538,30 +715,38 @@ std::string LuaEditor::runExampleSnippet(const std::string &code)
 ScriptConfig LuaEditor::detectSnippetConfig(const std::string &code)
 {
     ScriptConfig out;
-    try {
+    try
+    {
         LuaEngine eng;
         // register minimal bindings so user config calls like canvas.width work if invoked during Config()
         lua_State *L = eng.L();
-        if (!L) return out;
-        registerLuaCanvasBindings(L, ImVec2(0,0), 320, 240);
+        if (!L)
+            return out;
+        registerLuaCanvasBindings(L, ImVec2(0, 0), 320, 240);
         registerLuaImGuiBindings(L);
         Vault *cfgVault = nullptr;
-        if (fileBackend) {
-            auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
-            if (vb) {
+        if (fileBackend)
+        {
+            auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+            if (vb)
+            {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) {
+                if (vaultPtr)
+                {
                     registerLuaVaultBindings(L, vaultPtr.get());
                     cfgVault = vaultPtr.get();
                 }
             }
         }
         registerLuaFSBindings(L, cfgVault);
-        if (!eng.loadScript(code)) return out;
+        if (!eng.loadScript(code))
+            return out;
         out = eng.callConfig();
         return out;
     }
-    catch (...) { }
+    catch (...)
+    {
+    }
     return out;
 }
 
@@ -569,20 +754,28 @@ ScriptConfig LuaEditor::detectSnippetConfig(const std::string &code)
 bool LuaEditor::startPreview(const std::string &code, ImVec2 origin, int width, int height, ScriptConfig *outConfig)
 {
     stopPreview();
-    try {
+    try
+    {
         previewEngine = std::make_unique<LuaEngine>();
         lua_State *L = previewEngine->L();
-        if (!L) { stopPreview(); return false; }
+        if (!L)
+        {
+            stopPreview();
+            return false;
+        }
 
         // Register bindings (initially with provided dims)
         registerLuaCanvasBindings(L, origin, width, height);
         registerLuaImGuiBindings(L);
         Vault *pvVault = nullptr;
-        if (fileBackend) {
-            auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
-            if (vb) {
+        if (fileBackend)
+        {
+            auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+            if (vb)
+            {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) {
+                if (vaultPtr)
+                {
                     registerLuaVaultBindings(L, vaultPtr.get());
                     pvVault = vaultPtr.get();
                 }
@@ -590,7 +783,8 @@ bool LuaEditor::startPreview(const std::string &code, ImVec2 origin, int width, 
         }
         registerLuaFSBindings(L, pvVault);
 
-        if (!previewEngine->loadScript(code)) {
+        if (!previewEngine->loadScript(code))
+        {
             previewOutput = previewEngine->lastError();
             stopPreview();
             return false;
@@ -598,13 +792,18 @@ bool LuaEditor::startPreview(const std::string &code, ImVec2 origin, int width, 
 
         // Call Config() if present
         ScriptConfig cfg = previewEngine->callConfig();
-        if (cfg.type != ScriptConfig::Type::None) {
+        if (cfg.type != ScriptConfig::Type::None)
+        {
             previewType = (cfg.type == ScriptConfig::Type::Canvas) ? PreviewType::Canvas : PreviewType::UI;
-            if (cfg.width > 0) width = cfg.width;
-            if (cfg.height > 0) height = cfg.height;
+            if (cfg.width > 0)
+                width = cfg.width;
+            if (cfg.height > 0)
+                height = cfg.height;
             // re-register canvas with exact config dims
             registerLuaCanvasBindings(L, origin, width, height);
-        } else {
+        }
+        else
+        {
             previewType = PreviewType::Other;
         }
 
@@ -614,11 +813,17 @@ bool LuaEditor::startPreview(const std::string &code, ImVec2 origin, int width, 
         previewRunning = true;
         previewLastTime = ImGui::GetTime();
 
-        if (outConfig) *outConfig = cfg;
+        if (outConfig)
+            *outConfig = cfg;
         previewOutput.clear();
         return true;
     }
-    catch (const std::exception &ex) { previewOutput = std::string("(exception) ") + ex.what(); stopPreview(); return false; }
+    catch (const std::exception &ex)
+    {
+        previewOutput = std::string("(exception) ") + ex.what();
+        stopPreview();
+        return false;
+    }
 }
 
 void LuaEditor::stopPreview()
@@ -631,23 +836,36 @@ void LuaEditor::stopPreview()
 
 void LuaEditor::previewTick()
 {
-    if (!previewRunning || !previewEngine) return;
-    try {
+    if (!previewRunning || !previewEngine)
+        return;
+    try
+    {
         double now = ImGui::GetTime();
-        double dt = now - previewLastTime; if (dt < 0.0) dt = 0.016;
+        double dt = now - previewLastTime;
+        if (dt < 0.0)
+            dt = 0.016;
         previewLastTime = now;
         lua_State *L = previewEngine->L();
-        if (!L) { stopPreview(); return; }
+        if (!L)
+        {
+            stopPreview();
+            return;
+        }
 
-        if (previewType == PreviewType::Canvas) {
+        if (previewType == PreviewType::Canvas)
+        {
             // Render canvas via FBO and display the texture in ImGui
             unsigned int texID = previewEngine->renderCanvasFrame("preview", previewWidth, previewHeight, (float)dt);
             ImVec2 avail = ImGui::GetContentRegionAvail();
             ImGui::Image((ImTextureID)(intptr_t)texID, avail);
-        } else if (previewType == PreviewType::UI) {
+        }
+        else if (previewType == PreviewType::UI)
+        {
             // For UI preview, open a local ImGui area; the UI() function will call ui.* bindings
             previewEngine->callUI();
-        } else {
+        }
+        else
+        {
             // For 'other' types we just execute once and stop
             std::string out = runPreviewSnippet(previewCode, previewOrigin, previewWidth, previewHeight);
             previewOutput = out;
@@ -656,29 +874,39 @@ void LuaEditor::previewTick()
         }
 
         std::string printed = previewEngine->takeStdout();
-        if (!printed.empty()) previewOutput = printed;
+        if (!printed.empty())
+            previewOutput = printed;
     }
-    catch (const std::exception &ex) { previewOutput = std::string("(exception) ") + ex.what(); stopPreview(); }
+    catch (const std::exception &ex)
+    {
+        previewOutput = std::string("(exception) ") + ex.what();
+        stopPreview();
+    }
 }
 // Run a preview snippet inside a given origin / area so that canvas drawing happens inside the preview child
 std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin, int width, int height)
 {
     // For one-shot previews we use a temporary engine that draws into the provided child origin
-    try {
+    try
+    {
         LuaEngine eng;
         lua_State *L = eng.L();
-        if (!L) return std::string("(no lua state)");
+        if (!L)
+            return std::string("(no lua state)");
 
         // Register bindings with actual origin so draw calls appear at the right place
         registerLuaCanvasBindings(L, origin, width, height);
         registerLuaImGuiBindings(L);
 
         Vault *snippetVault = nullptr;
-        if (fileBackend) {
-            auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
-            if (vb) {
+        if (fileBackend)
+        {
+            auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+            if (vb)
+            {
                 auto vaultPtr = vb->getVault();
-                if (vaultPtr) {
+                if (vaultPtr)
+                {
                     registerLuaVaultBindings(L, vaultPtr.get());
                     snippetVault = vaultPtr.get();
                 }
@@ -720,14 +948,16 @@ std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin,
                 ImGui::ErrorRecoveryTryToRecoverState(&errState);
                 ImGui::GetIO().ConfigErrorRecoveryEnableAssert = oldAssert;
                 ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = oldTooltip;
-                if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+                if (!printed.empty())
+                    return printed + std::string("(runtime error) ") + err;
                 return std::string("(runtime error) ") + err;
             }
             std::string printed = eng.takeStdout();
             ImGui::ErrorRecoveryTryToRecoverState(&errState);
             ImGui::GetIO().ConfigErrorRecoveryEnableAssert = oldAssert;
             ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = oldTooltip;
-            if (!printed.empty()) return printed;
+            if (!printed.empty())
+                return printed;
             return std::string("(ok)");
         }
         if (lua_pcall(L, 0, LUA_MULTRET, 0) != LUA_OK)
@@ -739,7 +969,8 @@ std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin,
             ImGui::ErrorRecoveryTryToRecoverState(&errState);
             ImGui::GetIO().ConfigErrorRecoveryEnableAssert = oldAssert;
             ImGui::GetIO().ConfigErrorRecoveryEnableTooltip = oldTooltip;
-            if (!printed.empty()) return printed + std::string("(runtime error) ") + err;
+            if (!printed.empty())
+                return printed + std::string("(runtime error) ") + err;
             return std::string("(runtime error) ") + err;
         }
 
@@ -749,19 +980,26 @@ std::string LuaEditor::runPreviewSnippet(const std::string &code, ImVec2 origin,
         for (int i = 1; i <= n; ++i)
         {
             const char *s = luaL_tolstring(L, i, nullptr);
-            if (s) ss << s;
-            else ss << "(non-string)";
-            if (i < n) ss << "\t";
+            if (s)
+                ss << s;
+            else
+                ss << "(non-string)";
+            if (i < n)
+                ss << "\t";
             lua_pop(L, 1);
         }
         lua_settop(L, 0);
         std::string result = ss.str();
-        if (!printed.empty() && (result.empty() || result == "nil")) return printed;
-        if (!printed.empty()) return printed + "=> " + result;
-        if (result.empty()) return std::string("(nil)");
+        if (!printed.empty() && (result.empty() || result == "nil"))
+            return printed;
+        if (!printed.empty())
+            return printed + "=> " + result;
+        if (result.empty())
+            return std::string("(nil)");
         return result;
     }
-    catch (const std::exception &ex) {
+    catch (const std::exception &ex)
+    {
         return std::string("(exception) ") + ex.what();
     }
 }
@@ -771,44 +1009,70 @@ void LuaEditor::beginTokenize(size_t startLine)
     // Pre-scan lines before the visible range to determine multi-line comment state
     for (size_t i = 0; i < startLine && i < editorState.lines.size(); ++i)
     {
-        const std::string& line = editorState.lines[i];
+        const std::string &line = editorState.lines[i];
         size_t pos = 0;
         while (pos < line.length())
         {
             if (luaInMultiComment)
             {
                 size_t end = line.find("]]", pos);
-                if (end != std::string::npos) { luaInMultiComment = false; pos = end + 2; }
-                else break;
+                if (end != std::string::npos)
+                {
+                    luaInMultiComment = false;
+                    pos = end + 2;
+                }
+                else
+                    break;
             }
-            else if (line[pos] == '-' && pos + 1 < line.length() && line[pos+1] == '-')
+            else if (line[pos] == '-' && pos + 1 < line.length() && line[pos + 1] == '-')
             {
-                if (pos + 3 < line.length() && line[pos+2] == '[' && line[pos+3] == '[')
+                if (pos + 3 < line.length() && line[pos + 2] == '[' && line[pos + 3] == '[')
                 {
                     size_t end = line.find("]]", pos + 4);
-                    if (end != std::string::npos) { pos = end + 2; }
-                    else { luaInMultiComment = true; break; }
+                    if (end != std::string::npos)
+                    {
+                        pos = end + 2;
+                    }
+                    else
+                    {
+                        luaInMultiComment = true;
+                        break;
+                    }
                 }
-                else break; // single-line comment, skip rest
+                else
+                    break; // single-line comment, skip rest
             }
             else if (line[pos] == '"' || line[pos] == '\'')
             {
-                char q = line[pos]; size_t s = pos + 1; bool esc = false;
-                while (s < line.length()) { if (!esc && line[s] == q) { s++; break; } esc = (line[s] == '\\' && !esc); s++; }
+                char q = line[pos];
+                size_t s = pos + 1;
+                bool esc = false;
+                while (s < line.length())
+                {
+                    if (!esc && line[s] == q)
+                    {
+                        s++;
+                        break;
+                    }
+                    esc = (line[s] == '\\' && !esc);
+                    s++;
+                }
                 pos = s;
             }
-            else pos++;
+            else
+                pos++;
         }
     }
 }
 
-std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string& line, size_t lineIndex)
+std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string &line, size_t lineIndex)
 {
     using Editors::SyntaxToken;
-    static const std::unordered_set<std::string> luaKeywords = {"and","break","do","else","elseif","end","false","for","function","if","in","local","nil","not","or","repeat","return","then","true","until","while"};
+    static const std::unordered_set<std::string> luaKeywords = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"};
 
     std::vector<SyntaxToken> tokens;
-    if (line.empty()) return tokens;
+    if (line.empty())
+        return tokens;
 
     size_t pos = 0;
 
@@ -832,9 +1096,9 @@ std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string& lin
     while (pos < line.length())
     {
         // Detect single-line '--' and multi-line '--[[' comments
-        if (line[pos] == '-' && pos + 1 < line.length() && line[pos+1] == '-')
+        if (line[pos] == '-' && pos + 1 < line.length() && line[pos + 1] == '-')
         {
-            if (pos + 3 < line.length() && line[pos+2] == '[' && line[pos+3] == '[')
+            if (pos + 3 < line.length() && line[pos + 2] == '[' && line[pos + 3] == '[')
             {
                 size_t end = line.find("]]", pos + 4);
                 if (end == std::string::npos)
@@ -861,23 +1125,38 @@ std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string& lin
         size_t start = pos;
         if (std::isspace((unsigned char)line[pos]))
         {
-            while (pos < line.length() && std::isspace((unsigned char)line[pos])) pos++;
+            while (pos < line.length() && std::isspace((unsigned char)line[pos]))
+                pos++;
             color = textColor;
         }
         else if (line[pos] == '"' || line[pos] == '\'')
         {
-            char q = line[pos]; size_t s = pos + 1; bool esc = false;
-            while (s < line.length()) { if (!esc && line[s] == q) { s++; break; } esc = (line[s] == '\\' && !esc); s++; }
-            pos = s; color = stringColor;
+            char q = line[pos];
+            size_t s = pos + 1;
+            bool esc = false;
+            while (s < line.length())
+            {
+                if (!esc && line[s] == q)
+                {
+                    s++;
+                    break;
+                }
+                esc = (line[s] == '\\' && !esc);
+                s++;
+            }
+            pos = s;
+            color = stringColor;
         }
         else if (std::isdigit((unsigned char)line[pos]))
         {
-            while (pos < line.length() && (std::isdigit((unsigned char)line[pos]) || line[pos] == '.')) pos++;
+            while (pos < line.length() && (std::isdigit((unsigned char)line[pos]) || line[pos] == '.'))
+                pos++;
             color = numberColor;
         }
         else if (std::isalpha((unsigned char)line[pos]) || line[pos] == '_')
         {
-            while (pos < line.length() && (std::isalnum((unsigned char)line[pos]) || line[pos] == '_')) pos++;
+            while (pos < line.length() && (std::isalnum((unsigned char)line[pos]) || line[pos] == '_'))
+                pos++;
             std::string word = line.substr(start, pos - start);
             color = luaKeywords.count(word) ? keywordColor : textColor;
         }
@@ -896,39 +1175,50 @@ std::vector<Editors::SyntaxToken> LuaEditor::tokenizeLine(const std::string& lin
 void LuaEditor::openApiDocs() { showDocViewer = true; }
 void LuaEditor::closeApiDocs() { showDocViewer = false; }
 bool LuaEditor::isApiDocsOpen() const { return showDocViewer; }
-void LuaEditor::renderApiDocsIfOpen() { if (showDocViewer) drawClassInvestigator(); }
+void LuaEditor::renderApiDocsIfOpen()
+{
+    if (showDocViewer)
+        drawClassInvestigator();
+}
 // Stubs for program-structure related functions
 void LuaEditor::updateLiveProgramStructure() { /* minimal: update current file in programStructure if needed */ }
 void LuaEditor::updateLiveProgramStructureForAllTabs() { /* minimal placeholder */ }
 bool LuaEditor::isInClassContext(size_t, size_t) const { return false; }
 void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool isQualifiedAccess, const std::string &objectName)
 {
-    (void)isQualifiedAccess; (void)objectName;
+    (void)isQualifiedAccess;
+    (void)objectName;
     // simple keyword completions
-    static const std::vector<std::string> kws = {"function","local","if","then","else","end","for","in","pairs","ipairs","return","require","while","repeat","until","true","false","nil"};
-    for (const auto &k: kws)
+    static const std::vector<std::string> kws = {"function", "local", "if", "then", "else", "end", "for", "in", "pairs", "ipairs", "return", "require", "while", "repeat", "until", "true", "false", "nil"};
+    for (const auto &k : kws)
         if (k.find(prefix) == 0)
         {
-            CompletionItem it; it.text = k; it.description = "Lua keyword"; it.type = CompletionItem::KEYWORD; completionItems.push_back(it);
+            CompletionItem it;
+            it.text = k;
+            it.description = "Lua keyword";
+            it.type = CompletionItem::KEYWORD;
+            completionItems.push_back(it);
         }
 
     // Augment completions with registered binding globals by creating a temp LuaEngine,
     // registering bindings (ImGui and vault if available), and enumerating globals.
-    try {
+    try
+    {
         LuaEngine eng;
         lua_State *L = eng.L();
-        if (L) {
+        if (L)
+        {
             // Register ImGui bindings to expose UI helper functions
             registerLuaImGuiBindings(L);
             // Also register canvas bindings with a default dummy region so canvas helpers
             // (e.g., drawing helpers) are available for completion discovery.
-            registerLuaCanvasBindings(L, ImVec2(0,0), 300, 200);
+            registerLuaCanvasBindings(L, ImVec2(0, 0), 300, 200);
 
             // If the file backend is a VaultFileBackend, register vault bindings too
             Vault *acVault = nullptr;
             if (fileBackend)
             {
-                auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
+                auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
                 if (vb)
                 {
                     auto vaultPtr = vb->getVault();
@@ -961,10 +1251,19 @@ void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool 
                                 std::string sname(mname);
                                 if (sname.rfind(prefix, 0) == 0)
                                 {
-                                    CompletionItem it; it.text = sname;
+                                    CompletionItem it;
+                                    it.text = sname;
                                     int vtype = lua_type(L, -1);
-                                    if (vtype == LUA_TFUNCTION) { it.type = CompletionItem::METHOD; it.description = "binding method"; }
-                                    else { it.type = CompletionItem::VARIABLE; it.description = "binding field"; }
+                                    if (vtype == LUA_TFUNCTION)
+                                    {
+                                        it.type = CompletionItem::METHOD;
+                                        it.description = "binding method";
+                                    }
+                                    else
+                                    {
+                                        it.type = CompletionItem::VARIABLE;
+                                        it.description = "binding field";
+                                    }
                                     completionItems.push_back(it);
                                 }
                             }
@@ -994,8 +1293,16 @@ void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool 
                                 CompletionItem it;
                                 it.text = sname;
                                 int vtype = lua_type(L, -1);
-                                if (vtype == LUA_TFUNCTION) { it.type = CompletionItem::METHOD; it.description = "binding function"; }
-                                else { it.type = CompletionItem::VARIABLE; it.description = "binding"; }
+                                if (vtype == LUA_TFUNCTION)
+                                {
+                                    it.type = CompletionItem::METHOD;
+                                    it.description = "binding function";
+                                }
+                                else
+                                {
+                                    it.type = CompletionItem::VARIABLE;
+                                    it.description = "binding";
+                                }
                                 completionItems.push_back(it);
                             }
                         }
@@ -1006,7 +1313,9 @@ void LuaEditor::generateContextAwareCompletions(const std::string &prefix, bool 
             }
         }
     }
-    catch (...) { /* best-effort: ignore lua completion failures */ }
+    catch (...)
+    { /* best-effort: ignore lua completion failures */
+    }
 }
 
 void LuaEditor::drawClassInvestigator()
@@ -1021,28 +1330,43 @@ void LuaEditor::drawClassInvestigator()
     ImGui::SetNextWindowDockID(ImGui::GetID("MyDockSpace"), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
     ImGuiWindowFlags flags = ImGuiWindowFlags_None; // Allow docking by default
-    if (!ImGui::Begin("API Docs", &showDocViewer, flags)) { ImGui::End(); return; }
+    if (!ImGui::Begin("API Docs", &showDocViewer, flags))
+    {
+        ImGui::End();
+        return;
+    }
 
     // Top controls: filter + module selector
-    ImGui::BeginGroup(); ImGui::Text("Filter:"); ImGui::SameLine(); ImGui::PushItemWidth(260); ImGui::InputText("##ApiFilter", &filter); ImGui::PopItemWidth(); ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::Text("Filter:");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(260);
+    ImGui::InputText("##ApiFilter", &filter);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
     // Build module list
     auto all = LuaBindingDocs::get().listAll();
     std::set<std::string> modules;
     for (const auto &e : all)
     {
         auto pos = e.name.find('.');
-        if (pos == std::string::npos) modules.insert("(global)"); else modules.insert(e.name.substr(0, pos));
+        if (pos == std::string::npos)
+            modules.insert("(global)");
+        else
+            modules.insert(e.name.substr(0, pos));
     }
     std::vector<std::string> modList;
     modList.push_back("All");
-    for (const auto &m : modules) modList.push_back(m);
+    for (const auto &m : modules)
+        modList.push_back(m);
     static int moduleIndex = 0; // 0 == All
     if (ImGui::BeginCombo("Module", modList[moduleIndex].c_str()))
     {
         for (int i = 0; i < (int)modList.size(); ++i)
         {
             bool sel = (i == moduleIndex);
-            if (ImGui::Selectable(modList[i].c_str(), sel)) moduleIndex = i;
+            if (ImGui::Selectable(modList[i].c_str(), sel))
+                moduleIndex = i;
         }
         ImGui::EndCombo();
     }
@@ -1050,17 +1374,23 @@ void LuaEditor::drawClassInvestigator()
     ImGui::Separator();
 
     // Build filtered list grouped by module
-    std::string lfilter = filter; std::transform(lfilter.begin(), lfilter.end(), lfilter.begin(), ::tolower);
+    std::string lfilter = filter;
+    std::transform(lfilter.begin(), lfilter.end(), lfilter.begin(), ::tolower);
     std::map<std::string, std::vector<int>> groups;
     for (size_t i = 0; i < all.size(); ++i)
     {
         const auto &e = all[i];
         std::string key = e.name + " " + e.signature + " " + e.summary;
-        std::string lkey = key; std::transform(lkey.begin(), lkey.end(), lkey.begin(), ::tolower);
-        if (!lfilter.empty() && lkey.find(lfilter) == std::string::npos) continue;
+        std::string lkey = key;
+        std::transform(lkey.begin(), lkey.end(), lkey.begin(), ::tolower);
+        if (!lfilter.empty() && lkey.find(lfilter) == std::string::npos)
+            continue;
         std::string mod = "(global)";
-        auto pos = e.name.find('.'); if (pos != std::string::npos) mod = e.name.substr(0, pos);
-        if (moduleIndex != 0 && mod != modList[moduleIndex]) continue; // module filter
+        auto pos = e.name.find('.');
+        if (pos != std::string::npos)
+            mod = e.name.substr(0, pos);
+        if (moduleIndex != 0 && mod != modList[moduleIndex])
+            continue; // module filter
         groups[mod].push_back((int)i);
     }
 
@@ -1069,17 +1399,25 @@ void LuaEditor::drawClassInvestigator()
     for (const auto &kv : groups)
     {
         bool open = ImGui::CollapsingHeader(kv.first.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
-        if (!open) continue;
+        if (!open)
+            continue;
         for (int idx : kv.second)
         {
             const auto &e = all[idx];
             std::string label = e.name + " - " + e.signature;
             // highlight whole item if it contains the filter
-            bool contains = lfilter.empty() || (std::string(label).find(filter) != std::string::npos) || ([&](){ std::string l = label; std::transform(l.begin(), l.end(), l.begin(), ::tolower); return l.find(lfilter) != std::string::npos; })();
-            if (contains) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            bool contains = lfilter.empty() || (std::string(label).find(filter) != std::string::npos) || ([&]()
+                                                                                                          { std::string l = label; std::transform(l.begin(), l.end(), l.begin(), ::tolower); return l.find(lfilter) != std::string::npos; })();
+            if (contains)
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
             bool sel = (selected == idx);
-            if (ImGui::Selectable(label.c_str(), sel)) { selected = idx; lastExampleOutput.clear(); }
-            if (contains) ImGui::PopStyleColor();
+            if (ImGui::Selectable(label.c_str(), sel))
+            {
+                selected = idx;
+                lastExampleOutput.clear();
+            }
+            if (contains)
+                ImGui::PopStyleColor();
         }
     }
     ImGui::EndChild();
@@ -1095,27 +1433,59 @@ void LuaEditor::drawClassInvestigator()
         ImGui::Separator();
 
         // Helper to render highlighted wrapped text (case-insensitive)
-        auto renderHighlighted = [&](const std::string &text, const std::string &flt, const ImVec4 &hlColor){
-            if (flt.empty()) { ImGui::TextWrapped("%s", text.c_str()); return; }
-            std::string lower = text; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            std::string lflt = flt; std::transform(lflt.begin(), lflt.end(), lflt.begin(), ::tolower);
-            size_t pos = 0; size_t start = 0;
+        auto renderHighlighted = [&](const std::string &text, const std::string &flt, const ImVec4 &hlColor)
+        {
+            if (flt.empty())
+            {
+                ImGui::TextWrapped("%s", text.c_str());
+                return;
+            }
+            std::string lower = text;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            std::string lflt = flt;
+            std::transform(lflt.begin(), lflt.end(), lflt.begin(), ::tolower);
+            size_t pos = 0;
+            size_t start = 0;
             while ((pos = lower.find(lflt, start)) != std::string::npos)
             {
-                if (pos > start) { std::string seg = text.substr(start, pos - start); ImGui::TextUnformatted(seg.c_str()); ImGui::SameLine(0,0); }
-                std::string match = text.substr(pos, lflt.size()); ImGui::PushStyleColor(ImGuiCol_Text, hlColor); ImGui::TextUnformatted(match.c_str()); ImGui::PopStyleColor(); ImGui::SameLine(0,0);
+                if (pos > start)
+                {
+                    std::string seg = text.substr(start, pos - start);
+                    ImGui::TextUnformatted(seg.c_str());
+                    ImGui::SameLine(0, 0);
+                }
+                std::string match = text.substr(pos, lflt.size());
+                ImGui::PushStyleColor(ImGuiCol_Text, hlColor);
+                ImGui::TextUnformatted(match.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SameLine(0, 0);
                 start = pos + lflt.size();
             }
-            if (start < text.size()) { std::string seg = text.substr(start); ImGui::TextUnformatted(seg.c_str()); }
-            else ImGui::NewLine();
+            if (start < text.size())
+            {
+                std::string seg = text.substr(start);
+                ImGui::TextUnformatted(seg.c_str());
+            }
+            else
+                ImGui::NewLine();
         };
 
         ImGui::TextWrapped("%s", "Summary:");
         renderHighlighted(e.summary, filter, ImVec4(0.9f, 0.8f, 0.3f, 1.0f));
         ImGui::Separator();
-        ImGui::TextDisabled("Signature:"); ImGui::SameLine(); ImGui::Text("%s", e.signature.c_str());
-        ImGui::SameLine(); if (ImGui::SmallButton("Copy Signature")) ImGui::SetClipboardText(e.signature.c_str());
-        if (!e.sourceFile.empty()) { ImGui::SameLine(); if (ImGui::SmallButton("View Source")) { /* Future: open source in editor */ } }
+        ImGui::TextDisabled("Signature:");
+        ImGui::SameLine();
+        ImGui::Text("%s", e.signature.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy Signature"))
+            ImGui::SetClipboardText(e.signature.c_str());
+        if (!e.sourceFile.empty())
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("View Source"))
+            { /* Future: open source in editor */
+            }
+        }
 
         if (!e.example.empty())
         {
@@ -1123,9 +1493,11 @@ void LuaEditor::drawClassInvestigator()
             ImGui::TextDisabled("Example (editable):");
             // Prefill previewCode when selection changes
             static int prevSelected = -2; // impossible initial value
-            if (selected != prevSelected) {
+            if (selected != prevSelected)
+            {
                 // Stop any running preview when switching examples/docs to avoid stale previews
-                if (previewRunning) stopPreview();
+                if (previewRunning)
+                    stopPreview();
                 previewExecuteRequested = false;
                 previewCode = e.example;
                 previewOutput.clear();
@@ -1159,41 +1531,64 @@ void LuaEditor::drawClassInvestigator()
             }
 
             ImGui::BeginGroup();
-            if (ImGui::Button("Copy Example")) ImGui::SetClipboardText(previewCode.c_str());
+            if (ImGui::Button("Copy Example"))
+                ImGui::SetClipboardText(previewCode.c_str());
             ImGui::SameLine();
-            if (ImGui::Button("Insert into Console")) { liveConsoleInput = previewCode; ImGui::SetKeyboardFocusHere(); }
+            if (ImGui::Button("Insert into Console"))
+            {
+                liveConsoleInput = previewCode;
+                ImGui::SetKeyboardFocusHere();
+            }
             ImGui::SameLine();
 
             // Determine whether the snippet provides a Config() by running a quick detection when selection changed
             static int _lastDetectSel = -1;
             static ScriptConfig _cachedCfg;
             bool hasConfig = false;
-            if (selected != _lastDetectSel || detectionDirty) { _cachedCfg = detectSnippetConfig(previewCode); _lastDetectSel = selected; }
-            if (_cachedCfg.type != ScriptConfig::Type::None) hasConfig = true;
+            if (selected != _lastDetectSel || detectionDirty)
+            {
+                _cachedCfg = detectSnippetConfig(previewCode);
+                _lastDetectSel = selected;
+            }
+            if (_cachedCfg.type != ScriptConfig::Type::None)
+                hasConfig = true;
 
             if (hasConfig)
             {
                 // Show toggle for continuous preview
                 if (!previewRunning)
                 {
-                    if (ImGui::Button("Run Preview")) { pendingExample = previewCode; previewRunConfirmOpen = true; ImGui::OpenPopup("Run Preview Confirmation"); }
+                    if (ImGui::Button("Run Preview"))
+                    {
+                        pendingExample = previewCode;
+                        previewRunConfirmOpen = true;
+                        ImGui::OpenPopup("Run Preview Confirmation");
+                    }
                 }
                 else
                 {
-                    if (ImGui::Button("Stop Preview")) { stopPreview(); }
+                    if (ImGui::Button("Stop Preview"))
+                    {
+                        stopPreview();
+                    }
                 }
             }
             else
             {
                 // Non-config examples are one-shot runs
-                if (ImGui::Button("Run Example")) { pendingExample = previewCode; runExampleConfirmOpen = true; ImGui::OpenPopup("Run Example Confirmation"); }
+                if (ImGui::Button("Run Example"))
+                {
+                    pendingExample = previewCode;
+                    runExampleConfirmOpen = true;
+                    ImGui::OpenPopup("Run Example Confirmation");
+                }
             }
             ImGui::EndGroup();
 
             // Run Example confirmation modal (full app run)
             // Ensure this important confirmation is centered on the main viewport
             {
-                ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+                ImGuiViewport *main_viewport = ImGui::GetMainViewport();
                 ImVec2 center = main_viewport->GetCenter();
                 ImGui::SetNextWindowViewport(main_viewport->ID);
                 ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1202,16 +1597,27 @@ void LuaEditor::drawClassInvestigator()
             {
                 ImGui::TextWrapped("Warning: Running examples may modify your vault or other application state (e.g., via `vault.*` bindings). Only run examples from trusted sources. Continue?");
                 ImGui::Separator();
-                if (ImGui::Button("Run")) { lastExampleOutput = runExampleSnippet(pendingExample); pendingExample.clear(); runExampleConfirmOpen = false; ImGui::CloseCurrentPopup(); }
+                if (ImGui::Button("Run"))
+                {
+                    lastExampleOutput = runExampleSnippet(pendingExample);
+                    pendingExample.clear();
+                    runExampleConfirmOpen = false;
+                    ImGui::CloseCurrentPopup();
+                }
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel")) { pendingExample.clear(); runExampleConfirmOpen = false; ImGui::CloseCurrentPopup(); }
+                if (ImGui::Button("Cancel"))
+                {
+                    pendingExample.clear();
+                    runExampleConfirmOpen = false;
+                    ImGui::CloseCurrentPopup();
+                }
                 ImGui::EndPopup();
             }
 
             // Preview confirmation modal (local preview run inside child)
             // Ensure this confirmation is centered on the main viewport as well
             {
-                ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+                ImGuiViewport *main_viewport = ImGui::GetMainViewport();
                 ImVec2 center = main_viewport->GetCenter();
                 ImGui::SetNextWindowViewport(main_viewport->ID);
                 ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1220,87 +1626,108 @@ void LuaEditor::drawClassInvestigator()
             {
                 ImGui::TextWrapped("Preview runs code inside a local preview area and may still execute bindings that modify state (e.g., `vault.*`). Only run previews for trusted snippets. Continue?");
                 ImGui::Separator();
-                if (ImGui::Button("Start Preview")) { previewRunConfirmOpen = false; ImGui::CloseCurrentPopup(); 
+                if (ImGui::Button("Start Preview"))
+                {
+                    previewRunConfirmOpen = false;
+                    ImGui::CloseCurrentPopup();
                     // Start persistent preview engine
-                    ImVec2 childOrigin = ImGui::GetCursorScreenPos(); ImVec2 childSize = ImGui::GetContentRegionAvail();
+                    ImVec2 childOrigin = ImGui::GetCursorScreenPos();
+                    ImVec2 childSize = ImGui::GetContentRegionAvail();
                     ScriptConfig cfg = detectSnippetConfig(previewCode);
                     int w = (int)childSize.x, h = (int)childSize.y;
-                    if (cfg.type == ScriptConfig::Type::Canvas && cfg.width>0) { w = cfg.width; h = cfg.height; }
+                    if (cfg.type == ScriptConfig::Type::Canvas && cfg.width > 0)
+                    {
+                        w = cfg.width;
+                        h = cfg.height;
+                    }
                     startPreview(previewCode, childOrigin, w, h, &cfg);
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Cancel")) { previewRunConfirmOpen = false; previewExecuteRequested = false; ImGui::CloseCurrentPopup(); }
+                if (ImGui::Button("Cancel"))
+                {
+                    previewRunConfirmOpen = false;
+                    previewExecuteRequested = false;
+                    ImGui::CloseCurrentPopup();
+                }
                 ImGui::EndPopup();
             }
 
-                    // Preview area for canvas/ui modules (only for examples that provide a Config())
-                    if (hasConfig)
-                    {
-                        auto pos = ImGui::GetCursorScreenPos();
-                        ImGui::Separator();
-                        ImGui::TextDisabled("Preview:");
-                        ImGui::BeginChild("PreviewArea", ImVec2(360, 240), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NavFlattened);
-                        ImVec2 childOrigin = ImGui::GetCursorScreenPos();
-                        ImVec2 childSize = ImGui::GetContentRegionAvail();
+            // Preview area for canvas/ui modules (only for examples that provide a Config())
+            if (hasConfig)
+            {
+                auto pos = ImGui::GetCursorScreenPos();
+                ImGui::Separator();
+                ImGui::TextDisabled("Preview:");
+                ImGui::BeginChild("PreviewArea", ImVec2(360, 240), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NavFlattened);
+                ImVec2 childOrigin = ImGui::GetCursorScreenPos();
+                ImVec2 childSize = ImGui::GetContentRegionAvail();
 
-                        // If a persistent preview is running we need to tick it each frame so Render/UI is invoked
-                        if (previewRunning && previewEngine)
+                // If a persistent preview is running we need to tick it each frame so Render/UI is invoked
+                if (previewRunning && previewEngine)
+                {
+                    // Ensure preview engine has vault bindings if a vault was opened after the preview started
+                    lua_State *pvL = previewEngine->L();
+                    if (pvL)
+                    {
+                        lua_getglobal(pvL, "vault");
+                        bool pvHasVault = !lua_isnil(pvL, -1);
+                        lua_pop(pvL, 1);
+                        if (!pvHasVault && fileBackend)
                         {
-                            // Ensure preview engine has vault bindings if a vault was opened after the preview started
-                            lua_State *pvL = previewEngine->L();
-                            if (pvL) {
-                                lua_getglobal(pvL, "vault");
-                                bool pvHasVault = !lua_isnil(pvL, -1);
-                                lua_pop(pvL, 1);
-                                if (!pvHasVault && fileBackend) {
-                                    auto vb = dynamic_cast<VaultFileBackend*>(fileBackend.get());
-                                    if (vb) {
-                                        auto vaultPtr = vb->getVault();
-                                        if (vaultPtr) {
-                                            registerLuaVaultBindings(pvL, vaultPtr.get());
-                                            // Also register FS bindings if not already present
-                                            lua_getglobal(pvL, "fs");
-                                            bool hasFsGlobal = !lua_isnil(pvL, -1);
-                                            lua_pop(pvL, 1);
-                                            if (!hasFsGlobal)
-                                                registerLuaFSBindings(pvL, vaultPtr.get());
-                                        }
-                                    }
+                            auto vb = dynamic_cast<VaultFileBackend *>(fileBackend.get());
+                            if (vb)
+                            {
+                                auto vaultPtr = vb->getVault();
+                                if (vaultPtr)
+                                {
+                                    registerLuaVaultBindings(pvL, vaultPtr.get());
+                                    // Also register FS bindings if not already present
+                                    lua_getglobal(pvL, "fs");
+                                    bool hasFsGlobal = !lua_isnil(pvL, -1);
+                                    lua_pop(pvL, 1);
+                                    if (!hasFsGlobal)
+                                        registerLuaFSBindings(pvL, vaultPtr.get());
                                 }
                             }
-                            // Update preview origin/size in case the child moved
-                            previewOrigin = childOrigin;
-                            previewWidth = (int)childSize.x;
-                            previewHeight = (int)childSize.y;
-                            previewTick();
-                        }
-
-                        // Execute a one-shot preview run if requested (for non-persistent examples or one-off preview)
-                        if (previewExecuteRequested && !previewRunning)
-                        {
-                            previewOutput = runPreviewSnippet(previewCode, childOrigin, (int)childSize.x, (int)childSize.y);
-                            previewExecuteRequested = false; // reset
-                        }
-
-                        ImGui::EndChild();
-
-                        if (!previewOutput.empty()) {
-                            ImGui::Separator(); ImGui::TextDisabled("Preview Output:");
-                            ImGui::BeginChild("PreviewOutput", ImVec2(0, 80), true);
-                            ImGui::TextWrapped("%s", previewOutput.c_str());
-                            ImGui::EndChild();
                         }
                     }
-                    else
-                    {
-                        // For non-UI examples we don't show a preview area; clear previewOutput and any pending preview request
-                        previewOutput.clear();
-                        previewExecuteRequested = false;
-                    }
+                    // Update preview origin/size in case the child moved
+                    previewOrigin = childOrigin;
+                    previewWidth = (int)childSize.x;
+                    previewHeight = (int)childSize.y;
+                    previewTick();
+                }
+
+                // Execute a one-shot preview run if requested (for non-persistent examples or one-off preview)
+                if (previewExecuteRequested && !previewRunning)
+                {
+                    previewOutput = runPreviewSnippet(previewCode, childOrigin, (int)childSize.x, (int)childSize.y);
+                    previewExecuteRequested = false; // reset
+                }
+
+                ImGui::EndChild();
+
+                if (!previewOutput.empty())
+                {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Preview Output:");
+                    ImGui::BeginChild("PreviewOutput", ImVec2(0, 80), true);
+                    ImGui::TextWrapped("%s", previewOutput.c_str());
+                    ImGui::EndChild();
+                }
+            }
+            else
+            {
+                // For non-UI examples we don't show a preview area; clear previewOutput and any pending preview request
+                previewOutput.clear();
+                previewExecuteRequested = false;
+            }
 
             // If a non-UI / non-persistent example was run, show its stdout/returned output here
-            if (!lastExampleOutput.empty()) {
-                ImGui::Separator(); ImGui::TextDisabled("Example Output:");
+            if (!lastExampleOutput.empty())
+            {
+                ImGui::Separator();
+                ImGui::TextDisabled("Example Output:");
                 ImGui::BeginChild("ExampleOutput", ImVec2(0, 80), true);
                 ImGui::TextWrapped("%s", lastExampleOutput.c_str());
                 ImGui::EndChild();
@@ -1313,7 +1740,8 @@ void LuaEditor::drawClassInvestigator()
 
         // Footer: signature + source
         ImGui::Separator();
-        if (!e.sourceFile.empty()) ImGui::TextDisabled("Binding source: %s", e.sourceFile.c_str());
+        if (!e.sourceFile.empty())
+            ImGui::TextDisabled("Binding source: %s", e.sourceFile.c_str());
     }
     else
     {
@@ -1385,10 +1813,11 @@ const Table *LuaEditor::resolveTable(const std::string &tableName) const
     return nullptr;
 }
 
-LuaEngine* LuaEditor::getOrCreateTabEngine()
+LuaEngine *LuaEditor::getOrCreateTabEngine()
 {
     EditorTab *t = getActiveTab();
-    if (!t) return nullptr;
+    if (!t)
+        return nullptr;
     std::string key = t->filePath.string();
     auto &eng = tabEngines[key];
     if (!eng)

@@ -1433,17 +1433,18 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
     
     // 5. CPU fallback for behaviors not handled by any kernel
     // (behaviorIDs: 0=None, 2=Rainbow, 5=Glow, 6=Wave, 9=Blood, etc.)
+    // Only skip behaviors if their CL kernel is actually loaded and executed
     for (size_t i = 0; i < m_particleCount && i < m_cpuParticles.size(); ++i) {
         Particle& p = m_cpuParticles[i];
         if (p.life <= 0.0f) continue;
         
         uint32_t bid = p.behaviorID;
-        // Skip behaviors handled by CL kernels
-        if (bid == 1 ||   // Fire
-            bid == 10 ||  // Snow
-            bid == 3 ||   // Electric/Shake
-            bid == 11 ||  // Sparkle
-            bid == 4) {   // Dissolve/Smoke
+        // Skip behaviors that were handled by CL kernels (only if kernel exists)
+        if ((bid == 1 && m_fireUpdateKernel) ||      // Fire
+            (bid == 10 && m_snowUpdateKernel) ||     // Snow
+            (bid == 3 && m_electricUpdateKernel) ||  // Electric/Shake
+            (bid == 11 && m_sparkleUpdateKernel) ||  // Sparkle
+            (bid == 4 && m_smokeUpdateKernel)) {     // Dissolve/Smoke
             continue;
         }
         
@@ -1458,10 +1459,12 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         
         if (m_collisionMask.hasCPUData()) {
             float maskH2 = static_cast<float>(m_collisionMask.getHeight());
+            // Document Y = scrollY maps to texel row maskH-1 (top), 
+            // Document Y = scrollY + maskH maps to texel row 0 (bottom)
             float newMaskX = newPos.x;
-            float newMaskY = (m_scrollY + maskH2) - newPos.y;
+            float newMaskY = (m_scrollY + maskH2 - 1.0f) - newPos.y;
             float curMaskX = p.pos.x;
-            float curMaskY = (m_scrollY + maskH2) - p.pos.y;
+            float curMaskY = (m_scrollY + maskH2 - 1.0f) - p.pos.y;
             
             bool newInside = m_collisionMask.sample(newMaskX, newMaskY) > 0.5f;
             bool curInside = m_collisionMask.sample(curMaskX, curMaskY) > 0.5f;
@@ -1556,10 +1559,12 @@ void MarkdownPreview::updateParticlesCPU(float dt) {
         
         if (m_collisionMask.hasCPUData()) {
             float maskH = static_cast<float>(m_collisionMask.getHeight());
+            // Document Y = scrollY maps to texel row maskH-1 (top),
+            // Document Y = scrollY + maskH maps to texel row 0 (bottom)
             float newMaskX = newPos.x;
-            float newMaskY = (m_scrollY + maskH) - newPos.y;
+            float newMaskY = (m_scrollY + maskH - 1.0f) - newPos.y;
             float curMaskX = p.pos.x;
-            float curMaskY = (m_scrollY + maskH) - p.pos.y;
+            float curMaskY = (m_scrollY + maskH - 1.0f) - p.pos.y;
             
             bool newInside = m_collisionMask.sample(newMaskX, newMaskY) > 0.5f;
             bool curInside = m_collisionMask.sample(curMaskX, curMaskY) > 0.5f;

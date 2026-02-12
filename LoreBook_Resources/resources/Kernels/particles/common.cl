@@ -59,6 +59,7 @@ float sampleCollision(__read_only image2d_t collision, sampler_t sampler, float2
 }
 
 // Calculate surface normal from collision mask gradient
+// Normal points AWAY from solid regions (outward from collision surface)
 float2 surfaceNormal(__read_only image2d_t collision, sampler_t sampler, float2 pos) {
     float step = 1.0f;
     float left = read_imagef(collision, sampler, pos + (float2)(-step, 0)).x;
@@ -66,7 +67,9 @@ float2 surfaceNormal(__read_only image2d_t collision, sampler_t sampler, float2 
     float up = read_imagef(collision, sampler, pos + (float2)(0, -step)).x;
     float down = read_imagef(collision, sampler, pos + (float2)(0, step)).x;
     
-    float2 grad = (float2)(right - left, down - up);
+    // Gradient points from low to high (into solid), so negate to get
+    // outward-facing normal for proper collision reflection
+    float2 grad = (float2)(left - right, up - down);
     float len = length(grad);
     return len > 0.001f ? grad / len : (float2)(0, -1);
 }
@@ -77,8 +80,9 @@ __constant sampler_t collisionSampler = CLK_NORMALIZED_COORDS_FALSE |
                                         CLK_FILTER_NEAREST;
 
 // Convert document-space position to collision mask texel coordinates.
-// The collision mask is rendered with an ortho projection that flips Y,
-// so docY maps to texel (scrollY + maskHeight - docY).
+// The collision mask is rendered with an ortho projection that flips Y.
+// Document Y = scrollY maps to texel row maskHeight-1 (top of texture),
+// Document Y = scrollY + maskHeight maps to texel row 0 (bottom of texture).
 float2 docToMask(float2 docPos, float scrollY, float maskHeight) {
-    return (float2)(docPos.x, (scrollY + maskHeight) - docPos.y);
+    return (float2)(docPos.x, (scrollY + maskHeight - 1.0f) - docPos.y);
 }

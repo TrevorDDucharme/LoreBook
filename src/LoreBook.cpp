@@ -380,6 +380,7 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("Script Editor", dock_main_id);
             ImGui::DockBuilderDockWindow("Resource Explorer", dock_main_id);
             ImGui::DockBuilderDockWindow("API Docs", dock_main_id);
+            ImGui::DockBuilderDockWindow("markdown test", dock_main_id);
             
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;
@@ -1326,13 +1327,34 @@ int main(int argc, char** argv)
         }
         characterEditor.render();
 
+        //make sure its in the main viewport so it doesn't get lost when undocked
+        ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
         ImGui::Begin("markdown test");
         // Use MarkdownEditor which encapsulates both editor and preview
         static MarkdownEditor mdEditor;
         static bool editorInitialized = false;
         if (!editorInitialized) {
             // Initialize with some sample content
-            mdEditor.openFile("");  // Empty path for scratch buffer
+            mdEditor.setSrc(R"(# Markdown Editor Test
+
+This is a **markdown editor** with live preview.
+
+- It supports lists
+- **Bold** and *italic* text
+- `Inline code`
+- And more!
+
+<fire>Flaming text</fire>
+```cpp
+// Code block with syntax highlighting
+#include <iostream>
+int main() {
+    std::cout << "Hello, Markdown!" << std::endl;
+    return 0;
+}
+```
+
+)");
             editorInitialized = true;
         }
         
