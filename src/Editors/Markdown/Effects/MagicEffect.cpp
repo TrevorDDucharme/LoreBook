@@ -48,7 +48,7 @@ void MagicEffect::uploadGlyphSnippetUniforms(GLuint shader, float time) const {
 ParticleSnippets MagicEffect::getParticleSnippets() const {
     ParticleSnippets ps;
     // Geometry: bell-curve fade + pulsing size
-    ps.geometry.uniformDecls = "uniform float uTime;\n";
+    // uTime is provided by the base geometry template
     ps.geometry.code = R"({
     float fade = smoothstep(0.0, 0.3, life) * smoothstep(1.0, 0.7, life);
     color.a *= fade;

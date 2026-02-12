@@ -2,8 +2,25 @@
 #include <Editors/Markdown/Effect.hpp>
 #include <plog/Log.h>
 #include <sstream>
+#include <set>
 
 namespace Markdown {
+
+// Helper: emit uniform declarations, skipping lines already in baseUniforms set
+static void emitUniforms(std::ostream& out, const std::string& decls,
+                         std::set<std::string>& seen) {
+    if (decls.empty()) return;
+    std::istringstream iss(decls);
+    std::string line;
+    while (std::getline(iss, line)) {
+        // Trim trailing whitespace
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\r'))
+            line.pop_back();
+        if (line.empty()) continue;
+        if (seen.insert(line).second)
+            out << line << "\n";
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════
 // GLYPH SHADER COMPOSITION
@@ -333,8 +350,11 @@ ComposedShaderSources ShaderCompositor::composeParticleShader(const std::vector<
            << "uniform mat4 uMVP;\n"
            << "uniform float uTime;\n";
 
-        for (const auto& s : snippets) {
-            if (!s.geometry.uniformDecls.empty()) gs << s.geometry.uniformDecls;
+        {
+            std::set<std::string> seenUniforms = {"uniform mat4 uMVP;", "uniform float uTime;"};
+            for (const auto& s : snippets) {
+                emitUniforms(gs, s.geometry.uniformDecls, seenUniforms);
+            }
         }
 
         gs << "\nin float v_z[];\n"
@@ -359,19 +379,22 @@ ComposedShaderSources ShaderCompositor::composeParticleShader(const std::vector<
            << "    if (life <= 0.0) return;\n\n"
            << "    vec3 pos = vec3(gl_in[0].gl_Position.xy, v_z[0]);\n"
            << "    float size = v_size[0];\n"
-           << "    vec4 color = v_color[0];\n\n"
+           << "    vec4 color = v_color[0];\n"
+           << "    vec3 right = vec3(1, 0, 0);\n"
+           << "    vec3 up = vec3(0, 1, 0);\n\n"
            << "    // Default alpha fade\n"
            << "    color.a *= smoothstep(0.0, 0.3, life);\n\n";
 
-        // Geometry snippet code modifies color, size, life, pos
+        // Geometry snippet code modifies color, size, life, pos, right, up
         for (const auto& s : snippets) {
             if (s.geometry.hasCode())
                 gs << "    " << s.geometry.code << "\n\n";
         }
 
-        // Quad emission (fixed boilerplate)
-        gs << "    vec3 right = vec3(1, 0, 0) * size;\n"
-           << "    vec3 up = vec3(0, 1, 0) * size;\n\n"
+        // Apply size to right/up after snippet modifications
+        gs << "    right *= size;\n"
+           << "    up *= size;\n\n"
+           // Quad emission (fixed boilerplate)
            << "    g_color = color;\n\n"
            << "    g_uv = vec2(0, 0);\n"
            << "    gl_Position = uMVP * vec4(pos - right - up, 1.0);\n"
@@ -404,8 +427,11 @@ ComposedShaderSources ShaderCompositor::composeParticleShader(const std::vector<
         }
 
         fs << "\nuniform float uTime;\n";
-        for (const auto& s : snippets) {
-            if (!s.fragment.uniformDecls.empty()) fs << s.fragment.uniformDecls;
+        {
+            std::set<std::string> seenUniforms = {"uniform float uTime;"};
+            for (const auto& s : snippets) {
+                emitUniforms(fs, s.fragment.uniformDecls, seenUniforms);
+            }
         }
 
         fs << "\nout vec4 fragColor;\n\n";
@@ -778,6 +804,10 @@ bool ShaderCompositor::compileKernelProgram(const ComposedKernelSource& composed
         return false;
     }
 
+    PLOG_DEBUG << "Kernel source (" << fullSource.size() << " bytes), common.cl injected: " 
+               << (includePos != std::string::npos ? "yes" : "no") 
+               << ", commonCL size: " << commonCL.size();
+    
     err = clBuildProgram(outProgram, 1, &dev, "-cl-fast-relaxed-math", nullptr, nullptr);
     if (err != CL_SUCCESS) {
         size_t logSize;

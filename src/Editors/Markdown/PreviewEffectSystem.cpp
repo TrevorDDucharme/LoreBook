@@ -107,6 +107,9 @@ bool PreviewEffectSystem::init(cl_context clContext, cl_device_id clDevice) {
     // Load common.cl once for kernel compilation
     if (existsLoreBook_ResourcesEmbeddedFile("Kernels/particles/common.cl")) {
         m_commonCL = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/particles/common.cl");
+        PLOG_INFO << "Loaded common.cl (" << m_commonCL.size() << " bytes)";
+    } else {
+        PLOG_ERROR << "common.cl NOT found in embedded VFS — all kernels will fail!";
     }
     
     // Register all effects from the EffectRegistry (auto-registered via REGISTER_EFFECT macro)

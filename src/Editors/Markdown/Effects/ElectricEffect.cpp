@@ -74,7 +74,7 @@ void ElectricEffect::uploadGlyphSnippetUniforms(GLuint shader, float time) const
 ParticleSnippets ElectricEffect::getParticleSnippets() const {
     ParticleSnippets ps;
     // Geometry: fastest fade-in (0.1), flicker size + brightness
-    ps.geometry.uniformDecls = "uniform float uTime;\n";
+    // uTime is provided by the base geometry template
     ps.geometry.helpers = R"(
 float elec_geom_random(float x) {
     return fract(sin(x * 12.9898) * 43758.5453);

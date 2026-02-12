@@ -58,7 +58,7 @@ void SparkleEffect::uploadGlyphSnippetUniforms(GLuint shader, float time) const 
 ParticleSnippets SparkleEffect::getParticleSnippets() const {
     ParticleSnippets ps;
     // Geometry: bell-curve fade, twinkle-pulsing size, extra varying for twinkle
-    ps.geometry.uniformDecls = "uniform float uTime;\n";
+    // uTime is provided by the base geometry template
     ps.geometry.varyingDecls = "out float g_twinkle;\n";
     ps.geometry.helpers = R"(
 float sparkle_geom_sin(float x) { return sin(x); }
