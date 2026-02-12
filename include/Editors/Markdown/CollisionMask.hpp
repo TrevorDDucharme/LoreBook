@@ -81,6 +81,8 @@ public:
     int getHeight() const { return m_height; }
     bool isValid() const { return m_fbo != 0 && m_texture != 0; }
     bool hasCPUData() const { return !m_cpuBuffer.empty(); }
+    const uint8_t* getCPUData() const { return m_cpuBuffer.data(); }
+    size_t getCPUDataSize() const { return m_cpuBuffer.size(); }
 
 private:
     void createCLImage();

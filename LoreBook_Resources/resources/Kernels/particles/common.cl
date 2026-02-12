@@ -1,7 +1,24 @@
 // Common particle definitions and utilities
 // Shared across all particle kernels
 
+// Behavior IDs — must match C++ EffectShaderType enum values
+#define BEHAVIOR_NONE     0
+#define BEHAVIOR_FIRE     1
+#define BEHAVIOR_RAINBOW  2
+#define BEHAVIOR_SHAKE    3
+#define BEHAVIOR_DISSOLVE 4
+#define BEHAVIOR_GLOW     5
+#define BEHAVIOR_WAVE     6
+#define BEHAVIOR_GLITCH   7
+#define BEHAVIOR_NEON     8
+#define BEHAVIOR_BLOOD    9
+#define BEHAVIOR_SNOW     10
+#define BEHAVIOR_SPARKLE  11
+#define BEHAVIOR_CUSTOM   12
+
 // Must match C++ Particle struct in PreviewEffectSystem.hpp
+// C++ uses explicit padding so that glm::vec3 (12 bytes) + 4 bytes pad
+// matches OpenCL float3 (16 bytes with 16-byte alignment).
 typedef struct {
     float2 pos;          // 2D physics position
     float2 vel;          // 2D velocity
@@ -12,9 +29,11 @@ typedef struct {
     float4 color;        // RGBA
     float size;          // quad size
     uint meshID;         // 0 = quad, else mesh index
+    float _pad0[2];      // align rotation to 16 bytes
     float3 rotation;     // euler angles
     float3 rotVel;       // angular velocity
     uint behaviorID;     // which kernel updates this particle
+    float _pad1[3];      // pad struct to 112 bytes
 } Particle;
 
 // Random number generation using xorshift
@@ -56,3 +75,10 @@ float2 surfaceNormal(__read_only image2d_t collision, sampler_t sampler, float2 
 __constant sampler_t collisionSampler = CLK_NORMALIZED_COORDS_FALSE | 
                                         CLK_ADDRESS_CLAMP_TO_EDGE | 
                                         CLK_FILTER_NEAREST;
+
+// Convert document-space position to collision mask texel coordinates.
+// The collision mask is rendered with an ortho projection that flips Y,
+// so docY maps to texel (scrollY + maskHeight - docY).
+float2 docToMask(float2 docPos, float scrollY, float maskHeight) {
+    return (float2)(docPos.x, (scrollY + maskHeight) - docPos.y);
+}

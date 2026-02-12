@@ -10,6 +10,8 @@ __kernel void updateFire(
     const float2 gravity,      // Usually (0, -80) for upward rise
     const float turbulence,    // Horizontal turbulence strength
     const float heatDecay,     // How fast particles cool (life drain)
+    const float scrollY,       // Document scroll offset
+    const float maskHeight,    // Collision mask height in pixels
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -17,8 +19,9 @@ __kernel void updateFire(
     
     Particle p = particles[gid];
     
-    // Skip dead particles
+    // Skip dead particles and particles not belonging to this kernel
     if (p.life <= 0.0f) return;
+    if (p.behaviorID != BEHAVIOR_FIRE) return;
     
     // Initialize random state from particle position and time
     uint rngState = (uint)(p.pos.x * 1000.0f) ^ (uint)(p.pos.y * 1000.0f) ^ gid;
@@ -36,12 +39,15 @@ __kernel void updateFire(
     // Update position
     float2 newPos = p.pos + p.vel * deltaTime;
     
-    // Check collision
-    float collisionVal = sampleCollision(collision, collisionSampler, newPos);
+    // Check collision (transform document coords to mask texel coords)
+    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
+    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
     if (collisionVal > 0.5f) {
         // Hit something - deflect along surface
-        float2 normal = surfaceNormal(collision, collisionSampler, newPos);
-        p.vel = reflect(p.vel, normal) * 0.3f;
+        float2 maskNorm = surfaceNormal(collision, collisionSampler, maskPos);
+        // Flip normal Y back to document space
+        float2 docNorm = (float2)(maskNorm.x, -maskNorm.y);
+        p.vel = reflect(p.vel, docNorm) * 0.3f;
         newPos = p.pos; // Don't penetrate
     }
     

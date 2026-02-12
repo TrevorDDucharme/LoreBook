@@ -66,9 +66,15 @@ private:
     void renderEmbeddedContent(const glm::mat4& mvp);
     void emitParticles(float dt, const std::vector<EffectBatch>& batches);
     void updateParticlesGPU(float dt);
+    void updateParticlesCPU(float dt);
     void renderParticlesFromGPU(const glm::mat4& mvp);
     void renderOverlayWidgets(const ImVec2& origin, float scrollY);
     void renderGlowBloom(const std::vector<EffectBatch>& batches, const glm::mat4& mvp);
+    
+    // OpenCL kernel management
+    void loadParticleKernels();
+    void updateCollisionCLImage();
+    void cleanupParticleKernels();
     
     // Helper methods
     void uploadGlyphBatch(const std::vector<GlyphVertex>& vertices);
@@ -125,9 +131,24 @@ private:
     cl_mem m_clDeadIndices = nullptr;     // Buffer of indices of dead particles
     cl_mem m_clDeadCount = nullptr;       // Atomic counter of dead particles
     cl_mem m_clCollisionImage = nullptr;  // CL image for collision sampling
+    int m_clCollisionWidth = 0;           // Tracked collision image dimensions
+    int m_clCollisionHeight = 0;
     size_t m_particleCount = 0;
     uint32_t m_deadCount = 0;
     static constexpr size_t MAX_PARTICLES = 10000;
+    
+    // ── Particle OpenCL kernels ──
+    cl_program m_fireProgram = nullptr;
+    cl_kernel m_fireUpdateKernel = nullptr;
+    cl_program m_snowProgram = nullptr;
+    cl_kernel m_snowUpdateKernel = nullptr;
+    cl_program m_electricProgram = nullptr;
+    cl_kernel m_electricUpdateKernel = nullptr;
+    cl_program m_sparkleProgram = nullptr;
+    cl_kernel m_sparkleUpdateKernel = nullptr;
+    cl_program m_smokeProgram = nullptr;
+    cl_kernel m_smokeUpdateKernel = nullptr;
+    bool m_kernelsLoaded = false;
     
     // CPU particle buffer (for CPU-side emission before GPU update)
     std::vector<Particle> m_cpuParticles;

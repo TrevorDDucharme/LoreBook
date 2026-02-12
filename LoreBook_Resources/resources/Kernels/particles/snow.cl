@@ -11,6 +11,8 @@ __kernel void updateSnow(
     const float swayAmount,    // Horizontal sway amplitude
     const float swayFreq,      // Sway frequency
     const float time,          // Current time for sine wave
+    const float scrollY,       // Document scroll offset
+    const float maskHeight,    // Collision mask height in pixels
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -19,6 +21,7 @@ __kernel void updateSnow(
     Particle p = particles[gid];
     
     if (p.life <= 0.0f) return;
+    if (p.behaviorID != BEHAVIOR_SNOW) return;
     
     uint rngState = gid ^ (uint)(time * 1000.0f);
     
@@ -37,8 +40,9 @@ __kernel void updateSnow(
     // Update position
     float2 newPos = p.pos + p.vel * deltaTime;
     
-    // Collision - snow sticks
-    float collisionVal = sampleCollision(collision, collisionSampler, newPos);
+    // Collision - snow sticks (transform to mask coords)
+    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
+    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
     if (collisionVal > 0.5f) {
         // Hit text/obstacle - accumulate briefly then die
         p.vel = (float2)(0.0f, 0.0f);

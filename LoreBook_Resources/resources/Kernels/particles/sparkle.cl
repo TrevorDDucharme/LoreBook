@@ -10,6 +10,8 @@ __kernel void updateSparkle(
     const float twinkleSpeed,  // How fast sparkles blink
     const float driftSpeed,    // Gentle random drift
     const float time,
+    const float scrollY,       // Document scroll offset
+    const float maskHeight,    // Collision mask height in pixels
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -18,6 +20,7 @@ __kernel void updateSparkle(
     Particle p = particles[gid];
     
     if (p.life <= 0.0f) return;
+    if (p.behaviorID != BEHAVIOR_SPARKLE) return;
     
     uint rngState = gid ^ (uint)(time * 1000.0f);
     

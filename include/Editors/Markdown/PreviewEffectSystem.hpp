@@ -140,22 +140,29 @@ struct GlyphVertex {
 };
 
 // ────────────────────────────────────────────────────────────────────
-// GPU Particle (must match OpenCL kernel struct)
+// GPU Particle (must match OpenCL kernel struct layout)
+// OpenCL float3 occupies 16 bytes (same as float4), so explicit
+// padding is required after meshID and after each vec3 field.
+// Total: 112 bytes, matching OpenCL struct alignment.
 // ────────────────────────────────────────────────────────────────────
 
-struct Particle {
-    glm::vec2 pos;       // 2D physics position
-    glm::vec2 vel;       // 2D velocity
-    float z;             // depth for 3D rendering
-    float zVel;          // z velocity
-    float life;          // remaining life
-    float maxLife;
-    glm::vec4 color;
-    float size;
-    uint32_t meshID;     // 0 = quad, else mesh index
-    glm::vec3 rotation;
-    glm::vec3 rotVel;
-    uint32_t behaviorID; // which kernel updates this particle
+struct alignas(16) Particle {
+    glm::vec2 pos;       // 8 bytes  — offset  0
+    glm::vec2 vel;       // 8 bytes  — offset  8
+    float z;             // 4 bytes  — offset 16
+    float zVel;          // 4 bytes  — offset 20
+    float life;          // 4 bytes  — offset 24
+    float maxLife;       // 4 bytes  — offset 28
+    glm::vec4 color;     // 16 bytes — offset 32
+    float size;          // 4 bytes  — offset 48
+    uint32_t meshID;     // 4 bytes  — offset 52
+    float _pad0[2] = {}; // 8 bytes  — offset 56  (align rotation to 64)
+    glm::vec3 rotation;  // 12 bytes — offset 64
+    float _padRot = 0;   // 4 bytes  — offset 76  (CL float3 = 16 bytes)
+    glm::vec3 rotVel;    // 12 bytes — offset 80
+    float _padRotVel = 0;// 4 bytes  — offset 92  (CL float3 = 16 bytes)
+    uint32_t behaviorID; // 4 bytes  — offset 96
+    float _pad1[3] = {}; // 12 bytes — offset 100 (pad struct to 112)
 };
 
 // ────────────────────────────────────────────────────────────────────

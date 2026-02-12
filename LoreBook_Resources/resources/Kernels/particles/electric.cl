@@ -11,6 +11,8 @@ __kernel void updateElectric(
     const float jumpDistance,  // Max teleport distance  
     const float arcAttraction, // Attraction toward collision surfaces
     const float time,
+    const float scrollY,       // Document scroll offset
+    const float maskHeight,    // Collision mask height in pixels
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -19,6 +21,7 @@ __kernel void updateElectric(
     Particle p = particles[gid];
     
     if (p.life <= 0.0f) return;
+    if (p.behaviorID != BEHAVIOR_SHAKE) return;
     
     uint rngState = gid ^ (uint)(time * 10000.0f) ^ (uint)(p.pos.x);
     
@@ -41,7 +44,8 @@ __kernel void updateElectric(
         for (int i = 0; i < 8; i++) {
             float angle = (float)i * M_PI_F / 4.0f;
             float2 samplePos = p.pos + (float2)(cos(angle), sin(angle)) * nearDist;
-            float alpha = sampleCollision(collision, collisionSampler, samplePos);
+            float2 sampleMask = docToMask(samplePos, scrollY, maskHeight);
+            float alpha = sampleCollision(collision, collisionSampler, sampleMask);
             if (alpha > 0.1f && alpha < minAlpha) {
                 minAlpha = alpha;
                 closest = samplePos;

@@ -11,6 +11,8 @@ __kernel void updateSmoke(
     const float riseSpeed,     // Upward drift speed
     const float expansion,     // Rate of size increase
     const float dissipation,   // How fast smoke fades
+    const float scrollY,       // Document scroll offset
+    const float maskHeight,    // Collision mask height in pixels
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -19,6 +21,7 @@ __kernel void updateSmoke(
     Particle p = particles[gid];
     
     if (p.life <= 0.0f) return;
+    if (p.behaviorID != BEHAVIOR_DISSOLVE) return;
     
     uint rngState = gid ^ (uint)(p.pos.x * 100.0f);
     
@@ -40,9 +43,11 @@ __kernel void updateSmoke(
     float2 newPos = p.pos + p.vel * deltaTime;
     
     // Collision - smoke wraps around obstacles
-    float collisionVal = sampleCollision(collision, collisionSampler, newPos);
+    float2 maskPos = docToMask(newPos, scrollY, maskHeight);
+    float collisionVal = sampleCollision(collision, collisionSampler, maskPos);
     if (collisionVal > 0.5f) {
-        float2 normal = surfaceNormal(collision, collisionSampler, newPos);
+        float2 maskNorm = surfaceNormal(collision, collisionSampler, maskPos);
+        float2 normal = (float2)(maskNorm.x, -maskNorm.y);
         // Deflect along surface
         p.vel = p.vel - normal * dot(p.vel, normal) * 1.5f;
         newPos = p.pos + p.vel * deltaTime;
