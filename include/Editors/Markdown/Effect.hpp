@@ -99,6 +99,21 @@ struct KernelParams {
 };
 
 // ────────────────────────────────────────────────────────────────────
+// Effect Snippet - composable shader fragments for effect stacking
+// ────────────────────────────────────────────────────────────────────
+
+struct EffectSnippet {
+    std::string uniformDecls;     // Namespaced uniform declarations
+    std::string helpers;          // Namespaced helper functions
+    std::string vertexCode;       // Code injected into vertex main() to modify `pos`
+    std::string fragmentCode;     // Code injected into fragment main() to modify `color`
+
+    bool hasVertex() const { return !vertexCode.empty(); }
+    bool hasFragment() const { return !fragmentCode.empty(); }
+    bool empty() const { return !hasVertex() && !hasFragment(); }
+};
+
+// ────────────────────────────────────────────────────────────────────
 // Effect - abstract base class for all text effects
 // ────────────────────────────────────────────────────────────────────
 
@@ -118,6 +133,10 @@ public:
     // Return empty ShaderSources if not applicable
     virtual ShaderSources getGlyphShaderSources() const { return {}; }
     virtual ShaderSources getParticleShaderSources() const { return {}; }
+    
+    // ── Composable Snippets (for effect stacking) ──
+    virtual EffectSnippet getSnippet() const { return {}; }
+    virtual void uploadSnippetUniforms(GLuint shader, float time) const {}
     
     // ── Post-Processing ──
     virtual std::vector<PostProcessPass> getPostProcessPasses() const { return {}; }

@@ -23,6 +23,9 @@ public:
     void uploadParticleUniforms(GLuint shader, float time) const override;
     void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
     
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    
     // Electric-specific parameters
     float arcFrequency = 3.0f;
     float jitterStrength = 50.0f;

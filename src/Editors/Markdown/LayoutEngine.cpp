@@ -618,36 +618,45 @@ EffectDef* LayoutEngine::getCompositeEffect() {
     if (m_effectStack.empty()) return nullptr;
     if (m_effectStack.size() == 1) return m_effectStack.currentEffect();
     
-    // Multiple effects stacked — use the innermost effect for shaders
-    // and merge particle emission + bloom from other effects in the stack
+    // Multiple effects stacked — compose a single EffectDef with:
+    // - effectStack: all Effect* instances for shader composition
+    // - stackSignature: cache key for composite shader
+    // - particle/bloom merged from the full stack
     const auto& stack = m_effectStack.getStack();
     EffectDef* innermost = m_effectStack.currentEffect();
     
-    bool needsParticleMerge = false;
+    // Build effectStack (outer→inner) and stackSignature
+    std::vector<Effect*> effectPtrs;
+    std::string signature;
     bool needsBloomMerge = false;
+    bool needsParticleMerge = false;
     Effect* bloomFx = nullptr;
     
     for (const auto& ae : stack) {
         if (!ae.def || !ae.def->effect) continue;
-        // Check if an outer effect has particles the innermost doesn't
-        if (ae.def != innermost && ae.def->hasParticles && !innermost->hasParticles) {
-            needsParticleMerge = true;
-        }
-        // Check if an outer effect contributes to bloom but innermost doesn't
+        effectPtrs.push_back(ae.def->effect);
+        
+        if (!signature.empty()) signature += "+";
+        signature += ae.def->name;
+        
+        // Check bloom from any effect in stack
         if (ae.def->effect->getCapabilities().contributesToBloom) {
             if (!innermost->effect || !innermost->effect->getCapabilities().contributesToBloom) {
                 needsBloomMerge = true;
                 bloomFx = ae.def->effect;
             }
         }
+        
+        // Check particles from outer effects
+        if (ae.def != innermost && ae.def->hasParticles && !innermost->hasParticles) {
+            needsParticleMerge = true;
+        }
     }
     
-    if (!needsParticleMerge && !needsBloomMerge) {
-        return innermost;
-    }
-    
-    // Create a composite that uses innermost's shader but adds particles/bloom from the stack
+    // Always create a composite EffectDef for stacked effects
     auto composite = std::make_unique<EffectDef>(*innermost);
+    composite->effectStack = std::move(effectPtrs);
+    composite->stackSignature = std::move(signature);
     
     if (needsBloomMerge && bloomFx) {
         composite->bloomEffect = bloomFx;

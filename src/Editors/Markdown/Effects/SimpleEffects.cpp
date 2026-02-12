@@ -71,6 +71,28 @@ void RainbowEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uSpeed"), speed);
 }
 
+EffectSnippet RainbowEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uRainbow_Speed;\n";
+    s.helpers = R"(
+vec3 rainbow_hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+)";
+    s.fragmentCode = R"({
+    float hue = fract(v_worldPos.x * 0.01 + uTime * uRainbow_Speed);
+    vec3 rainbow = rainbow_hsv2rgb(vec3(hue, 0.85, 1.0));
+    color = vec4(rainbow, color.a);
+})";
+    return s;
+}
+
+void RainbowEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uRainbow_Speed"), speed);
+}
+
 REGISTER_EFFECT(RainbowEffect)
 
 // ════════════════════════════════════════════════════════════════════
@@ -141,6 +163,22 @@ void WaveEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uSpeed"), speed);
 }
 
+EffectSnippet WaveEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uWave_Amplitude;\nuniform float uWave_Frequency;\nuniform float uWave_Speed;\n";
+    s.vertexCode = R"({
+    float wave = sin(in_pos.x * uWave_Frequency * 0.1 + uTime * uWave_Speed * 3.0) * uWave_Amplitude;
+    pos.y += wave;
+})";
+    return s;
+}
+
+void WaveEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uWave_Amplitude"), amplitude);
+    glUniform1f(glGetUniformLocation(shader, "uWave_Frequency"), frequency);
+    glUniform1f(glGetUniformLocation(shader, "uWave_Speed"), speed);
+}
+
 REGISTER_EFFECT(WaveEffect)
 
 // ════════════════════════════════════════════════════════════════════
@@ -198,6 +236,29 @@ void ShakeEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
     glUniform1f(glGetUniformLocation(shader, "uIntensity"), intensity);
     glUniform1f(glGetUniformLocation(shader, "uSpeed"), speed);
+}
+
+EffectSnippet ShakeEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uShake_Intensity;\nuniform float uShake_Speed;\n";
+    s.helpers = R"(
+float shake_rand(vec2 co) {
+    return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+}
+)";
+    s.vertexCode = R"({
+    float seed = in_pos.x * 0.1;
+    float shakeX = (shake_rand(vec2(seed, uTime * uShake_Speed * 10.0)) - 0.5) * uShake_Intensity * 2.0;
+    float shakeY = (shake_rand(vec2(seed + 0.5, uTime * uShake_Speed * 10.0)) - 0.5) * uShake_Intensity * 2.0;
+    pos.x += shakeX;
+    pos.y += shakeY;
+})";
+    return s;
+}
+
+void ShakeEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uShake_Intensity"), intensity);
+    glUniform1f(glGetUniformLocation(shader, "uShake_Speed"), speed);
 }
 
 REGISTER_EFFECT(ShakeEffect)

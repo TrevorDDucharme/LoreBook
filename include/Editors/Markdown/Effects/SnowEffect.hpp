@@ -23,6 +23,9 @@ public:
     void uploadParticleUniforms(GLuint shader, float time) const override;
     void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
     
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    
     // Snow-specific parameters
     std::array<float, 2> gravity = {0.0f, 50.0f};
     std::array<float, 2> wind = {20.0f, 0.0f};

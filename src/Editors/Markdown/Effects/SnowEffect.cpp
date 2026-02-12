@@ -285,6 +285,25 @@ void SnowEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
 }
 
+EffectSnippet SnowEffect::getSnippet() const {
+    EffectSnippet s;
+    s.helpers = R"(
+float snow_random(vec2 st) {
+    return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453);
+}
+)";
+    s.fragmentCode = R"({
+    vec3 snowColor = mix(vec3(0.8, 0.9, 1.0), vec3(1.0), snow_random(v_worldPos.xy * 0.1 + uTime * 0.5));
+    float snowSparkle = step(0.98, snow_random(v_worldPos.xy + floor(uTime * 3.0))) * 0.3;
+    color.rgb = snowColor + vec3(snowSparkle);
+})";
+    return s;
+}
+
+void SnowEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    // No custom uniforms beyond uTime
+}
+
 void SnowEffect::uploadParticleUniforms(GLuint shader, float time) const {
     // No custom uniforms needed
 }

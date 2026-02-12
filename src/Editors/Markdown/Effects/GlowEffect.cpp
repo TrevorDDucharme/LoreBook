@@ -82,6 +82,25 @@ void GlowEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform4fv(glGetUniformLocation(shader, "uColor1"), 1, &color1[0]);
 }
 
+EffectSnippet GlowEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform vec4 uGlow_Color1;\nuniform float uGlow_Intensity;\nuniform float uGlow_Speed;\n";
+    s.fragmentCode = R"({
+    float glowPulse = 0.7 + 0.3 * sin(uTime * 3.0 * uGlow_Speed);
+    float glowStrength = clamp(uGlow_Intensity * glowPulse, 0.0, 1.0);
+    color.rgb = mix(color.rgb, uGlow_Color1.rgb, glowStrength * 0.8);
+    float glowAlpha = smoothstep(0.0, 0.5, alpha) * (1.0 + glowStrength * 0.3);
+    color.a *= glowAlpha;
+})";
+    return s;
+}
+
+void GlowEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform4fv(glGetUniformLocation(shader, "uGlow_Color1"), 1, &color1[0]);
+    glUniform1f(glGetUniformLocation(shader, "uGlow_Intensity"), intensity);
+    glUniform1f(glGetUniformLocation(shader, "uGlow_Speed"), speed);
+}
+
 REGISTER_EFFECT(GlowEffect)
 
 } // namespace Markdown

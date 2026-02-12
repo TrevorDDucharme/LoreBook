@@ -50,6 +50,10 @@ struct EffectDef {
     // Bloom effect from stack compositing (may differ from primary effect)
     Effect* bloomEffect = nullptr;
     
+    // Composited effect stack (populated by LayoutEngine for stacked effects)
+    std::vector<Effect*> effectStack;     // All effects in the stack (outer→inner)
+    std::string stackSignature;            // Cache key, e.g. "glow+shake"
+    
     // For data-driven hot-reload
     std::string sourceFile;
 };
@@ -189,6 +193,12 @@ public:
     // Upload effect uniforms to shader (delegates to Effect::uploadGlyphUniforms)
     void uploadEffectUniforms(GLuint shader, const EffectDef* effect, float time);
     
+    // Upload composite snippet uniforms for a stacked effect
+    void uploadCompositeUniforms(GLuint shader, const EffectDef* effect, float time);
+    
+    // Get or compile a composite shader for a stack of effects
+    GLuint getOrCompileCompositeShader(const std::vector<Effect*>& stack, const std::string& signature);
+    
     // Get all active Effects that have particles
     std::vector<EffectDef*> getParticleEffects();
 
@@ -198,6 +208,10 @@ private:
     
     /// Compile shaders and kernel for an Effect instance
     void compileEffectResources(EffectDef& def);
+    
+    /// Generate composite GLSL from a stack of effect snippets
+    std::string generateCompositeVertexShader(const std::vector<Effect*>& stack);
+    std::string generateCompositeFragmentShader(const std::vector<Effect*>& stack);
     
     // OpenCL context (borrowed from OpenCLContext singleton)
     cl_context m_clContext = nullptr;
@@ -211,6 +225,9 @@ private:
     
     // Base glyph shader (for effects with no custom glyph shader)
     GLuint m_baseGlyphShader = 0;
+    
+    // Composite shader cache: stackSignature → compiled shader program
+    std::unordered_map<std::string, GLuint> m_compositeShaderCache;
     
     bool m_initialized = false;
 };

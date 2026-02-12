@@ -23,6 +23,9 @@ public:
     void uploadParticleUniforms(GLuint shader, float time) const override;
     void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
     
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    
     float orbitSpeed = 2.0f;
     float orbitRadius = 20.0f;
     float riseSpeed = 25.0f;

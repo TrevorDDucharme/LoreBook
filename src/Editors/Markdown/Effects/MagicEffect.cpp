@@ -253,6 +253,25 @@ void MagicEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform4fv(glGetUniformLocation(shader, "uColor1"), 1, &color1[0]);
 }
 
+EffectSnippet MagicEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform vec4 uMagic_Color1;\nuniform float uMagic_Intensity;\nuniform float uMagic_Speed;\n";
+    s.fragmentCode = R"({
+    float magicPulse = 0.7 + 0.3 * sin(uTime * 2.5 * uMagic_Speed + v_worldPos.x * 0.05);
+    float magicStrength = clamp(uMagic_Intensity * magicPulse, 0.0, 1.0);
+    color.rgb = mix(color.rgb, uMagic_Color1.rgb, magicStrength * 0.8);
+    float magicGlow = smoothstep(0.0, 0.5, alpha) * (1.0 + magicStrength * 0.3);
+    color.a *= magicGlow;
+})";
+    return s;
+}
+
+void MagicEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform4fv(glGetUniformLocation(shader, "uMagic_Color1"), 1, &color1[0]);
+    glUniform1f(glGetUniformLocation(shader, "uMagic_Intensity"), intensity);
+    glUniform1f(glGetUniformLocation(shader, "uMagic_Speed"), speed);
+}
+
 void MagicEffect::uploadParticleUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
 }

@@ -285,6 +285,29 @@ void SparkleEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTwinkleSpeed"), twinkleSpeed);
 }
 
+EffectSnippet SparkleEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uSparkle_TwinkleSpeed;\n";
+    s.helpers = R"(
+float sparkle_random(vec2 st) {
+    return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453);
+}
+)";
+    s.fragmentCode = R"({
+    vec3 sparkleBase = vec3(1.0, 0.9, 0.6);
+    float sparkle1 = step(0.97, sparkle_random(floor(v_worldPos.xy * 0.3) + floor(uTime * uSparkle_TwinkleSpeed)));
+    float sparkle2 = step(0.95, sparkle_random(floor(v_worldPos.xy * 0.5) + floor(uTime * uSparkle_TwinkleSpeed * 1.3)));
+    float sparkle3 = step(0.92, sparkle_random(floor(v_worldPos.xy * 0.2) + floor(uTime * uSparkle_TwinkleSpeed * 0.7)));
+    float sparkle = max(max(sparkle1, sparkle2 * 0.7), sparkle3 * 0.4);
+    color.rgb = sparkleBase + vec3(sparkle);
+})";
+    return s;
+}
+
+void SparkleEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uSparkle_TwinkleSpeed"), twinkleSpeed);
+}
+
 void SparkleEffect::uploadParticleUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
 }

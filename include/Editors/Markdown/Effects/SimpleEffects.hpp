@@ -21,6 +21,9 @@ public:
     void uploadGlyphUniforms(GLuint shader, float time) const override;
     void uploadParticleUniforms(GLuint, float) const override {}
     void bindKernelParams(cl_kernel, const KernelParams&) const override {}
+    
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
 };
 
 /// Wave effect - sinusoidal displacement (shader only)
@@ -41,6 +44,9 @@ public:
     void uploadGlyphUniforms(GLuint shader, float time) const override;
     void uploadParticleUniforms(GLuint, float) const override {}
     void bindKernelParams(cl_kernel, const KernelParams&) const override {}
+    
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
     
     float amplitude = 3.0f;
     float frequency = 1.0f;
@@ -64,6 +70,9 @@ public:
     void uploadGlyphUniforms(GLuint shader, float time) const override;
     void uploadParticleUniforms(GLuint, float) const override {}
     void bindKernelParams(cl_kernel, const KernelParams&) const override {}
+    
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
 };
 
 } // namespace Markdown

@@ -320,6 +320,32 @@ void FireEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform4fv(glGetUniformLocation(shader, "uColor2"), 1, &color2[0]);
 }
 
+EffectSnippet FireEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uFire_Speed;\nuniform float uFire_Intensity;\nuniform vec4 uFire_Color1;\nuniform vec4 uFire_Color2;\n";
+    s.vertexCode = R"({
+    float fireHeight = 1.0 - in_uv.y;
+    float fireWave = sin(in_pos.x * 0.1 + uTime * 5.0 * uFire_Speed) * fireHeight * uFire_Intensity * 3.0;
+    pos.x += fireWave;
+    pos.y += sin(uTime * 7.0 * uFire_Speed + in_pos.x * 0.2) * fireHeight * uFire_Intensity;
+})";
+    s.fragmentCode = R"({
+    float heat = 1.0 - v_uv.y;
+    vec3 fireColor = mix(uFire_Color1.rgb, uFire_Color2.rgb, heat);
+    color.rgb = fireColor;
+    float fireGlow = smoothstep(0.0, 0.5, alpha) * (1.0 + heat * 0.5);
+    color.a *= fireGlow;
+})";
+    return s;
+}
+
+void FireEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uFire_Speed"), speed);
+    glUniform1f(glGetUniformLocation(shader, "uFire_Intensity"), intensity);
+    glUniform4fv(glGetUniformLocation(shader, "uFire_Color1"), 1, &color1[0]);
+    glUniform4fv(glGetUniformLocation(shader, "uFire_Color2"), 1, &color2[0]);
+}
+
 void FireEffect::uploadParticleUniforms(GLuint shader, float time) const {
     glUniform1ui(glGetUniformLocation(shader, "uBehaviorID"), getBehaviorID());
 }

@@ -26,6 +26,9 @@ public:
     void uploadParticleUniforms(GLuint shader, float time) const override;
     void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
     
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    
     // Fire-specific parameters
     float turbulence = 100.0f;
     float heatDecay = 1.5f;

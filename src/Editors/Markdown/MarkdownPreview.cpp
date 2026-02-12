@@ -1011,11 +1011,20 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
     bool hasGlow = false;
     for (const auto& batch : batches) {
         if (!batch.effect) continue;
+        // Check bloomEffect pointer
         Effect* fx = batch.effect->bloomEffect ? batch.effect->bloomEffect : batch.effect->effect;
         if (fx && fx->getCapabilities().contributesToBloom) {
             hasGlow = true;
             break;
         }
+        // Also check any effect in the composite stack
+        for (const auto* stackFx : batch.effect->effectStack) {
+            if (stackFx && stackFx->getCapabilities().contributesToBloom) {
+                hasGlow = true;
+                break;
+            }
+        }
+        if (hasGlow) break;
     }
     if (!hasGlow) return;
     
@@ -1038,8 +1047,22 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
     
     for (const auto& batch : batches) {
         if (!batch.effect || batch.vertices.empty()) continue;
-        Effect* bloomFx = batch.effect->bloomEffect ? batch.effect->bloomEffect : batch.effect->effect;
-        if (!bloomFx || !bloomFx->getCapabilities().contributesToBloom) continue;
+        
+        // Find the bloom-contributing effect: check bloomEffect, then stack, then primary
+        Effect* bloomFx = batch.effect->bloomEffect;
+        if (!bloomFx || !bloomFx->getCapabilities().contributesToBloom) {
+            bloomFx = nullptr;
+            for (const auto* stackFx : batch.effect->effectStack) {
+                if (stackFx && stackFx->getCapabilities().contributesToBloom) {
+                    bloomFx = const_cast<Effect*>(stackFx);
+                    break;
+                }
+            }
+        }
+        if (!bloomFx && batch.effect->effect && batch.effect->effect->getCapabilities().contributesToBloom) {
+            bloomFx = batch.effect->effect;
+        }
+        if (!bloomFx) continue;
         
         glUniform4fv(glGetUniformLocation(m_bloomGlowShader, "uColor1"), 1, &bloomFx->color1[0]);
         glUniform1f(glGetUniformLocation(m_bloomGlowShader, "uIntensity"), bloomFx->intensity);

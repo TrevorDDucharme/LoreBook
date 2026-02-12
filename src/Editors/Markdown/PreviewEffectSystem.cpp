@@ -5,6 +5,7 @@
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include <plog/Log.h>
 #include <algorithm>
+#include <sstream>
 
 namespace Markdown {
 
@@ -139,6 +140,13 @@ void PreviewEffectSystem::cleanup() {
     
     m_effects.clear();
     m_ownedEffects.clear();
+    
+    // Release composite shader cache
+    for (auto& [sig, shader] : m_compositeShaderCache) {
+        if (shader) glDeleteProgram(shader);
+    }
+    m_compositeShaderCache.clear();
+    
     m_initialized = false;
 }
 
@@ -410,11 +418,140 @@ void PreviewEffectSystem::compileEffectResources(EffectDef& def) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Composite Shader Generation
+// ────────────────────────────────────────────────────────────────────
+
+std::string PreviewEffectSystem::generateCompositeVertexShader(const std::vector<Effect*>& stack) {
+    std::ostringstream vs;
+    vs << "#version 330 core\n"
+       << "layout(location = 0) in vec3 in_pos;\n"
+       << "layout(location = 1) in vec2 in_uv;\n"
+       << "layout(location = 2) in vec4 in_color;\n"
+       << "layout(location = 3) in uint in_effectID;\n\n"
+       << "uniform mat4 uMVP;\n"
+       << "uniform float uTime;\n";
+
+    // Collect uniform declarations from all effects
+    for (const auto* fx : stack) {
+        auto snippet = fx->getSnippet();
+        if (!snippet.uniformDecls.empty())
+            vs << snippet.uniformDecls;
+    }
+
+    vs << "\nout vec2 v_uv;\n"
+       << "out vec4 v_color;\n"
+       << "out vec3 v_worldPos;\n"
+       << "flat out uint v_effectID;\n\n";
+
+    // Collect helper functions (vertex-relevant)
+    for (const auto* fx : stack) {
+        auto snippet = fx->getSnippet();
+        if (snippet.hasVertex() && !snippet.helpers.empty())
+            vs << snippet.helpers << "\n";
+    }
+
+    vs << "void main() {\n"
+       << "    vec3 pos = in_pos;\n";
+
+    // Apply vertex modifications in stack order (outer→inner)
+    for (const auto* fx : stack) {
+        auto snippet = fx->getSnippet();
+        if (snippet.hasVertex())
+            vs << "    " << snippet.vertexCode << "\n";
+    }
+
+    vs << "    gl_Position = uMVP * vec4(pos, 1.0);\n"
+       << "    v_uv = in_uv;\n"
+       << "    v_color = in_color;\n"
+       << "    v_worldPos = in_pos;\n"
+       << "    v_effectID = in_effectID;\n"
+       << "}\n";
+
+    return vs.str();
+}
+
+std::string PreviewEffectSystem::generateCompositeFragmentShader(const std::vector<Effect*>& stack) {
+    std::ostringstream fs;
+    fs << "#version 330 core\n"
+       << "uniform sampler2D uFontAtlas;\n"
+       << "uniform float uTime;\n";
+
+    // Collect uniform declarations
+    for (const auto* fx : stack) {
+        auto snippet = fx->getSnippet();
+        if (!snippet.uniformDecls.empty())
+            fs << snippet.uniformDecls;
+    }
+
+    fs << "\nin vec2 v_uv;\n"
+       << "in vec4 v_color;\n"
+       << "in vec3 v_worldPos;\n"
+       << "flat in uint v_effectID;\n\n"
+       << "out vec4 fragColor;\n\n";
+
+    // Collect helper functions (fragment-relevant)
+    for (const auto* fx : stack) {
+        auto snippet = fx->getSnippet();
+        if (snippet.hasFragment() && !snippet.helpers.empty())
+            fs << snippet.helpers << "\n";
+    }
+
+    fs << "void main() {\n"
+       << "    float alpha = texture(uFontAtlas, v_uv).a;\n"
+       << "    vec4 color = vec4(v_color.rgb, v_color.a * alpha);\n";
+
+    // Apply fragment modifications in reverse stack order (inner first, outer last)
+    for (int i = static_cast<int>(stack.size()) - 1; i >= 0; --i) {
+        auto snippet = stack[i]->getSnippet();
+        if (snippet.hasFragment())
+            fs << "    " << snippet.fragmentCode << "\n";
+    }
+
+    fs << "    fragColor = color;\n"
+       << "}\n";
+
+    return fs.str();
+}
+
+GLuint PreviewEffectSystem::getOrCompileCompositeShader(const std::vector<Effect*>& stack, const std::string& signature) {
+    // Check cache
+    auto it = m_compositeShaderCache.find(signature);
+    if (it != m_compositeShaderCache.end()) {
+        return it->second;
+    }
+
+    // Generate and compile
+    std::string vertSrc = generateCompositeVertexShader(stack);
+    std::string fragSrc = generateCompositeFragmentShader(stack);
+
+    GLuint shader = compileShaderProgram(vertSrc.c_str(), fragSrc.c_str());
+    if (shader) {
+        PLOG_INFO << "Compiled composite shader for stack: " << signature;
+    } else {
+        PLOG_ERROR << "Failed to compile composite shader for stack: " << signature;
+        // Log sources for debugging
+        PLOG_ERROR << "Vertex:\n" << vertSrc;
+        PLOG_ERROR << "Fragment:\n" << fragSrc;
+    }
+
+    m_compositeShaderCache[signature] = shader;
+    return shader;
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Shader / Kernel access
 // ────────────────────────────────────────────────────────────────────
 
 GLuint PreviewEffectSystem::getGlyphShader(const EffectDef* def) {
-    if (def && def->effectGlyphShader) {
+    if (!def) return m_baseGlyphShader;
+    
+    // If this is a composite EffectDef with a stacked signature, use composite shader
+    if (def->effectStack.size() > 1 && !def->stackSignature.empty()) {
+        GLuint composite = getOrCompileCompositeShader(def->effectStack, def->stackSignature);
+        if (composite) return composite;
+    }
+    
+    if (def->effectGlyphShader) {
         return def->effectGlyphShader;
     }
     return m_baseGlyphShader;
@@ -432,9 +569,26 @@ cl_kernel PreviewEffectSystem::getEffectKernel(const EffectDef* def) {
 
 void PreviewEffectSystem::uploadEffectUniforms(GLuint shader, const EffectDef* effect, float time) {
     if (effect && effect->effect) {
+        // If composite stack, upload snippet uniforms for each effect in stack
+        if (effect->effectStack.size() > 1) {
+            uploadCompositeUniforms(shader, effect, time);
+            return;
+        }
         effect->effect->uploadGlyphUniforms(shader, time);
     } else {
         glUniform1f(glGetUniformLocation(shader, "uTime"), time);
+    }
+}
+
+void PreviewEffectSystem::uploadCompositeUniforms(GLuint shader, const EffectDef* effect, float time) {
+    // Upload shared uTime
+    glUniform1f(glGetUniformLocation(shader, "uTime"), time);
+    
+    // Upload each effect's namespaced snippet uniforms
+    for (const auto* fx : effect->effectStack) {
+        if (fx) {
+            fx->uploadSnippetUniforms(shader, time);
+        }
     }
 }
 
@@ -446,6 +600,7 @@ void PreviewEffectSystem::buildBatches(const std::vector<LayoutGlyph>& glyphs,
                                         std::vector<EffectBatch>& outBatches) {
     outBatches.clear();
     
+    // Group glyphs by EffectDef pointer (each composite gets its own unique EffectDef)
     std::unordered_map<EffectDef*, std::vector<size_t>> effectGroups;
     
     for (size_t i = 0; i < glyphs.size(); ++i) {

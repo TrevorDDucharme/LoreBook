@@ -347,6 +347,42 @@ void ElectricEffect::uploadGlyphUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uJitterStrength"), jitterStrength);
 }
 
+EffectSnippet ElectricEffect::getSnippet() const {
+    EffectSnippet s;
+    s.uniformDecls = "uniform float uElectric_ArcFrequency;\nuniform float uElectric_JitterStrength;\n";
+    s.helpers = R"(
+float electric_random(float x) {
+    return fract(sin(x * 12.9898) * 43758.5453);
+}
+float electric_random2(vec2 st) {
+    return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453);
+}
+)";
+    s.vertexCode = R"({
+    float jitterTime = floor(uTime * 20.0);
+    float jitterX = (electric_random(jitterTime + in_pos.y * 0.1) - 0.5) * uElectric_JitterStrength * 0.1;
+    float jitterY = (electric_random(jitterTime * 1.3 + in_pos.x * 0.1) - 0.5) * uElectric_JitterStrength * 0.05;
+    float doJitter = step(0.85, electric_random(jitterTime));
+    pos.x += jitterX * doJitter;
+    pos.y += jitterY * doJitter;
+})";
+    s.fragmentCode = R"({
+    vec3 elecBase = vec3(0.5, 0.7, 1.0);
+    float elecFlicker = step(0.7, electric_random2(vec2(floor(uTime * 30.0), 0.0)));
+    float elecBrightness = 1.0 + elecFlicker * 0.5;
+    float elecArc = step(0.95, electric_random2(vec2(floor(v_worldPos.x * 0.2), floor(uTime * uElectric_ArcFrequency))));
+    color.rgb = elecBase * elecBrightness + vec3(elecArc);
+    float elecGlow = smoothstep(0.0, 0.5, alpha) * (1.0 + elecFlicker * 0.2);
+    color.a *= elecGlow;
+})";
+    return s;
+}
+
+void ElectricEffect::uploadSnippetUniforms(GLuint shader, float time) const {
+    glUniform1f(glGetUniformLocation(shader, "uElectric_ArcFrequency"), arcFrequency);
+    glUniform1f(glGetUniformLocation(shader, "uElectric_JitterStrength"), jitterStrength);
+}
+
 void ElectricEffect::uploadParticleUniforms(GLuint shader, float time) const {
     glUniform1f(glGetUniformLocation(shader, "uTime"), time);
 }

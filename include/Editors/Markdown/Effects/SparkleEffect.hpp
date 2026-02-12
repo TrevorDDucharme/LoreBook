@@ -22,6 +22,9 @@ public:
     void uploadParticleUniforms(GLuint shader, float time) const override;
     void bindKernelParams(cl_kernel kernel, const KernelParams& params) const override;
     
+    EffectSnippet getSnippet() const override;
+    void uploadSnippetUniforms(GLuint shader, float time) const override;
+    
     // Sparkle-specific parameters
     float twinkleSpeed = 8.0f;
     float driftSpeed = 10.0f;
