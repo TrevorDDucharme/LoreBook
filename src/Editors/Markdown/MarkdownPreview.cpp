@@ -37,8 +37,8 @@ in vec2 v_uv;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    float a = texture(uFontAtlas, v_uv).a;
-    fragColor = vec4(a, 0.0, 0.0, 0.0);
+    float a = texture(uFontAtlas, v_uv).r;
+    fragColor = vec4(a, 0.0, 0.0, 1.0);
 }
 )";
 
@@ -944,15 +944,27 @@ ImVec2 MarkdownPreview::render() {
 void MarkdownPreview::renderCollisionMask(const std::vector<EffectBatch>& batches) {
     if (!m_collisionShader || !m_glyphVAO || !m_glyphVBO) return;
     
-    m_collisionMask.bindForRendering();
-    m_collisionMask.clear();
+    // Refresh font atlas texture ID from ImGui (it may have been rebuilt)
+    m_fontAtlasTexture = (GLuint)(intptr_t)ImGui::GetIO().Fonts->TexID;
     
-    // Collision mask is a simple alpha stamp — no depth test needed, max blending
+    m_collisionMask.bindForRendering();
+    
+    // Reset ALL relevant GL state — inherited state from ImGui or other renderers
+    // can silently discard fragments (e.g. GL_SAMPLE_ALPHA_TO_COVERAGE with alpha=0)
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+    glDisable(GL_SAMPLE_COVERAGE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    
+    m_collisionMask.clear();
+    
+    // Additive blending so overlapping glyphs accumulate
     glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE);  // Additive so overlapping glyphs accumulate
+    glBlendFunc(GL_ONE, GL_ONE);
     
     glUseProgram(m_collisionShader);
     
@@ -967,11 +979,31 @@ void MarkdownPreview::renderCollisionMask(const std::vector<EffectBatch>& batche
     glUniform1i(glGetUniformLocation(m_collisionShader, "uFontAtlas"), 0);
     
     // Render all glyphs (we just need their alpha)
+    int totalVerts = 0;
     for (const auto& batch : batches) {
         if (batch.vertices.empty()) continue;
         uploadGlyphBatch(batch.vertices);
         glBindVertexArray(m_glyphVAO);
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(batch.vertices.size()));
+        totalVerts += static_cast<int>(batch.vertices.size());
+    }
+    
+    // ── One-time diagnostic ──
+    {
+        static bool diagDone = false;
+        if (!diagDone) {
+            diagDone = true;
+            glFinish();
+            
+            int cx = m_collisionMask.getWidth() / 2;
+            int cy = m_collisionMask.getHeight() / 2;
+            uint8_t afterDrawPixel = 0;
+            glReadPixels(cx, cy, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &afterDrawPixel);
+            PLOG_INFO << "[CollMaskDiag] pixel after draws=" << (int)afterDrawPixel
+                      << " totalVerts=" << totalVerts
+                      << " batches=" << batches.size()
+                      << " fboW=" << m_fboWidth << " fboH=" << m_fboHeight;
+        }
     }
     
     m_collisionMask.unbind();
@@ -1356,6 +1388,50 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
     // Release dummy collision image if we created one
     if (dummyImg) {
         clReleaseMemObject(dummyImg);
+    }
+    
+    // ── Collision mask diagnostic (every ~120 frames) ──
+    {
+        static int diagFrame = 0;
+        if (++diagFrame >= 120) {
+            diagFrame = 0;
+            int mw = m_collisionMask.getWidth();
+            int mh = m_collisionMask.getHeight();
+            const uint8_t* maskData = m_collisionMask.hasCPUData() ? m_collisionMask.getCPUData() : nullptr;
+            int nonZero = 0, maxVal = 0;
+            if (maskData && mw > 0 && mh > 0) {
+                size_t total = static_cast<size_t>(mw) * mh;
+                for (size_t j = 0; j < total; ++j) {
+                    if (maskData[j] > 0) ++nonZero;
+                    if (maskData[j] > maxVal) maxVal = maskData[j];
+                }
+            }
+            PLOG_INFO << "[CollDiag] mask=" << mw << "x" << mh
+                      << " nonZero=" << nonZero << "/" << (mw * mh)
+                      << " maxVal=" << maxVal
+                      << " clImg=" << (m_clCollisionImage ? "yes" : "NO")
+                      << " scrollY=" << m_scrollY;
+
+            // Sample 3 active particles against CPU collision mask
+            int logged = 0;
+            for (size_t i = 0; i < m_particleCount && logged < 3; ++i) {
+                auto& p = m_cpuParticles[i];
+                if (p.life <= 0.0f) continue;
+                float maskH = static_cast<float>(mh);
+                float maskX = p.pos.x;
+                float maskY = m_scrollY + maskH - 1.0f - p.pos.y;
+                float cpuSample = m_collisionMask.sample(maskX, maskY);
+                float lifeElapsed = p.maxLife - p.life;
+                PLOG_INFO << "[CollDiag] p[" << i << "] bid=" << p.behaviorID
+                          << " docPos=(" << p.pos.x << "," << p.pos.y << ")"
+                          << " maskPos=(" << maskX << "," << maskY << ")"
+                          << " cpuSample=" << cpuSample
+                          << " life=" << p.life << "/" << p.maxLife
+                          << " elapsed=" << lifeElapsed
+                          << " vel=(" << p.vel.x << "," << p.vel.y << ")";
+                ++logged;
+            }
+        }
     }
     
     // 5. Mark dead particles for recycling (only newly-dead, using maxLife sentinel)
