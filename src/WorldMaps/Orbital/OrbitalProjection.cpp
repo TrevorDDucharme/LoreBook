@@ -96,8 +96,18 @@ void OrbitalProjection::project(OrbitalSystem& system, int width, int height, GL
     if (uLen < 1e-6f) uLen = 1.0f;
     uX /= uLen; uY /= uLen; uZ /= uLen;
 
-    // Compute body positions at current time
-    auto positions = system.bodyPositionsAt(m_time);
+    // Compute body positions at current time (analytical or N-body)
+    std::vector<OrbitalSystem::BodyPosition> positions;
+    if (m_useNBody) {
+        try {
+            positions = system.simulateNBodyPositions(m_time, m_nbodyDt);
+        } catch (...) {
+            // fallback to analytic if simulation fails
+            positions = system.bodyPositionsAt(m_time);
+        }
+    } else {
+        positions = system.bodyPositionsAt(m_time);
+    }
 
     // Dispatch sphere kernel
     dispatchSpheres(positions, system, width, height,

@@ -384,6 +384,7 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("Resource Explorer", dock_main_id);
             ImGui::DockBuilderDockWindow("API Docs", dock_main_id);
             ImGui::DockBuilderDockWindow("markdown test", dock_main_id);
+            ImGui::DockBuilderDockWindow("Orbital System Editor", dock_main_id);
             
             ImGui::DockBuilderFinish(dockspace_id);
             firstDock = false;

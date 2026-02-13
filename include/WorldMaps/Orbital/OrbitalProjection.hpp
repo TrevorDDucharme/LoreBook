@@ -56,6 +56,12 @@ public:
     void setDrawOrbits(bool d) { m_drawOrbits = d; }
     bool drawOrbits() const { return m_drawOrbits; }
 
+    // Optional N-body simulation (numerical)
+    void setUseNBody(bool v) { m_useNBody = v; }
+    bool useNBody() const { return m_useNBody; }
+    void setNBodyTimestep(double dt) { m_nbodyDt = dt; }
+    double nbodyTimestep() const { return m_nbodyDt; }
+
     // Render the system into the given GL texture.
     // Creates/resizes the texture as needed.
     void project(OrbitalSystem& system, int width, int height, GLuint& texture);
@@ -68,6 +74,10 @@ private:
     float m_fovY = static_cast<float>(M_PI) / 4.0f;
     double m_time = 0.0;
     bool m_drawOrbits = true;
+
+    // N-body simulation
+    bool m_useNBody = false;
+    double m_nbodyDt = 0.01; // years per integrator step
 
     // OpenCL resources
     cl_mem m_outputBuffer = nullptr;

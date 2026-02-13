@@ -63,6 +63,10 @@ public:
         glm::dvec3 position;
     };
     std::vector<BodyPosition> bodyPositionsAt(double t) const;
+
+    // Numerical N-body simulation (Leapfrog). Returns absolute world-space positions at time t.
+    // dt: integrator timestep in years (smaller -> more accurate, more expensive).
+    std::vector<BodyPosition> simulateNBodyPositions(double t, double dt = 0.01) const;
     
     // Child stellar systems (when this is a galaxy)
     const std::vector<OrbitalSystemInfo>& childSystems() const { return m_childSystems; }

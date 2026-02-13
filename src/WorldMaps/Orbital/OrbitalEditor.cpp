@@ -92,6 +92,10 @@ void OrbitalEditor::renderMenuBar() {
 
         if (ImGui::BeginMenu("Body", m_loadedSystemID > 0)) {
             if (ImGui::BeginMenu("Add Body")) {
+                // Default the new-body parent to the currently selected body so planets
+                // are parented to the selected star by default (preserve explicit edits).
+                if (m_newBodyParentID == -1) m_newBodyParentID = m_selectedBodyID;
+
                 ImGui::InputText("Name##body", m_newBodyName, sizeof(m_newBodyName));
                 ImGui::Combo("Type##body", &m_newBodyType, "Star\0Planet\0Moon\0AsteroidBelt\0Comet\0Station\0");
 
@@ -316,8 +320,22 @@ void OrbitalEditor::renderPropertiesPanel() {
 
     ImGui::Separator();
     if (ImGui::Button("Save Changes")) {
-        m_vault->updateCelestialBody(*body);
-        loadSystem(m_loadedSystemID); // rebuild hierarchy after potential parent change
+        bool ok = m_vault->updateCelestialBody(*body);
+        if (!ok) {
+            PLOGW << "Failed to save CelestialBody id=" << body->id << " name='" << body->name << "'";
+            m_lastSaveMsg = "Save failed";
+            m_lastSaveAt = ImGui::GetTime();
+        } else {
+            m_lastSaveMsg = "Saved";
+            m_lastSaveAt = ImGui::GetTime();
+            loadSystem(m_loadedSystemID); // rebuild hierarchy after successful parent change
+        }
+    }
+
+    // Brief save status message
+    if (!m_lastSaveMsg.empty() && (ImGui::GetTime() - m_lastSaveAt) < 3.0) {
+        ImGui::SameLine();
+        ImGui::TextColored(m_lastSaveMsg == "Saved" ? ImVec4(0.4f,0.8f,0.4f,1.0f) : ImVec4(0.8f,0.2f,0.2f,1.0f), "%s", m_lastSaveMsg.c_str());
     }
 }
 
@@ -424,6 +442,20 @@ void OrbitalEditor::renderTimeControls() {
     ImGui::DragFloat("Speed", &m_timeSpeed, 0.1f, 0.01f, 100.0f, "%.2fx");
     ImGui::SameLine();
     ImGui::Text("T = %.3f yr", m_time);
+
+    // N-body simulation toggle & timestep
+    ImGui::Separator();
+    bool useN = m_projection.useNBody();
+    if (ImGui::Checkbox("Use N-body simulation", &useN)) {
+        m_projection.setUseNBody(useN);
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    float dt = (float)m_projection.nbodyTimestep();
+    if (ImGui::DragFloat("N-body dt (yr)", &dt, 0.001f, 0.0001f, 1.0f, "%.4f")) {
+        m_projection.setNBodyTimestep((double)dt);
+    }
+    ImGui::TextDisabled("(units: AU, years, mass in solar-mass)");
 }
 
 void OrbitalEditor::refreshSystemList() {
@@ -437,6 +469,8 @@ void OrbitalEditor::loadSystem(int64_t id) {
     m_system.loadFromVault(m_vault, id);
     m_loadedSystemID = id;
     m_selectedBodyID = -1;
+    // reset new-body parent so Add Body will default to the currently-selected body
+    m_newBodyParentID = -1;
 }
 
 CelestialBody* OrbitalEditor::selectedBody() {

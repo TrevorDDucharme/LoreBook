@@ -52,6 +52,10 @@ private:
     std::vector<OrbitalSystemInfo> m_systemList;
     bool m_systemListDirty = true;
 
+    // Last save status (displayed briefly after Save Changes)
+    std::string m_lastSaveMsg;
+    double m_lastSaveAt = 0.0;
+
     // Body creation state
     char m_newBodyName[128] = "";
     int m_newBodyType = 0;

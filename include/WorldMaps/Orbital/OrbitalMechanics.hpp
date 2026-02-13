@@ -92,4 +92,47 @@ inline std::vector<glm::dvec3> orbitPathPoints(const KeplerianElements& elem, in
     return pts;
 }
 
+// Compute orbital velocity in the parent reference frame for elements at time t.
+// Assumes gravitational parameter mu (in AU^3 / yr^2) is provided (see note on units).
+// Units: positions in AU, time in years, mass in solar masses, so mu = 4*pi^2*(M_parent + M_body).
+inline glm::dvec3 orbitalVelocity(const KeplerianElements& elem, double t, double mu) {
+    if (elem.period <= 0.0 || elem.semiMajorAxis <= 0.0)
+        return glm::dvec3(0.0);
+
+    double a = elem.semiMajorAxis;
+    double e = elem.eccentricity;
+
+    // Mean motion (rad / yr)
+    double n = std::sqrt(mu / (a * a * a));
+
+    // Mean anomaly
+    double M = elem.meanAnomalyEpoch + n * t;
+    double E = solveKeplerEquation(M, e);
+    double cosE = std::cos(E);
+    double sinE = std::sin(E);
+
+    double denom = 1.0 - e * cosE;
+    if (std::fabs(denom) < 1e-12) denom = 1e-12;
+
+    // Perifocal (orbital plane) velocity components
+    double factor = a * n / denom;
+    double vx_orb = -factor * sinE;
+    double vy_orb =  factor * std::sqrt(std::max(0.0, 1.0 - e * e)) * cosE;
+
+    // Rotate from orbital plane to inertial using same angles as orbitalPosition
+    double cosW = std::cos(elem.argPeriapsis);
+    double sinW = std::sin(elem.argPeriapsis);
+    double cosI = std::cos(elem.inclination);
+    double sinI = std::sin(elem.inclination);
+    double cosO = std::cos(elem.longAscNode);
+    double sinO = std::sin(elem.longAscNode);
+
+    // Rotation matrix components (applied to vector [vx_orb, vy_orb, 0])
+    double rx = (cosO * cosW - sinO * sinW * cosI) * vx_orb + (-cosO * sinW - sinO * cosW * cosI) * vy_orb;
+    double ry = (sinO * cosW + cosO * sinW * cosI) * vx_orb + (-sinO * sinW + cosO * cosW * cosI) * vy_orb;
+    double rz = (sinW * sinI) * vx_orb + (cosW * sinI) * vy_orb;
+
+    return glm::dvec3(rx, ry, rz);
+}
+
 } // namespace Orbital
