@@ -20,6 +20,7 @@ namespace Markdown {
 
 // Static member definition
 std::unordered_map<std::string, MarkdownPreview::CachedWorldState> MarkdownPreview::s_worldCache;
+std::unordered_map<std::string, MarkdownPreview::CachedOrbitalState> MarkdownPreview::s_orbitalCache;
 
 // ────────────────────────────────────────────────────────────────────
 // Collision shader sources
@@ -1703,6 +1704,7 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
     // Clear active lists (rebuilt each frame for overlay input)
     m_activeCanvases.clear();
     m_activeWorldMaps.clear();
+    m_activeOrbitalViews.clear();
 
     // Evict stale world cache entries
     {
@@ -1712,6 +1714,14 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
                 it = s_worldCache.erase(it);
             else
                 ++it;
+        }
+        for (auto it = s_orbitalCache.begin(); it != s_orbitalCache.end();) {
+            if (now - it->second.last_used > std::chrono::seconds(30)) {
+                if (it->second.texture) { glDeleteTextures(1, &it->second.texture); }
+                it = s_orbitalCache.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -1880,6 +1890,61 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
             m_activeWorldMaps.push_back({worldName, projection,
                                           widget.docPos, {displayW, displayH},
                                           {(float)projW, (float)projH}});
+            continue;
+        }
+
+        // ── Orbital View ─────────────────────────────────────────
+        if (widget.type == OverlayWidget::OrbitalView) {
+            std::string systemName = widget.data;
+            if (systemName.empty()) continue;
+
+            // Get or create cached orbital state
+            auto it = s_orbitalCache.try_emplace(systemName).first;
+            CachedOrbitalState& co = it->second;
+            co.last_used = std::chrono::steady_clock::now();
+
+            // Load system from vault if not yet loaded
+            if (!co.system.isLoaded() && m_vault) {
+                auto sysInfo = m_vault->findOrbitalSystemByName(systemName);
+                if (sysInfo.id >= 0) {
+                    co.system.loadFromVault(m_vault, sysInfo.id);
+                }
+            }
+
+            if (!co.system.isLoaded()) continue;
+
+            int projW = (int)widget.nativeSize.x;
+            int projH = (int)widget.nativeSize.y;
+            if (projW <= 0 || projH <= 0) continue;
+
+            // Advance time if playing
+            if (co.playing) {
+                co.time += (double)ImGui::GetIO().DeltaTime * co.timeSpeed;
+                co.projection.setTime(co.time);
+            }
+
+            GLint prevFBO = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+            glActiveTexture(GL_TEXTURE0);
+
+            co.projection.project(co.system, projW, projH, co.texture);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+            glViewport(0, 0, m_fboWidth, m_fboHeight);
+
+            if (!co.texture) continue;
+
+            float displayW = widget.size.x;
+            float displayH = widget.size.y;
+
+            glDisable(GL_DEPTH_TEST);
+            drawTexturedQuad(co.texture, widget.docPos.x, widget.docPos.y, displayW, displayH,
+                             0.0f, 0.0f, 1.0f, 1.0f);
+            glEnable(GL_DEPTH_TEST);
+
+            m_activeOrbitalViews.push_back({systemName,
+                                            widget.docPos, {displayW, displayH},
+                                            {(float)projW, (float)projH}});
             continue;
         }
 
@@ -2615,6 +2680,64 @@ void MarkdownPreview::renderOverlayWidgets(const ImVec2& origin, float scrollY) 
             ImGui::EndChild();
             ImGui::PopStyleColor();
         }
+    }
+
+    // Forward mouse input to orbital view camera controls + overlay UI
+    for (size_t oi = 0; oi < m_activeOrbitalViews.size(); ++oi) {
+        const auto& ao = m_activeOrbitalViews[oi];
+
+        auto cacheIt = s_orbitalCache.find(ao.systemKey);
+        if (cacheIt == s_orbitalCache.end()) continue;
+        CachedOrbitalState& co = cacheIt->second;
+
+        ImVec2 orbScreenPos(origin.x + ao.docPos.x, origin.y + ao.docPos.y - scrollY);
+        ImVec2 orbSize(ao.size.x, ao.size.y);
+
+        ImGui::SetCursorScreenPos(orbScreenPos);
+        std::string btnID = "orbital_view_" + std::to_string(oi);
+        ImGui::InvisibleButton(btnID.c_str(), orbSize);
+        ImGui::SetItemAllowOverlap();
+        bool isHover = ImGui::IsItemHovered();
+
+        // Scroll to zoom
+        if (isHover && io.MouseWheel != 0.0f) {
+            float z = co.projection.zoom();
+            z *= (1.0f - io.MouseWheel * 0.1f);
+            z = std::clamp(z, 0.5f, 1000.0f);
+            co.projection.setZoom(z);
+        }
+        // Drag to rotate
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            float lon = co.projection.centerLon() - drag.x * 0.005f;
+            float lat = co.projection.centerLat() + drag.y * 0.005f;
+            lat = std::clamp(lat, -1.5f, 1.5f);
+            co.projection.setViewCenter(lon, lat);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+        }
+
+        // Overlay bar at bottom
+        float overlayH = 36.0f;
+        ImVec2 overlayPos(orbScreenPos.x + 8.0f,
+                          orbScreenPos.y + orbSize.y - overlayH);
+        ImGui::SetCursorScreenPos(overlayPos);
+
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.3f));
+        std::string childID = "OrbitalOverlay_" + std::to_string(oi);
+        ImGui::BeginChild(childID.c_str(), ImVec2(orbSize.x - 16.0f, overlayH),
+                          false, ImGuiWindowFlags_NoDecoration);
+
+        if (ImGui::Button(co.playing ? "Pause" : "Play")) co.playing = !co.playing;
+        ImGui::SameLine();
+        ImGui::PushItemWidth(80);
+        ImGui::DragFloat(("##OrbSpeed_" + std::to_string(oi)).c_str(),
+                         &co.timeSpeed, 0.1f, 0.01f, 100.0f, "%.1fx");
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        ImGui::Text("T=%.2f Z=%.1f", co.time, co.projection.zoom());
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
     }
 
     // Forward mouse input to Lua canvas engines

@@ -28,6 +28,8 @@
 #include "VaultHistory.hpp"
 #include "LuaScriptManager.hpp"
 #include "TextEffectsOverlay.hpp"
+#include <WorldMaps/Orbital/CelestialBody.hpp>
+#include <WorldMaps/Orbital/OrbitalSystem.hpp>
 
 // Configuration for opening a vault with either local sqlite or remote MySQL
 struct VaultConfig
@@ -423,6 +425,374 @@ public:
         }
         sqlite3_finalize(stmt);
         return result;
+    }
+
+    // ── Orbital System CRUD ──────────────────────────────────────
+    int64_t createOrbitalSystem(const std::string& name, const std::string& systemType = "Stellar",
+                                 int64_t parentSystemID = -1,
+                                 double px = 0.0, double py = 0.0, double pz = 0.0,
+                                 const std::string& tags = "", const std::string& systemJSON = "") {
+        if (!dbConnection) return -1;
+        const char* sql =
+            "INSERT INTO OrbitalSystems (Name, SystemType, ParentSystemID, PositionX, PositionY, PositionZ, Tags, SystemJSON) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, systemType.c_str(), -1, SQLITE_TRANSIENT);
+        if (parentSystemID >= 0) sqlite3_bind_int64(stmt, 3, parentSystemID);
+        else sqlite3_bind_null(stmt, 3);
+        sqlite3_bind_double(stmt, 4, px);
+        sqlite3_bind_double(stmt, 5, py);
+        sqlite3_bind_double(stmt, 6, pz);
+        sqlite3_bind_text(stmt, 7, tags.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, systemJSON.c_str(), -1, SQLITE_TRANSIENT);
+        int64_t id = -1;
+        if (sqlite3_step(stmt) == SQLITE_DONE)
+            id = sqlite3_last_insert_rowid(dbConnection);
+        sqlite3_finalize(stmt);
+        return id;
+    }
+
+    Orbital::OrbitalSystemInfo getOrbitalSystem(int64_t systemID) {
+        Orbital::OrbitalSystemInfo info;
+        if (!dbConnection) return info;
+        const char* sql = "SELECT ID, Name, SystemType, ParentSystemID, PositionX, PositionY, PositionZ, Tags, SystemJSON FROM OrbitalSystems WHERE ID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return info;
+        sqlite3_bind_int64(stmt, 1, systemID);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            info.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            info.name = n ? reinterpret_cast<const char*>(n) : "";
+            const unsigned char* st = sqlite3_column_text(stmt, 2);
+            info.type = Orbital::systemTypeFromString(st ? reinterpret_cast<const char*>(st) : "Stellar");
+            info.parentSystemID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            info.posX = sqlite3_column_double(stmt, 4);
+            info.posY = sqlite3_column_double(stmt, 5);
+            info.posZ = sqlite3_column_double(stmt, 6);
+            const unsigned char* tg = sqlite3_column_text(stmt, 7);
+            info.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+            const unsigned char* sj = sqlite3_column_text(stmt, 8);
+            info.systemJSON = sj ? reinterpret_cast<const char*>(sj) : "";
+        }
+        sqlite3_finalize(stmt);
+        return info;
+    }
+
+    std::vector<Orbital::OrbitalSystemInfo> listOrbitalSystems() {
+        std::vector<Orbital::OrbitalSystemInfo> result;
+        if (!dbConnection) return result;
+        const char* sql = "SELECT ID, Name, SystemType, ParentSystemID, PositionX, PositionY, PositionZ, Tags, SystemJSON FROM OrbitalSystems;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Orbital::OrbitalSystemInfo info;
+            info.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            info.name = n ? reinterpret_cast<const char*>(n) : "";
+            const unsigned char* st = sqlite3_column_text(stmt, 2);
+            info.type = Orbital::systemTypeFromString(st ? reinterpret_cast<const char*>(st) : "Stellar");
+            info.parentSystemID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            info.posX = sqlite3_column_double(stmt, 4);
+            info.posY = sqlite3_column_double(stmt, 5);
+            info.posZ = sqlite3_column_double(stmt, 6);
+            const unsigned char* tg = sqlite3_column_text(stmt, 7);
+            info.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+            const unsigned char* sj = sqlite3_column_text(stmt, 8);
+            info.systemJSON = sj ? reinterpret_cast<const char*>(sj) : "";
+            result.push_back(std::move(info));
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
+    std::vector<Orbital::OrbitalSystemInfo> listChildSystems(int64_t parentSystemID) {
+        std::vector<Orbital::OrbitalSystemInfo> result;
+        if (!dbConnection) return result;
+        const char* sql = "SELECT ID, Name, SystemType, ParentSystemID, PositionX, PositionY, PositionZ, Tags, SystemJSON FROM OrbitalSystems WHERE ParentSystemID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+        sqlite3_bind_int64(stmt, 1, parentSystemID);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Orbital::OrbitalSystemInfo info;
+            info.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            info.name = n ? reinterpret_cast<const char*>(n) : "";
+            const unsigned char* st = sqlite3_column_text(stmt, 2);
+            info.type = Orbital::systemTypeFromString(st ? reinterpret_cast<const char*>(st) : "Stellar");
+            info.parentSystemID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            info.posX = sqlite3_column_double(stmt, 4);
+            info.posY = sqlite3_column_double(stmt, 5);
+            info.posZ = sqlite3_column_double(stmt, 6);
+            const unsigned char* tg = sqlite3_column_text(stmt, 7);
+            info.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+            const unsigned char* sj = sqlite3_column_text(stmt, 8);
+            info.systemJSON = sj ? reinterpret_cast<const char*>(sj) : "";
+            result.push_back(std::move(info));
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
+    bool updateOrbitalSystem(int64_t id, const std::string& name, const std::string& systemType,
+                              double px, double py, double pz,
+                              const std::string& tags, const std::string& systemJSON) {
+        if (!dbConnection) return false;
+        const char* sql = "UPDATE OrbitalSystems SET Name=?, SystemType=?, PositionX=?, PositionY=?, PositionZ=?, Tags=?, SystemJSON=?, ModifiedAt=strftime('%s','now') WHERE ID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, systemType.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 3, px);
+        sqlite3_bind_double(stmt, 4, py);
+        sqlite3_bind_double(stmt, 5, pz);
+        sqlite3_bind_text(stmt, 6, tags.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, systemJSON.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 8, id);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool deleteOrbitalSystem(int64_t id) {
+        if (!dbConnection) return false;
+        // Delete all bodies in the system first
+        const char* delBodies = "DELETE FROM CelestialBodies WHERE SystemID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, delBodies, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, id);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        const char* sql = "DELETE FROM OrbitalSystems WHERE ID=?;";
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int64(stmt, 1, id);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    // ── Celestial Body CRUD ──────────────────────────────────────
+    int64_t createCelestialBody(const Orbital::CelestialBody& body) {
+        if (!dbConnection) return -1;
+        const char* sql =
+            "INSERT INTO CelestialBodies "
+            "(Name, SystemID, ParentBodyID, BodyType, Radius, Mass, AxialTilt, RotationPeriod, "
+            " SemiMajorAxis, Eccentricity, Inclination, LongAscendingNode, ArgPeriapsis, "
+            " MeanAnomalyEpoch, OrbitalPeriod, WorldConfigStr, WorldItemID, "
+            " ColorR, ColorG, ColorB, Luminosity, BodyJSON, Tags) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return -1;
+        sqlite3_bind_text(stmt, 1, body.name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, body.systemID);
+        if (body.parentBodyID >= 0) sqlite3_bind_int64(stmt, 3, body.parentBodyID);
+        else sqlite3_bind_null(stmt, 3);
+        sqlite3_bind_text(stmt, 4, Orbital::bodyTypeName(body.bodyType), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 5, body.radius);
+        sqlite3_bind_double(stmt, 6, body.mass);
+        sqlite3_bind_double(stmt, 7, body.axialTilt);
+        sqlite3_bind_double(stmt, 8, body.rotationPeriod);
+        sqlite3_bind_double(stmt, 9, body.orbit.semiMajorAxis);
+        sqlite3_bind_double(stmt, 10, body.orbit.eccentricity);
+        sqlite3_bind_double(stmt, 11, body.orbit.inclination);
+        sqlite3_bind_double(stmt, 12, body.orbit.longAscNode);
+        sqlite3_bind_double(stmt, 13, body.orbit.argPeriapsis);
+        sqlite3_bind_double(stmt, 14, body.orbit.meanAnomalyEpoch);
+        sqlite3_bind_double(stmt, 15, body.orbit.period);
+        sqlite3_bind_text(stmt, 16, body.worldConfig.c_str(), -1, SQLITE_TRANSIENT);
+        if (body.worldItemID >= 0) sqlite3_bind_int64(stmt, 17, body.worldItemID);
+        else sqlite3_bind_null(stmt, 17);
+        sqlite3_bind_double(stmt, 18, body.colorTint[0]);
+        sqlite3_bind_double(stmt, 19, body.colorTint[1]);
+        sqlite3_bind_double(stmt, 20, body.colorTint[2]);
+        sqlite3_bind_double(stmt, 21, body.luminosity);
+        sqlite3_bind_text(stmt, 22, body.bodyJSON.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 23, body.tags.c_str(), -1, SQLITE_TRANSIENT);
+        int64_t id = -1;
+        if (sqlite3_step(stmt) == SQLITE_DONE)
+            id = sqlite3_last_insert_rowid(dbConnection);
+        sqlite3_finalize(stmt);
+        return id;
+    }
+
+    Orbital::CelestialBody getCelestialBody(int64_t bodyID) {
+        Orbital::CelestialBody b;
+        if (!dbConnection) return b;
+        const char* sql = "SELECT ID, Name, SystemID, ParentBodyID, BodyType, Radius, Mass, AxialTilt, RotationPeriod, "
+                          "SemiMajorAxis, Eccentricity, Inclination, LongAscendingNode, ArgPeriapsis, "
+                          "MeanAnomalyEpoch, OrbitalPeriod, WorldConfigStr, WorldItemID, "
+                          "ColorR, ColorG, ColorB, Luminosity, BodyJSON, Tags FROM CelestialBodies WHERE ID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return b;
+        sqlite3_bind_int64(stmt, 1, bodyID);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            b.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            b.name = n ? reinterpret_cast<const char*>(n) : "";
+            b.systemID = sqlite3_column_int64(stmt, 2);
+            b.parentBodyID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            const unsigned char* bt = sqlite3_column_text(stmt, 4);
+            b.bodyType = Orbital::bodyTypeFromString(bt ? reinterpret_cast<const char*>(bt) : "Planet");
+            b.radius = sqlite3_column_double(stmt, 5);
+            b.mass = sqlite3_column_double(stmt, 6);
+            b.axialTilt = sqlite3_column_double(stmt, 7);
+            b.rotationPeriod = sqlite3_column_double(stmt, 8);
+            b.orbit.semiMajorAxis = sqlite3_column_double(stmt, 9);
+            b.orbit.eccentricity = sqlite3_column_double(stmt, 10);
+            b.orbit.inclination = sqlite3_column_double(stmt, 11);
+            b.orbit.longAscNode = sqlite3_column_double(stmt, 12);
+            b.orbit.argPeriapsis = sqlite3_column_double(stmt, 13);
+            b.orbit.meanAnomalyEpoch = sqlite3_column_double(stmt, 14);
+            b.orbit.period = sqlite3_column_double(stmt, 15);
+            const unsigned char* wc = sqlite3_column_text(stmt, 16);
+            b.worldConfig = wc ? reinterpret_cast<const char*>(wc) : "";
+            b.worldItemID = (sqlite3_column_type(stmt, 17) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 17) : -1;
+            b.colorTint[0] = static_cast<float>(sqlite3_column_double(stmt, 18));
+            b.colorTint[1] = static_cast<float>(sqlite3_column_double(stmt, 19));
+            b.colorTint[2] = static_cast<float>(sqlite3_column_double(stmt, 20));
+            b.luminosity = static_cast<float>(sqlite3_column_double(stmt, 21));
+            const unsigned char* bj = sqlite3_column_text(stmt, 22);
+            b.bodyJSON = bj ? reinterpret_cast<const char*>(bj) : "";
+            const unsigned char* tg = sqlite3_column_text(stmt, 23);
+            b.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+        }
+        sqlite3_finalize(stmt);
+        return b;
+    }
+
+    std::vector<Orbital::CelestialBody> listCelestialBodies(int64_t systemID) {
+        std::vector<Orbital::CelestialBody> result;
+        if (!dbConnection) return result;
+        const char* sql = "SELECT ID, Name, SystemID, ParentBodyID, BodyType, Radius, Mass, AxialTilt, RotationPeriod, "
+                          "SemiMajorAxis, Eccentricity, Inclination, LongAscendingNode, ArgPeriapsis, "
+                          "MeanAnomalyEpoch, OrbitalPeriod, WorldConfigStr, WorldItemID, "
+                          "ColorR, ColorG, ColorB, Luminosity, BodyJSON, Tags FROM CelestialBodies WHERE SystemID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return result;
+        sqlite3_bind_int64(stmt, 1, systemID);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Orbital::CelestialBody b;
+            b.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            b.name = n ? reinterpret_cast<const char*>(n) : "";
+            b.systemID = sqlite3_column_int64(stmt, 2);
+            b.parentBodyID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            const unsigned char* bt = sqlite3_column_text(stmt, 4);
+            b.bodyType = Orbital::bodyTypeFromString(bt ? reinterpret_cast<const char*>(bt) : "Planet");
+            b.radius = sqlite3_column_double(stmt, 5);
+            b.mass = sqlite3_column_double(stmt, 6);
+            b.axialTilt = sqlite3_column_double(stmt, 7);
+            b.rotationPeriod = sqlite3_column_double(stmt, 8);
+            b.orbit.semiMajorAxis = sqlite3_column_double(stmt, 9);
+            b.orbit.eccentricity = sqlite3_column_double(stmt, 10);
+            b.orbit.inclination = sqlite3_column_double(stmt, 11);
+            b.orbit.longAscNode = sqlite3_column_double(stmt, 12);
+            b.orbit.argPeriapsis = sqlite3_column_double(stmt, 13);
+            b.orbit.meanAnomalyEpoch = sqlite3_column_double(stmt, 14);
+            b.orbit.period = sqlite3_column_double(stmt, 15);
+            const unsigned char* wc = sqlite3_column_text(stmt, 16);
+            b.worldConfig = wc ? reinterpret_cast<const char*>(wc) : "";
+            b.worldItemID = (sqlite3_column_type(stmt, 17) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 17) : -1;
+            b.colorTint[0] = static_cast<float>(sqlite3_column_double(stmt, 18));
+            b.colorTint[1] = static_cast<float>(sqlite3_column_double(stmt, 19));
+            b.colorTint[2] = static_cast<float>(sqlite3_column_double(stmt, 20));
+            b.luminosity = static_cast<float>(sqlite3_column_double(stmt, 21));
+            const unsigned char* bj = sqlite3_column_text(stmt, 22);
+            b.bodyJSON = bj ? reinterpret_cast<const char*>(bj) : "";
+            const unsigned char* tg = sqlite3_column_text(stmt, 23);
+            b.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+            result.push_back(std::move(b));
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
+    bool updateCelestialBody(const Orbital::CelestialBody& body) {
+        if (!dbConnection || body.id < 0) return false;
+        const char* sql =
+            "UPDATE CelestialBodies SET Name=?, ParentBodyID=?, BodyType=?, Radius=?, Mass=?, "
+            "AxialTilt=?, RotationPeriod=?, SemiMajorAxis=?, Eccentricity=?, Inclination=?, "
+            "LongAscendingNode=?, ArgPeriapsis=?, MeanAnomalyEpoch=?, OrbitalPeriod=?, "
+            "WorldConfigStr=?, WorldItemID=?, ColorR=?, ColorG=?, ColorB=?, Luminosity=?, "
+            "BodyJSON=?, Tags=?, ModifiedAt=strftime('%s','now') WHERE ID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(stmt, 1, body.name.c_str(), -1, SQLITE_TRANSIENT);
+        if (body.parentBodyID >= 0) sqlite3_bind_int64(stmt, 2, body.parentBodyID);
+        else sqlite3_bind_null(stmt, 2);
+        sqlite3_bind_text(stmt, 3, Orbital::bodyTypeName(body.bodyType), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 4, body.radius);
+        sqlite3_bind_double(stmt, 5, body.mass);
+        sqlite3_bind_double(stmt, 6, body.axialTilt);
+        sqlite3_bind_double(stmt, 7, body.rotationPeriod);
+        sqlite3_bind_double(stmt, 8, body.orbit.semiMajorAxis);
+        sqlite3_bind_double(stmt, 9, body.orbit.eccentricity);
+        sqlite3_bind_double(stmt, 10, body.orbit.inclination);
+        sqlite3_bind_double(stmt, 11, body.orbit.longAscNode);
+        sqlite3_bind_double(stmt, 12, body.orbit.argPeriapsis);
+        sqlite3_bind_double(stmt, 13, body.orbit.meanAnomalyEpoch);
+        sqlite3_bind_double(stmt, 14, body.orbit.period);
+        sqlite3_bind_text(stmt, 15, body.worldConfig.c_str(), -1, SQLITE_TRANSIENT);
+        if (body.worldItemID >= 0) sqlite3_bind_int64(stmt, 16, body.worldItemID);
+        else sqlite3_bind_null(stmt, 16);
+        sqlite3_bind_double(stmt, 17, body.colorTint[0]);
+        sqlite3_bind_double(stmt, 18, body.colorTint[1]);
+        sqlite3_bind_double(stmt, 19, body.colorTint[2]);
+        sqlite3_bind_double(stmt, 20, body.luminosity);
+        sqlite3_bind_text(stmt, 21, body.bodyJSON.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 22, body.tags.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 23, body.id);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    bool deleteCelestialBody(int64_t bodyID) {
+        if (!dbConnection) return false;
+        // Delete child moons/stations first
+        const char* delChildren = "DELETE FROM CelestialBodies WHERE ParentBodyID=?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, delChildren, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(stmt, 1, bodyID);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        const char* sql = "DELETE FROM CelestialBodies WHERE ID=?;";
+        stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_int64(stmt, 1, bodyID);
+        bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+
+    Orbital::OrbitalSystemInfo findOrbitalSystemByName(const std::string& name) {
+        Orbital::OrbitalSystemInfo info;
+        if (!dbConnection) return info;
+        const char* sql = "SELECT ID, Name, SystemType, ParentSystemID, PositionX, PositionY, PositionZ, Tags, SystemJSON FROM OrbitalSystems WHERE Name=? LIMIT 1;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(dbConnection, sql, -1, &stmt, nullptr) != SQLITE_OK) return info;
+        sqlite3_bind_text(stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            info.id = sqlite3_column_int64(stmt, 0);
+            const unsigned char* n = sqlite3_column_text(stmt, 1);
+            info.name = n ? reinterpret_cast<const char*>(n) : "";
+            const unsigned char* st = sqlite3_column_text(stmt, 2);
+            info.type = Orbital::systemTypeFromString(st ? reinterpret_cast<const char*>(st) : "Stellar");
+            info.parentSystemID = (sqlite3_column_type(stmt, 3) != SQLITE_NULL) ? sqlite3_column_int64(stmt, 3) : -1;
+            info.posX = sqlite3_column_double(stmt, 4);
+            info.posY = sqlite3_column_double(stmt, 5);
+            info.posZ = sqlite3_column_double(stmt, 6);
+            const unsigned char* tg = sqlite3_column_text(stmt, 7);
+            info.tags = tg ? reinterpret_cast<const char*>(tg) : "";
+            const unsigned char* sj = sqlite3_column_text(stmt, 8);
+            info.systemJSON = sj ? reinterpret_cast<const char*>(sj) : "";
+        }
+        sqlite3_finalize(stmt);
+        return info;
     }
 
     // Tag filter API (used by GraphView to filter tree)
@@ -1173,6 +1543,67 @@ public:
                 {
                     if (dErr)
                         sqlite3_free(dErr);
+                }
+            }
+
+            // ── OrbitalSystems table ─────────────────────────────
+            {
+                const char *sql = "CREATE TABLE IF NOT EXISTS OrbitalSystems ("
+                                   "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                   "Name TEXT NOT NULL, "
+                                   "SystemType TEXT DEFAULT 'Stellar', "
+                                   "ParentSystemID INTEGER, "
+                                   "PositionX REAL DEFAULT 0.0, "
+                                   "PositionY REAL DEFAULT 0.0, "
+                                   "PositionZ REAL DEFAULT 0.0, "
+                                   "Tags TEXT DEFAULT '', "
+                                   "SystemJSON TEXT DEFAULT '', "
+                                   "CreatedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                   "ModifiedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                   "FOREIGN KEY(ParentSystemID) REFERENCES OrbitalSystems(ID)"
+                                   ");";
+                char *oErr = nullptr;
+                if (sqlite3_exec(dbConnection, sql, nullptr, nullptr, &oErr) != SQLITE_OK) {
+                    if (oErr) sqlite3_free(oErr);
+                }
+            }
+
+            // ── CelestialBodies table ────────────────────────────────
+            {
+                const char *sql = "CREATE TABLE IF NOT EXISTS CelestialBodies ("
+                                   "ID INTEGER PRIMARY KEY AUTOINCREMENT, "
+                                   "Name TEXT NOT NULL, "
+                                   "SystemID INTEGER NOT NULL, "
+                                   "ParentBodyID INTEGER, "
+                                   "BodyType TEXT DEFAULT 'Planet', "
+                                   "Radius REAL DEFAULT 1.0, "
+                                   "Mass REAL DEFAULT 1.0, "
+                                   "AxialTilt REAL DEFAULT 0.0, "
+                                   "RotationPeriod REAL DEFAULT 1.0, "
+                                   "SemiMajorAxis REAL DEFAULT 1.0, "
+                                   "Eccentricity REAL DEFAULT 0.0, "
+                                   "Inclination REAL DEFAULT 0.0, "
+                                   "LongAscendingNode REAL DEFAULT 0.0, "
+                                   "ArgPeriapsis REAL DEFAULT 0.0, "
+                                   "MeanAnomalyEpoch REAL DEFAULT 0.0, "
+                                   "OrbitalPeriod REAL DEFAULT 1.0, "
+                                   "WorldConfigStr TEXT DEFAULT '', "
+                                   "WorldItemID INTEGER, "
+                                   "ColorR REAL DEFAULT 1.0, "
+                                   "ColorG REAL DEFAULT 1.0, "
+                                   "ColorB REAL DEFAULT 1.0, "
+                                   "Luminosity REAL DEFAULT 0.0, "
+                                   "BodyJSON TEXT DEFAULT '', "
+                                   "Tags TEXT DEFAULT '', "
+                                   "CreatedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                   "ModifiedAt INTEGER DEFAULT (strftime('%s','now')), "
+                                   "FOREIGN KEY(SystemID) REFERENCES OrbitalSystems(ID), "
+                                   "FOREIGN KEY(ParentBodyID) REFERENCES CelestialBodies(ID), "
+                                   "FOREIGN KEY(WorldItemID) REFERENCES VaultItems(ID)"
+                                   ");";
+                char *cErr = nullptr;
+                if (sqlite3_exec(dbConnection, sql, nullptr, nullptr, &cErr) != SQLITE_OK) {
+                    if (cErr) sqlite3_free(cErr);
                 }
             }
 

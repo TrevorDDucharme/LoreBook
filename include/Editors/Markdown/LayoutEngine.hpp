@@ -20,7 +20,8 @@ struct OverlayWidget {
         Image,
         ModelViewer, 
         LuaCanvas, 
-        WorldMap 
+        WorldMap,
+        OrbitalView 
     };
     
     Type type = Link;

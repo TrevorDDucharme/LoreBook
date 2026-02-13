@@ -6,6 +6,8 @@
 #include <WorldMaps/World/World.hpp>
 #include <WorldMaps/World/Projections/MercatorProjection.hpp>
 #include <WorldMaps/World/Projections/SphereProjection.hpp>
+#include <WorldMaps/Orbital/OrbitalSystem.hpp>
+#include <WorldMaps/Orbital/OrbitalProjection.hpp>
 #include <GL/glew.h>
 #include <CL/cl.h>
 #include <glm/glm.hpp>
@@ -202,6 +204,15 @@ private:
     };
     std::vector<ActiveWorldMap> m_activeWorldMaps;
 
+    // Active orbital view instances
+    struct ActiveOrbitalView {
+        std::string systemKey;     // system name
+        glm::vec2 docPos;
+        glm::vec2 size;
+        glm::vec2 nativeSize;
+    };
+    std::vector<ActiveOrbitalView> m_activeOrbitalViews;
+
     // Per-world cached state (World object + camera + persistent projections)
     struct CachedWorldState {
         World world;
@@ -228,6 +239,19 @@ private:
               last_used(std::chrono::steady_clock::now()) {}
     };
     static std::unordered_map<std::string, CachedWorldState> s_worldCache;
+
+    // Per-system cached orbital state
+    struct CachedOrbitalState {
+        Orbital::OrbitalSystem system;
+        Orbital::OrbitalProjection projection;
+        GLuint texture = 0;
+        double time = 0.0;
+        float timeSpeed = 1.0f;
+        bool playing = false;
+        std::chrono::steady_clock::time_point last_used;
+        CachedOrbitalState() : last_used(std::chrono::steady_clock::now()) {}
+    };
+    static std::unordered_map<std::string, CachedOrbitalState> s_orbitalCache;
 
     std::string m_sourceText;
     GLuint m_fontAtlasTexture = 0;

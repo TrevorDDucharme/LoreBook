@@ -41,6 +41,7 @@
 #include <CharacterEditor/PartLibrary.hpp>
 #include <CharacterEditor/CharacterManager.hpp>
 #include <Editors/Markdown/MarkdownEditor.hpp>
+#include <WorldMaps/Orbital/OrbitalEditor.hpp>
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -234,6 +235,8 @@ int main(int argc, char** argv)
     static GraphView graphView;
     // Floor Plan Editor
     static FloorPlanEditor floorPlanEditor;
+    // Orbital System Editor
+    static Orbital::OrbitalEditor orbitalEditor;
     // Character Editor
     static CharacterEditor::CharacterEditorUI characterEditor;
     static std::unique_ptr<CharacterEditor::PartLibrary> partLibrary;
@@ -433,6 +436,9 @@ int main(int argc, char** argv)
                 }
                 if(ImGui::MenuItem("Floor Plan Editor", nullptr, floorPlanEditor.isOpen())){
                     floorPlanEditor.toggleOpen();
+                }
+                if(ImGui::MenuItem("Orbital System Editor", nullptr, orbitalEditor.isOpen(), canViewVault)){
+                    orbitalEditor.toggleOpen();
                 }
                 ImGui::Separator();
                 if(ImGui::MenuItem("Character Editor", nullptr, characterEditor.isOpen())){
@@ -1297,6 +1303,10 @@ int main(int argc, char** argv)
         // Floor Plan Editor
         floorPlanEditor.setVault(vault ? vault.get() : nullptr);
         floorPlanEditor.render();
+
+        // Orbital System Editor
+        orbitalEditor.setVault(vault ? vault.get() : nullptr);
+        orbitalEditor.render();
 
         // Character Editor - connect managers when vault is available and logged in
         if (vault && vault->isOpen() && vault->getCurrentUserID() > 0) {

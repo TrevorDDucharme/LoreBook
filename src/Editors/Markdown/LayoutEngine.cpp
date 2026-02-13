@@ -446,8 +446,34 @@ void LayoutEngine::layoutImageSpan(const Span& span) {
         // Detect vault://World/ URLs -> WorldMap
         const std::string worldPrefix = "vault://World/";
         bool isWorld = (baseUrl.rfind(worldPrefix, 0) == 0);
+
+        // Detect vault://System/ URLs -> OrbitalView
+        const std::string systemPrefix = "vault://System/";
+        bool isSystem = (baseUrl.rfind(systemPrefix, 0) == 0);
         
-        if (isWorld) {
+        if (isSystem) {
+            widget.type = OverlayWidget::OrbitalView;
+            widget.data = baseUrl.substr(systemPrefix.size());  // e.g. "Sol"
+
+            // Orbital views are always 1:1 aspect
+            float availW = m_wrapWidth - m_indentX;
+            int w = (urlW > 0) ? urlW : static_cast<int>(availW);
+            int h = (urlH > 0) ? urlH : w;
+
+            float scaledW = static_cast<float>(w) * m_scale;
+            float scaledH = static_cast<float>(h) * m_scale;
+
+            widget.docPos = {m_curX, m_curY};
+            widget.size = {scaledW, scaledH};
+            widget.nativeSize = {static_cast<float>(w), static_cast<float>(h)};
+            widget.altText = span.title;
+            widget.sourceOffset = span.sourceOffset;
+            m_outWidgets->push_back(widget);
+
+            lineBreak();
+            m_curY += scaledH;
+            return;
+        } else if (isWorld) {
             widget.type = OverlayWidget::WorldMap;
             widget.data = baseUrl.substr(worldPrefix.size());  // e.g. "MyWorld[seed=42]/mercator"
 
