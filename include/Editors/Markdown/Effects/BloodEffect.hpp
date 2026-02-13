@@ -27,10 +27,10 @@ public:
     // Blood-specific parameters
     std::array<float, 2> gravity = {0.0f, 80.0f};  // Falls down
     float drag = 0.98f;
-    float splatSize = 1.5f;
+    float splatSize = .5f;
     
     // SPH fluid simulation parameters
-    float sphSmoothingRadius = 25.0f;   // Interaction range (pixels)
+    float sphSmoothingRadius = 5.0f;   // Interaction range (pixels)
     float sphRestDensity = 1.0f;        // Target density
     float sphStiffness = 150.0f;        // Pressure response (higher = more incompressible)
     float sphViscosity = 6.0f;          // Velocity diffusion (higher = thicker/goopier)

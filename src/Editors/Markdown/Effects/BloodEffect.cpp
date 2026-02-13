@@ -36,10 +36,10 @@ EffectEmissionConfig BloodEffect::getEmissionConfig() const {
     cfg.rate = 30.0f;         // Higher rate for fluid density
     cfg.velocity = {0, 50};   // Slightly slower initial (SPH handles flow)
     cfg.velocityVar = {8, 12};
-    cfg.lifetime = 3.0f;      // Longer life — fluid persists
-    cfg.lifetimeVar = 0.5f;
-    cfg.size = 10.0f;         // Larger — SPH smoothing radius is 25px
-    cfg.sizeVar = 3.0f;
+    cfg.lifetime = 8.0f;      // Long life — blood persists on surfaces
+    cfg.lifetimeVar = 1.0f;
+    cfg.size = 4.0f;          // Moderate — balances density coverage vs visual size
+    cfg.sizeVar = 1.0f;
     return cfg;
 }
 
@@ -47,7 +47,7 @@ ParticleSnippets BloodEffect::getParticleSnippets() const {
     ParticleSnippets ps;
     // Geometry: large round blob for density accumulation pass
     ps.geometry.code = R"({
-    size *= 2.0;  // Scale up for density coverage
+    size *= 1.5;  // Slight scale-up for density coverage
     color.a *= smoothstep(0.0, 0.2, life) * 0.5;
 })";
     // Fragment: gaussian falloff for smooth density blending
@@ -75,19 +75,45 @@ KernelSnippet BloodEffect::getKernelSnippet() const {
     // Drag
     p.vel *= drag;
     
-    // Life decay
-    p.life -= deltaTime * 0.8f;
+    // Life decay (slow — blood lingers)
+    p.life -= deltaTime * 0.3f;
     
     // Darken as life fades
     float lifeRatio = p.life / p.maxLife;
     p.color = (float4)(0.6f + 0.2f * lifeRatio, 0.0f, 0.0f, lifeRatio);
 )";
-    // Custom collision: splat (expand, slow down, die faster)
+    // Custom collision: stick to surface, slide with gravity, drip off overhangs
     ks.collisionResponse = R"(
-    p.vel = reflect_f2(p.vel, maskNorm) * 0.15f;
-    newPos = p.pos + p.vel * deltaTime;
-    p.size = min(p.size * splatSize, 8.0f);
-    p.life -= deltaTime * 3.0f;
+    // Surface tangent in doc space (perpendicular to normal)
+    float2 tangent = (float2)(-docNorm.y, docNorm.x);
+    
+    // Project velocity onto tangent — remove normal component (stick to surface)
+    float vTan = dot(p.vel, tangent) * 0.92f;
+    
+    // Add gravity sliding along surface
+    float gTan = dot(gravity, tangent);
+    vTan += gTan * deltaTime;
+    
+    // How much gravity pushes into vs pulls away from surface
+    float gravNormal = dot(gravity, docNorm);
+    
+    // On overhangs (gravity pulls away from surface), slowly detach and drip
+    float drip = 0.0f;
+    if (gravNormal < 0.0f) {
+        drip = -gravNormal * deltaTime * 0.25f;
+    }
+    
+    // Slide along surface + drip off overhangs
+    p.vel = tangent * vTan * 0.6f - docNorm * drip;
+    
+    // Push out of collision surface
+    newPos = p.pos + docNorm * 0.5f + p.vel * deltaTime;
+    
+    // Very slow life decay while stuck — blood persists on surfaces
+    p.life -= deltaTime * 0.05f;
+    
+    // Slight spread on contact
+    p.size = min(p.size * 1.002f, splatSize * 4.0f);
 )";
     ks.defaultDamping = 0.15f;
     return ks;
