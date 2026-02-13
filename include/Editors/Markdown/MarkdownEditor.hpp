@@ -51,6 +51,8 @@ public:
     void openFile(std::filesystem::path file);
     void setWorkingFile(std::filesystem::path file);
     void updateVaultDirectories();
+    void setScriptManager(LuaScriptManager* mgr) { m_preview.setScriptManager(mgr); }
+    void setVault(Vault* v) { m_preview.setVault(v); }
 
     static MarkdownEditor& get();
 };

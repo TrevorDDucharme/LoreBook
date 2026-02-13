@@ -3,13 +3,23 @@
 #include <Editors/Markdown/Effects/BloodEffect.hpp>
 #include <OpenCLContext.hpp>
 #include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
+#include <LuaScriptManager.hpp>
+#include <LuaEngine.hpp>
+#include <stringUtils.hpp>
+#include <Icons.hpp>
+#include <Vault.hpp>
 #include <plog/Log.h>
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <chrono>
+#include <sstream>
 
 namespace Markdown {
+
+// Static member definition
+std::unordered_map<std::string, MarkdownPreview::CachedWorldState> MarkdownPreview::s_worldCache;
 
 // ────────────────────────────────────────────────────────────────────
 // Collision shader sources
@@ -41,6 +51,38 @@ layout(location = 0) out vec4 fragColor;
 void main() {
     float a = texture(uFontAtlas, v_uv).r;
     fragColor = vec4(a, 0.0, 0.0, 1.0);
+}
+)";
+
+// ────────────────────────────────────────────────────────────────────
+// Embedded content (Lua canvas) shader sources
+// ────────────────────────────────────────────────────────────────────
+
+static const char* s_embedVert = R"(
+#version 330 core
+layout(location = 0) in vec3 in_pos;
+layout(location = 1) in vec2 in_uv;
+
+uniform mat4 uMVP;
+
+out vec2 v_uv;
+
+void main() {
+    gl_Position = uMVP * vec4(in_pos, 1.0);
+    v_uv = in_uv;
+}
+)";
+
+static const char* s_embedFrag = R"(
+#version 330 core
+uniform sampler2D uTexture;
+
+in vec2 v_uv;
+
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    fragColor = texture(uTexture, v_uv);
 }
 )";
 
@@ -565,6 +607,10 @@ void MarkdownPreview::cleanup() {
         glDeleteProgram(m_collisionShader);
         m_collisionShader = 0;
     }
+    if (m_embedShader) {
+        glDeleteProgram(m_embedShader);
+        m_embedShader = 0;
+    }
     if (m_particleShader) {
         glDeleteProgram(m_particleShader);
         m_particleShader = 0;
@@ -637,11 +683,77 @@ void MarkdownPreview::cleanup() {
     m_initialized = false;
 }
 
+// Parse a hex color string (#RGB, #RRGGBB, or #RRGGBBAA) into a glm::vec4.
+// Returns false if the format is invalid.
+static bool parseHexColor(const std::string& hex, glm::vec4& out) {
+    if (hex.empty() || hex[0] != '#') return false;
+    std::string h = hex.substr(1);
+    uint32_t val = 0;
+    for (char c : h) {
+        val <<= 4;
+        if (c >= '0' && c <= '9') val |= (c - '0');
+        else if (c >= 'a' && c <= 'f') val |= (c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') val |= (c - 'A' + 10);
+        else return false;
+    }
+    if (h.size() == 3) {
+        out = {((val >> 8) & 0xF) / 15.0f, ((val >> 4) & 0xF) / 15.0f, (val & 0xF) / 15.0f, 1.0f};
+    } else if (h.size() == 6) {
+        out = {((val >> 16) & 0xFF) / 255.0f, ((val >> 8) & 0xFF) / 255.0f, (val & 0xFF) / 255.0f, 1.0f};
+    } else if (h.size() == 8) {
+        out = {((val >> 24) & 0xFF) / 255.0f, ((val >> 16) & 0xFF) / 255.0f, ((val >> 8) & 0xFF) / 255.0f, (val & 0xFF) / 255.0f};
+    } else {
+        return false;
+    }
+    return true;
+}
+
 void MarkdownPreview::setSource(const std::string& markdown) {
-    if (markdown == m_sourceText) return;
+    static std::string s_lastRawSource;
+    if (markdown == s_lastRawSource) return;
+    s_lastRawSource = markdown;
     
-    m_sourceText = markdown;
     m_document.markDirty();
+    
+    // Parse YAML-like frontmatter for preview metadata
+    // Format: lines between opening "---" and closing "---"
+    m_clearColor = {0.1f, 0.1f, 0.12f, 1.0f};  // default
+    std::string body = markdown;
+    if (markdown.size() >= 3 && markdown.compare(0, 3, "---") == 0) {
+        size_t end = markdown.find("\n---", 3);
+        if (end != std::string::npos) {
+            std::string front = markdown.substr(3, end - 3);
+            // Simple key: value parsing (one per line)
+            std::istringstream ss(front);
+            std::string line;
+            while (std::getline(ss, line)) {
+                // Trim leading whitespace
+                size_t ks = line.find_first_not_of(" \t");
+                if (ks == std::string::npos) continue;
+                size_t colon = line.find(':', ks);
+                if (colon == std::string::npos) continue;
+                std::string key = line.substr(ks, colon - ks);
+                size_t vs = line.find_first_not_of(" \t", colon + 1);
+                if (vs == std::string::npos) continue;
+                std::string value = line.substr(vs);
+                // Trim trailing whitespace
+                size_t ve = value.find_last_not_of(" \t\r\n");
+                if (ve != std::string::npos) value = value.substr(0, ve + 1);
+                
+                if (key == "background") {
+                    glm::vec4 c;
+                    if (parseHexColor(value, c)) {
+                        m_clearColor = c;
+                    }
+                }
+            }
+            // Strip frontmatter from rendered content
+            size_t bodyStart = end + 4; // skip "\n---"
+            if (bodyStart < markdown.size() && markdown[bodyStart] == '\n') ++bodyStart;
+            body = markdown.substr(bodyStart);
+        }
+    }
+    m_sourceText = body;
 }
 
 void MarkdownPreview::initShaders() {
@@ -659,6 +771,25 @@ void MarkdownPreview::initShaders() {
         glAttachShader(m_collisionShader, vs);
         glAttachShader(m_collisionShader, fs);
         glLinkProgram(m_collisionShader);
+        
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+    }
+    
+    // Compile embed shader (textured quad for Lua canvases)
+    {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &s_embedVert, nullptr);
+        glCompileShader(vs);
+        
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &s_embedFrag, nullptr);
+        glCompileShader(fs);
+        
+        m_embedShader = glCreateProgram();
+        glAttachShader(m_embedShader, vs);
+        glAttachShader(m_embedShader, fs);
+        glLinkProgram(m_embedShader);
         
         glDeleteShader(vs);
         glDeleteShader(fs);
@@ -1247,7 +1378,7 @@ ImVec2 MarkdownPreview::render() {
     // 8. Render scene to FBO
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, m_fboWidth, m_fboHeight);
-    glClearColor(0.1f, 0.1f, 0.12f, 1.0f);
+    glClearColor(m_clearColor.r, m_clearColor.g, m_clearColor.b, m_clearColor.a);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -1289,12 +1420,19 @@ ImVec2 MarkdownPreview::render() {
     // 15. Display via ImGui
     ImGui::Image((ImTextureID)(intptr_t)m_colorTex, avail, ImVec2(1, 1), ImVec2(0, 0));
     
-    // Handle mouse wheel scrolling on preview
+    // Handle mouse wheel: Ctrl+Scroll = zoom, Scroll = scroll
     if (ImGui::IsItemHovered()) {
         float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f) {
-            m_scrollY -= wheel * 40.0f;
-            m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
+            if (ImGui::GetIO().KeyCtrl) {
+                // Zoom
+                m_zoomLevel *= (wheel > 0) ? 1.1f : (1.0f / 1.1f);
+                m_zoomLevel = std::clamp(m_zoomLevel, 0.25f, 4.0f);
+                m_layoutEngine.setBaseScale(m_zoomLevel);
+            } else {
+                m_scrollY -= wheel * 40.0f;
+                m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
+            }
         }
     }
     
@@ -1560,7 +1698,244 @@ void MarkdownPreview::renderGlowBloom(const std::vector<EffectBatch>& batches, c
 }
 
 void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
-    // TODO: Render images, model viewers, etc.
+    if (!m_embedShader) return;
+
+    // Clear active lists (rebuilt each frame for overlay input)
+    m_activeCanvases.clear();
+    m_activeWorldMaps.clear();
+
+    // Evict stale world cache entries
+    {
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = s_worldCache.begin(); it != s_worldCache.end();) {
+            if (now - it->second.last_used > std::chrono::seconds(30))
+                it = s_worldCache.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    // Helper lambda: draw a textured quad in document space
+    auto drawTexturedQuad = [&](GLuint texID, float x0, float y0, float displayW, float displayH,
+                                float u0, float v0, float u1, float v1) {
+        float x1 = x0 + displayW;
+        float y1 = y0 + displayH;
+        float z  = 0.0f;
+
+        float verts[] = {
+            x0, y0, z,    u0, v0,
+            x1, y0, z,    u1, v0,
+            x1, y1, z,    u1, v1,
+
+            x0, y0, z,    u0, v0,
+            x1, y1, z,    u1, v1,
+            x0, y1, z,    u0, v1,
+        };
+
+        GLuint tmpVAO, tmpVBO;
+        glGenVertexArrays(1, &tmpVAO);
+        glGenBuffers(1, &tmpVBO);
+        glBindVertexArray(tmpVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, tmpVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+
+        glUseProgram(m_embedShader);
+        glUniformMatrix4fv(glGetUniformLocation(m_embedShader, "uMVP"), 1, GL_FALSE, &mvp[0][0]);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texID);
+        glUniform1i(glGetUniformLocation(m_embedShader, "uTexture"), 0);
+
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        glDeleteBuffers(1, &tmpVBO);
+        glDeleteVertexArrays(1, &tmpVAO);
+    };
+
+    m_embedCounter = 0;
+    for (const auto& widget : m_overlayWidgets) {
+        // ── Lua Canvas ───────────────────────────────────────────
+        if (widget.type == OverlayWidget::LuaCanvas) {
+            if (!m_scriptManager) continue;
+
+            const std::string& scriptName = widget.data;
+            std::string embedID = std::to_string(widget.sourceOffset) + ":" + std::to_string(++m_embedCounter);
+
+            LuaEngine* eng = m_scriptManager->getOrCreateEngine(scriptName, embedID, 0);
+            if (!eng) continue;
+
+            ScriptConfig cfg = eng->callConfig();
+            if (cfg.type != ScriptConfig::Type::Canvas) continue;
+
+            int canvasW = (widget.nativeSize.x > 0) ? (int)widget.nativeSize.x : cfg.width;
+            int canvasH = (widget.nativeSize.y > 0) ? (int)widget.nativeSize.y : cfg.height;
+
+            float dt = ImGui::GetIO().DeltaTime;
+            unsigned int texID = eng->renderCanvasFrame(embedID, canvasW, canvasH, dt);
+            if (!texID) continue;
+
+            float displayW = widget.size.x;
+            float displayH = widget.size.y;
+
+            // Lua FBOs are Y-flipped: top-left=(0,1), bottom-right=(1,0)
+            drawTexturedQuad(texID, widget.docPos.x, widget.docPos.y, displayW, displayH,
+                             0.0f, 1.0f, 1.0f, 0.0f);
+
+            m_activeCanvases.push_back({eng, embedID,
+                                        widget.docPos, {displayW, displayH},
+                                        {(float)canvasW, (float)canvasH}});
+            continue;
+        }
+
+        // ── World Map ────────────────────────────────────────────
+        if (widget.type == OverlayWidget::WorldMap) {
+            std::vector<std::string> parts = splitBracketAware(widget.data, "/");
+            if (parts.size() < 2) continue;
+
+            std::string worldName, config;
+            splitNameConfig(parts[0], worldName, config);
+            std::string projection = parts.back();
+            std::transform(projection.begin(), projection.end(), projection.begin(), ::tolower);
+
+            // Get or create cached world + camera state
+            auto it = s_worldCache.try_emplace(worldName, config).first;
+            CachedWorldState& cw = it->second;
+            if (cw.config != config) {
+                try { cw.world.parseConfig(config); cw.config = config; }
+                catch (const std::exception& e) {
+                    PLOGW << "preview:world parseConfig failed: " << e.what();
+                }
+            }
+            cw.last_used = std::chrono::steady_clock::now();
+
+            // Determine which layer to render
+            std::vector<std::string> layerNames = cw.world.getLayerNames();
+            if (layerNames.empty()) {
+                PLOGW << "preview:world '" << worldName << "' has no layers (config='" << config << "')";
+                continue;
+            }
+            int layerIdx = std::clamp(cw.selectedLayer, 0, (int)layerNames.size() - 1);
+            std::string selectedLayer = layerNames[layerIdx];
+
+            // Use native (unscaled) size for projection resolution
+            int projW = (int)widget.nativeSize.x;
+            int projH = (int)widget.nativeSize.y;
+            if (projW <= 0 || projH <= 0) continue;
+
+            // Save/restore FBO binding since projections may use OpenCL/GL interop
+            GLint prevFBO = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+
+            // Ensure texture operations happen on unit 0
+            glActiveTexture(GL_TEXTURE0);
+
+            GLuint texID = 0;
+            float u0, v0, u1, v1;
+
+            if (projection == "globe") {
+                cw.sphereProj.setViewCenterRadians(
+                    cw.globeCenterLon * static_cast<float>(M_PI) / 180.0f,
+                    cw.globeCenterLat * static_cast<float>(M_PI) / 180.0f);
+                cw.sphereProj.setZoomLevel(cw.globeZoom);
+                cw.sphereProj.setFov(cw.globeFovDeg * static_cast<float>(M_PI) / 180.0f);
+
+                cw.sphereProj.project(cw.world, projW, projH, cw.globeTexture, selectedLayer);
+                texID = cw.globeTexture;
+                // Globe uses standard UV orientation
+                u0 = 0.0f; v0 = 0.0f; u1 = 1.0f; v1 = 1.0f;
+            } else {
+                cw.mercProj.setViewCenterRadians(
+                    cw.mercCenterLon * static_cast<float>(M_PI) / 180.0f,
+                    cw.mercCenterLat * static_cast<float>(M_PI) / 180.0f);
+                cw.mercProj.setZoomLevel(cw.mercZoom);
+
+                cw.mercProj.project(cw.world, projW, projH, cw.mercTexture, selectedLayer);
+                texID = cw.mercTexture;
+                // Mercator: UV0=(1,0), UV1=(0,1) matches ImGui::Image convention used by mercatorMap()
+                u0 = 1.0f; v0 = 0.0f; u1 = 0.0f; v1 = 1.0f;
+            }
+
+            // Restore our preview FBO + viewport (project() may have altered GL state)
+            glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
+            glViewport(0, 0, m_fboWidth, m_fboHeight);
+
+            if (!texID) {
+                PLOGW << "preview:world texture 0 after project() — projection='" << projection
+                      << "' layer='" << selectedLayer << "' size=" << projW << "x" << projH;
+                continue;
+            }
+
+            float displayW = widget.size.x;
+            float displayH = widget.size.y;
+
+            // Disable depth test for world map quad — avoids z-fighting with glyph depth
+            glDisable(GL_DEPTH_TEST);
+            drawTexturedQuad(texID, widget.docPos.x, widget.docPos.y, displayW, displayH,
+                             u0, v0, u1, v1);
+            glEnable(GL_DEPTH_TEST);
+
+            m_activeWorldMaps.push_back({worldName, projection,
+                                          widget.docPos, {displayW, displayH},
+                                          {(float)projW, (float)projH}});
+            continue;
+        }
+
+        // ── Image ────────────────────────────────────────────────
+        if (widget.type == OverlayWidget::Image) {
+            const std::string& src = widget.data;
+            GLuint texID = 0;
+            int texW = 0, texH = 0;
+
+            // Try vault://Assets/ resolution
+            const std::string assetsPrefix = "vault://Assets/";
+            if (m_vault && src.rfind(assetsPrefix, 0) == 0) {
+                int64_t aid = m_vault->findAttachmentByExternalPath(src);
+                if (aid != -1) {
+                    std::string key = std::string("vault:assets:") + std::to_string(aid);
+                    IconTexture cached = GetDynamicTexture(key);
+                    if (cached.loaded) {
+                        texID = cached.textureID;
+                        texW = cached.width;
+                        texH = cached.height;
+                    } else {
+                        auto meta = m_vault->getAttachmentMeta(aid);
+                        if (meta.size > 0) {
+                            auto data = m_vault->getAttachmentData(aid);
+                            if (!data.empty()) {
+                                auto result = LoadTextureFromMemory(key, data);
+                                texID = result.textureID;
+                                texW = result.width;
+                                texH = result.height;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (texID) {
+                float displayW = widget.size.x;
+                float displayH = widget.size.y;
+
+                // Maintain aspect ratio if only width or height was specified
+                if (texW > 0 && texH > 0) {
+                    float aspect = (float)texW / (float)texH;
+                    // If using default sizing, fit to actual image aspect
+                    if (widget.nativeSize.x == 300 && widget.nativeSize.y == 200) {
+                        displayH = displayW / aspect;
+                    }
+                }
+
+                glDisable(GL_DEPTH_TEST);
+                drawTexturedQuad(texID, widget.docPos.x, widget.docPos.y,
+                                 displayW, displayH, 0.0f, 0.0f, 1.0f, 1.0f);
+                glEnable(GL_DEPTH_TEST);
+            }
+            continue;
+        }
+    }
 }
 
 void MarkdownPreview::emitParticles(float dt, const std::vector<EffectBatch>& batches) {
@@ -2095,11 +2470,219 @@ void MarkdownPreview::renderOverlayWidgets(const ImVec2& origin, float scrollY) 
                 break;
                 
             case OverlayWidget::Image:
-                // TODO: Load and display image
-                break;
-                
+                break;  // rendered as textured quad in renderEmbeddedContent
+
             default:
                 break;
+        }
+    }
+
+    // Forward mouse input to world map camera controls + overlay UI
+    ImGuiIO& io = ImGui::GetIO();
+    for (size_t wi = 0; wi < m_activeWorldMaps.size(); ++wi) {
+        const auto& aw = m_activeWorldMaps[wi];
+
+        auto cacheIt = s_worldCache.find(aw.worldKey);
+        if (cacheIt == s_worldCache.end()) continue;
+        CachedWorldState& cw = cacheIt->second;
+
+        ImVec2 mapScreenPos(origin.x + aw.docPos.x, origin.y + aw.docPos.y - scrollY);
+        ImVec2 mapSize(aw.size.x, aw.size.y);
+
+        // Invisible button for mouse interaction (zoom/pan/rotate)
+        ImGui::SetCursorScreenPos(mapScreenPos);
+        std::string btnID = "world_map_" + std::to_string(wi);
+        ImGui::InvisibleButton(btnID.c_str(), mapSize);
+        ImGui::SetItemAllowOverlap();  // let overlay widgets receive clicks
+        bool isHover = ImGui::IsItemHovered();
+
+        if (aw.projection == "globe") {
+            // Scroll to zoom
+            if (isHover && io.MouseWheel != 0.0f) {
+                float factor = std::pow(1.12f, fabsf(io.MouseWheel));
+                if (io.MouseWheel > 0.0f)
+                    cw.globeZoom = std::clamp(cw.globeZoom / factor, -0.99f, 64.0f);
+                else
+                    cw.globeZoom = std::clamp(cw.globeZoom * factor, -0.99f, 64.0f);
+            }
+            // Drag to rotate
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                float rotDeg = 0.25f;
+                cw.globeCenterLon += drag.x * rotDeg;
+                cw.globeCenterLat += drag.y * rotDeg;
+                while (cw.globeCenterLon < -180.0f) cw.globeCenterLon += 360.0f;
+                while (cw.globeCenterLon >= 180.0f) cw.globeCenterLon -= 360.0f;
+                cw.globeCenterLat = std::clamp(cw.globeCenterLat, -89.9f, 89.9f);
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            }
+        } else {
+            // Mercator: scroll to zoom
+            if (isHover && io.MouseWheel != 0.0f) {
+                float factor = (io.MouseWheel > 0.0f) ? 1.1f : (1.0f / 1.1f);
+                cw.mercZoom = std::clamp(cw.mercZoom * factor, 1.0f, 100000.0f);
+            }
+            // Mercator: drag to pan
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                float texW = aw.size.x;
+                float texH = aw.size.y;
+
+                // Convert center to projected u/v
+                float u_center = (cw.mercCenterLon + 180.0f) / 360.0f;
+                float lat_rad = cw.mercCenterLat * static_cast<float>(M_PI) / 180.0f;
+                float mercN = std::log(std::tan(static_cast<float>(M_PI) / 4.0f + lat_rad / 2.0f));
+                float v_center = 0.5f * (1.0f - mercN / static_cast<float>(M_PI));
+
+                float du = drag.x / texW / cw.mercZoom;
+                float dv = -drag.y / texH / cw.mercZoom;
+                u_center += du;
+                v_center += dv;
+
+                // Wrap
+                u_center -= std::floor(u_center);
+                v_center = std::clamp(v_center, 0.0f, 1.0f);
+
+                cw.mercCenterLon = u_center * 360.0f - 180.0f;
+                float mercN2 = static_cast<float>(M_PI) * (1.0f - 2.0f * v_center);
+                cw.mercCenterLat = 180.0f / static_cast<float>(M_PI) * std::atan(std::sinh(mercN2));
+
+                ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            }
+        }
+
+        // ── Overlay controls (matching WorldMap.cpp style) ─────
+        {
+            std::vector<std::string> layerNames = cw.world.getLayerNames();
+            std::string layerNamesNullSep;
+            for (const auto& n : layerNames) layerNamesNullSep += n + '\0';
+            layerNamesNullSep += '\0';
+
+            // Layer combo in its own child so popup opens correctly
+            float comboW = mapSize.x * 0.4f;
+            float comboH = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+            ImVec2 comboPos(mapScreenPos.x + 8.0f, mapScreenPos.y + 4.0f);
+            ImGui::SetCursorScreenPos(comboPos);
+            std::string comboChildID = "WorldCombo_" + std::to_string(wi);
+            ImGui::BeginChild(comboChildID.c_str(), ImVec2(comboW + 8.0f, comboH),
+                              false, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground);
+            ImGui::PushItemWidth(comboW);
+            ImGui::Combo(("##layer_" + std::to_string(wi)).c_str(), &cw.selectedLayer,
+                         layerNamesNullSep.c_str());
+            ImGui::PopItemWidth();
+            ImGui::EndChild();
+
+            // Overlay bar at bottom (matches WorldMap.cpp layout)
+            float overlayH = 56.0f;
+            ImVec2 overlayPos(mapScreenPos.x + 8.0f,
+                              mapScreenPos.y + mapSize.y - overlayH);
+            ImGui::SetCursorScreenPos(overlayPos);
+
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.3f));
+            std::string childID = "WorldOverlay_" + std::to_string(wi);
+            ImGui::BeginChild(childID.c_str(), ImVec2(mapSize.x - 16.0f, overlayH),
+                              false, ImGuiWindowFlags_NoDecoration);
+
+            if (aw.projection == "globe") {
+                ImGui::Text("Lon:%.1f Lat:%.1f Z:%.3f",
+                            cw.globeCenterLon, cw.globeCenterLat, cw.globeZoom);
+                ImGui::SameLine();
+                ImGui::PushItemWidth(110);
+                ImGui::DragFloat(("##GlobeFOV_" + std::to_string(wi)).c_str(),
+                                 &cw.globeFovDeg, 1.0f, 10.0f, 120.0f, "FOV: %.1f");
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                if (ImGui::Button(("Reset Camera##" + std::to_string(wi)).c_str())) {
+                    cw.globeCenterLon = 0.0f; cw.globeCenterLat = 0.0f;
+                    cw.globeZoom = 3.0f; cw.globeFovDeg = 45.0f;
+                }
+            } else {
+                ImGui::Text("Lon: %.2f  Lat: %.2f  Zoom: %.3f",
+                            cw.mercCenterLon, cw.mercCenterLat, cw.mercZoom);
+                ImGui::SameLine();
+                ImGui::PushItemWidth(110);
+                float mercDragSpeed = std::max(0.1f, cw.mercZoom * 0.01f);
+                ImGui::DragFloat(("##MercZoom_" + std::to_string(wi)).c_str(),
+                                 &cw.mercZoom, mercDragSpeed, 1.0f, 100000.0f, "Zoom: %.2f");
+                ImGui::PopItemWidth();
+                ImGui::SameLine();
+                if (ImGui::Button(("Reset Camera##" + std::to_string(wi)).c_str())) {
+                    cw.mercCenterLon = 0.0f; cw.mercCenterLat = 0.0f;
+                    cw.mercZoom = 1.0f;
+                }
+            }
+
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        }
+    }
+
+    // Forward mouse input to Lua canvas engines
+    for (size_t ci = 0; ci < m_activeCanvases.size(); ++ci) {
+        const auto& ac = m_activeCanvases[ci];
+        ImVec2 canvasScreenPos(origin.x + ac.docPos.x, origin.y + ac.docPos.y - scrollY);
+        ImVec2 canvasSize(ac.size.x, ac.size.y);
+
+        ImGui::SetCursorScreenPos(canvasScreenPos);
+        std::string btnID = "lua_canvas_" + std::to_string(ci);
+        ImGui::InvisibleButton(btnID.c_str(), canvasSize);
+        bool isHover = ImGui::IsItemHovered();
+
+        // Canvas-relative mouse position, mapped to native (unscaled) coordinates
+        float scaleX = (ac.size.x > 0) ? ac.nativeSize.x / ac.size.x : 1.0f;
+        float scaleY = (ac.size.y > 0) ? ac.nativeSize.y / ac.size.y : 1.0f;
+        float relX = (io.MousePos.x - canvasScreenPos.x) * scaleX;
+        float relY = (io.MousePos.y - canvasScreenPos.y) * scaleY;
+
+        // Mouse button events
+        for (int b = 0; b < 3; ++b) {
+            if (isHover && ImGui::IsMouseClicked((ImGuiMouseButton)b)) {
+                ImVec2 cp = io.MouseClickedPos[b];
+                LuaEngine::CanvasEvent ev; ev.type = "mousedown";
+                ev.data["button"] = std::to_string(b);
+                ev.data["x"] = std::to_string((cp.x - canvasScreenPos.x) * scaleX);
+                ev.data["y"] = std::to_string((cp.y - canvasScreenPos.y) * scaleY);
+                ev.data["ctrl"] = io.KeyCtrl ? "1" : "0";
+                ev.data["shift"] = io.KeyShift ? "1" : "0";
+                ev.data["alt"] = io.KeyAlt ? "1" : "0";
+                ac.engine->callOnCanvasEvent(ev);
+            }
+            if (isHover && ImGui::IsMouseReleased((ImGuiMouseButton)b)) {
+                LuaEngine::CanvasEvent ev; ev.type = "mouseup";
+                ev.data["button"] = std::to_string(b);
+                ev.data["x"] = std::to_string(relX);
+                ev.data["y"] = std::to_string(relY);
+                ac.engine->callOnCanvasEvent(ev);
+            }
+            if (isHover && ImGui::IsMouseDoubleClicked((ImGuiMouseButton)b)) {
+                ImVec2 cp = io.MouseClickedPos[b];
+                LuaEngine::CanvasEvent ev; ev.type = "doubleclick";
+                ev.data["button"] = std::to_string(b);
+                ev.data["x"] = std::to_string((cp.x - canvasScreenPos.x) * scaleX);
+                ev.data["y"] = std::to_string((cp.y - canvasScreenPos.y) * scaleY);
+                ac.engine->callOnCanvasEvent(ev);
+            }
+        }
+
+        // Scroll events
+        if (isHover && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f)) {
+            LuaEngine::CanvasEvent ev; ev.type = "scroll";
+            ev.data["dx"] = std::to_string(io.MouseWheelH);
+            ev.data["dy"] = std::to_string(io.MouseWheel);
+            ev.data["x"] = std::to_string(relX);
+            ev.data["y"] = std::to_string(relY);
+            ac.engine->callOnCanvasEvent(ev);
+        }
+
+        // Mousemove / hover
+        if (isHover) {
+            LuaEngine::CanvasEvent ev; ev.type = "mousemove";
+            ev.data["x"] = std::to_string(relX);
+            ev.data["y"] = std::to_string(relY);
+            ev.data["left"] = io.MouseDown[0] ? "1" : "0";
+            ev.data["right"] = io.MouseDown[1] ? "1" : "0";
+            ev.data["middle"] = io.MouseDown[2] ? "1" : "0";
+            ac.engine->callOnCanvasEvent(ev);
         }
     }
 }

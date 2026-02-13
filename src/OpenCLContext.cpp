@@ -110,6 +110,12 @@ bool OpenCLContext::initGLInterop()
         PLOG_WARNING << "CL/GL interop already initialized";
         return true;
     }
+    if (clGLInteropAttempted)
+    {
+        // Already tried and failed — don't destroy the CL context again
+        return false;
+    }
+    clGLInteropAttempted = true;
     if (!clReady)
     {
         PLOG_ERROR << "Cannot init CL/GL interop: OpenCL not initialized";

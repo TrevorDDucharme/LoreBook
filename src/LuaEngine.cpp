@@ -264,6 +264,10 @@ unsigned int LuaEngine::renderCanvasFrame(const std::string &embedID, int width,
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
+    // Save previous FBO binding before switching to our canvas FBO
+    GLint prevFBO = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+
     // Bind FBO
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
 
@@ -296,8 +300,8 @@ unsigned int LuaEngine::renderCanvasFrame(const std::string &embedID, int width,
     if (wasStencil)    glEnable(GL_STENCIL_TEST);
     glViewport(lastViewport[0], lastViewport[1], lastViewport[2], lastViewport[3]);
 
-    // Unbind FBO
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // Restore previous FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 
     return m_fboTex;
 }

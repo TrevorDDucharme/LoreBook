@@ -1333,6 +1333,16 @@ int main(int argc, char** argv)
         // Use MarkdownEditor which encapsulates both editor and preview
         static MarkdownEditor mdEditor;
         static bool editorInitialized = false;
+
+        // Wire up script manager from vault when available
+        if (vault) {
+            mdEditor.setScriptManager(vault->getScriptManager());
+            mdEditor.setVault(vault.get());
+        } else {
+            mdEditor.setScriptManager(nullptr);
+            mdEditor.setVault(nullptr);
+        }
+
         if (!editorInitialized) {
             // Initialize with some sample content
             mdEditor.setSrc(R"(# Markdown Editor Test

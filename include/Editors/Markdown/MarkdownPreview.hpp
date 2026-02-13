@@ -3,6 +3,9 @@
 #include <Editors/Markdown/PreviewEffectSystem.hpp>
 #include <Editors/Markdown/CollisionMask.hpp>
 #include <Editors/Markdown/LayoutEngine.hpp>
+#include <WorldMaps/World/World.hpp>
+#include <WorldMaps/World/Projections/MercatorProjection.hpp>
+#include <WorldMaps/World/Projections/SphereProjection.hpp>
 #include <GL/glew.h>
 #include <CL/cl.h>
 #include <glm/glm.hpp>
@@ -11,6 +14,12 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <chrono>
+#include <memory>
+
+class LuaScriptManager;
+class LuaEngine;
+class Vault;
 
 namespace Markdown {
 
@@ -46,6 +55,12 @@ public:
     /// Access systems for external use (e.g., Lua bindings)
     PreviewEffectSystem& getEffectSystem() { return m_effectSystem; }
     CollisionMask& getCollisionMask() { return m_collisionMask; }
+    
+    /// Set the script manager for Lua canvas rendering
+    void setScriptManager(LuaScriptManager* mgr) { m_scriptManager = mgr; }
+
+    /// Set the vault for image resolution
+    void setVault(Vault* v) { m_vault = v; }
     
     // ── Camera controls ──
     void setCameraZ(float z) { m_cameraZ = z; }
@@ -133,6 +148,7 @@ private:
     GLuint m_collisionShader = 0;
     static constexpr float COLLISION_SCALE = 5.0f;  // 2x supersampled collision mask
     GLuint m_particleShader = 0;
+    GLuint m_embedShader = 0;              // Textured quad shader for embedded content
     
     // ── VAO/VBO ──
     GLuint m_glyphVAO = 0;
@@ -160,6 +176,59 @@ private:
     
     // ── State ──
     bool m_initialized = false;
+    float m_zoomLevel = 1.0f;  // Ctrl+Scroll zoom (0.25 – 4.0)
+    glm::vec4 m_clearColor = {0.1f, 0.1f, 0.12f, 1.0f};  // FBO background (from frontmatter)
+    LuaScriptManager* m_scriptManager = nullptr;
+    Vault* m_vault = nullptr;
+    int m_embedCounter = 0;  // Per-frame unique embed counter
+
+    // Active canvas instances (populated by renderEmbeddedContent, consumed by renderOverlayWidgets)
+    struct ActiveCanvas {
+        LuaEngine* engine;
+        std::string embedID;
+        glm::vec2 docPos;
+        glm::vec2 size;        // scaled display size
+        glm::vec2 nativeSize;  // unscaled FBO resolution
+    };
+    std::vector<ActiveCanvas> m_activeCanvases;
+
+    // Active world map instances (populated by renderEmbeddedContent, consumed by renderOverlayWidgets)
+    struct ActiveWorldMap {
+        std::string worldKey;      // cache lookup key (worldName)
+        std::string projection;    // "mercator" or "globe"
+        glm::vec2 docPos;          // position in document space
+        glm::vec2 size;            // scaled display size
+        glm::vec2 nativeSize;      // unscaled native resolution
+    };
+    std::vector<ActiveWorldMap> m_activeWorldMaps;
+
+    // Per-world cached state (World object + camera + persistent projections)
+    struct CachedWorldState {
+        World world;
+        std::string config;
+        std::chrono::steady_clock::time_point last_used;
+        // Camera state for mercator
+        float mercCenterLon = 0.0f;   // degrees
+        float mercCenterLat = 0.0f;   // degrees
+        float mercZoom = 1.0f;
+        // Camera state for globe
+        float globeCenterLon = 0.0f;  // degrees
+        float globeCenterLat = 0.0f;  // degrees
+        float globeZoom = 3.0f;
+        float globeFovDeg = 45.0f;
+        // GL textures owned by projections (managed by project() calls)
+        GLuint mercTexture = 0;
+        GLuint globeTexture = 0;
+        int selectedLayer = 0;
+        // Persistent projections (keep CL buffers across frames)
+        MercatorProjection mercProj;
+        SphericalProjection sphereProj;
+        CachedWorldState(const std::string& cfg)
+            : world(cfg), config(cfg),
+              last_used(std::chrono::steady_clock::now()) {}
+    };
+    static std::unordered_map<std::string, CachedWorldState> s_worldCache;
+
     std::string m_sourceText;
     GLuint m_fontAtlasTexture = 0;
 };

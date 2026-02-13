@@ -25,7 +25,8 @@ struct OverlayWidget {
     
     Type type = Link;
     glm::vec2 docPos;        // position in document space
-    glm::vec2 size;          // widget size
+    glm::vec2 size;          // widget size (scaled by zoom)
+    glm::vec2 nativeSize;    // unscaled native resolution (for FBO rendering)
     size_t sourceOffset = 0;
     std::string data;        // URL, script path, etc.
     std::string altText;     // for images
@@ -43,6 +44,9 @@ public:
     
     /// Set the effect system for resolving effect names
     void setEffectSystem(PreviewEffectSystem* system) { m_effectSystem = system; }
+    
+    /// Set base zoom scale (1.0 = default, >1 = zoomed in, <1 = zoomed out)
+    void setBaseScale(float scale) { m_baseScale = scale; }
     
     /// Perform layout on a document
     void layout(const MarkdownDocument& doc, float wrapWidth,
@@ -102,6 +106,7 @@ private:
     ImFont* m_italicFont = nullptr;
     ImFont* m_monoFont = nullptr;
     float m_scale = 1.0f;
+    float m_baseScale = 1.0f;
     float m_lineHeight = 0;
     glm::vec4 m_color = {1, 1, 1, 1};
     

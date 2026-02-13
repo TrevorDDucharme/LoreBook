@@ -2776,7 +2776,8 @@ public:
         }
 
         // Right: live preview using MarkdownEditor's 2.5D FBO preview
-        ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true);
+        ImGui::BeginChild("VaultPreviewRight", ImVec2(0, mainHeight), true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextDisabled("Preview");
         ImGui::Separator();
         // If editing is disabled, show non-editable title at the top of the preview
@@ -2790,6 +2791,7 @@ public:
         }
 
         // Use MarkdownEditor's 2.5D FBO preview renderer
+        vaultMarkdownEditor.setScriptManager(getScriptManager());
         vaultMarkdownEditor.drawPreview();
 
         // Process pending model viewer reloads triggered by background fetches

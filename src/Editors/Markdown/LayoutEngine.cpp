@@ -1,6 +1,7 @@
 #include <Editors/Markdown/LayoutEngine.hpp>
 #include <Editors/Markdown/Effect.hpp>
 #include <Fonts.hpp>
+#include <stringUtils.hpp>
 #include <imgui.h>
 #include <plog/Log.h>
 #include <cmath>
@@ -32,7 +33,7 @@ void LayoutEngine::resetState(float wrapWidth) {
     if (!m_italicFont) m_italicFont = m_font;
     if (!m_monoFont) m_monoFont = m_font;
     
-    m_scale = 1.0f;
+    m_scale = m_baseScale;
     m_lineHeight = m_font ? m_font->FontSize : 16.0f;
     m_color = {1, 1, 1, 1};
     
@@ -124,7 +125,7 @@ void LayoutEngine::layoutHeading(const Block& block) {
     float scales[] = {2.0f, 1.75f, 1.5f, 1.25f, 1.1f, 1.0f};
     int level = std::clamp(block.headingLevel, 1, 6) - 1;
     float oldScale = m_scale;
-    m_scale = scales[level];
+    m_scale = scales[level] * m_baseScale;
     
     // Use bold font for headings
     m_fontStack.push_back(m_boldFont);
@@ -419,17 +420,94 @@ void LayoutEngine::layoutImageSpan(const Span& span) {
     // Record image as overlay widget
     if (m_outWidgets) {
         OverlayWidget widget;
-        widget.type = OverlayWidget::Image;
+        
+        // Parse optional ::WxH size suffix
+        int urlW = -1, urlH = -1;
+        std::string baseUrl = span.url;
+        {
+            size_t sep = span.url.rfind("::");
+            if (sep != std::string::npos && sep > 0) {
+                std::string suf = span.url.substr(sep + 2);
+                size_t xPos = suf.find('x');
+                if (xPos != std::string::npos) {
+                    try {
+                        if (xPos > 0) urlW = std::stoi(suf.substr(0, xPos));
+                        if (xPos + 1 < suf.size()) urlH = std::stoi(suf.substr(xPos + 1));
+                    } catch (...) {}
+                    if (urlW > 0 || urlH > 0) baseUrl = span.url.substr(0, sep);
+                }
+            }
+        }
+        
+        // Detect vault://Scripts/ URLs -> LuaCanvas
+        const std::string scriptsPrefix = "vault://Scripts/";
+        bool isScript = (baseUrl.rfind(scriptsPrefix, 0) == 0);
+
+        // Detect vault://World/ URLs -> WorldMap
+        const std::string worldPrefix = "vault://World/";
+        bool isWorld = (baseUrl.rfind(worldPrefix, 0) == 0);
+        
+        if (isWorld) {
+            widget.type = OverlayWidget::WorldMap;
+            widget.data = baseUrl.substr(worldPrefix.size());  // e.g. "MyWorld[seed=42]/mercator"
+
+            // Determine projection from last path component to set aspect ratio
+            std::vector<std::string> parts = splitBracketAware(widget.data, "/");
+            std::string projection;
+            if (parts.size() >= 2) {
+                projection = parts.back();
+                std::transform(projection.begin(), projection.end(), projection.begin(), ::tolower);
+            }
+
+            // Default to available width; height depends on projection
+            float availW = m_wrapWidth - m_indentX;
+            int w = (urlW > 0) ? urlW : static_cast<int>(availW);
+            int h;
+            if (urlH > 0) {
+                h = urlH;
+            } else if (projection == "globe") {
+                h = w;  // 1:1 aspect
+            } else {
+                h = static_cast<int>(w * 0.5f);  // mercator 2:1 aspect
+            }
+
+            float scaledW = static_cast<float>(w) * m_scale;
+            float scaledH = static_cast<float>(h) * m_scale;
+
+            widget.docPos = {m_curX, m_curY};
+            widget.size = {scaledW, scaledH};
+            widget.nativeSize = {static_cast<float>(w), static_cast<float>(h)};
+            widget.altText = span.title;
+            widget.sourceOffset = span.sourceOffset;
+            m_outWidgets->push_back(widget);
+
+            lineBreak();
+            m_curY += scaledH;
+            return;  // early return — sizing handled above
+        } else if (isScript) {
+            widget.type = OverlayWidget::LuaCanvas;
+            widget.data = baseUrl.substr(scriptsPrefix.size());  // script name
+        } else {
+            widget.type = OverlayWidget::Image;
+            widget.data = baseUrl;
+        }
+        
+        int w = (urlW > 0) ? urlW : 300;
+        int h = (urlH > 0) ? urlH : 200;
+        
+        float scaledW = static_cast<float>(w) * m_scale;
+        float scaledH = static_cast<float>(h) * m_scale;
+        
         widget.docPos = {m_curX, m_curY};
-        widget.size = {200, 150};  // Default size, will be adjusted when image loads
-        widget.data = span.url;
+        widget.size = {scaledW, scaledH};
+        widget.nativeSize = {static_cast<float>(w), static_cast<float>(h)};
         widget.altText = span.title;
         widget.sourceOffset = span.sourceOffset;
         m_outWidgets->push_back(widget);
         
         // Reserve space
         lineBreak();
-        m_curY += 150;  // Placeholder height
+        m_curY += scaledH;
     }
 }
 

@@ -160,6 +160,7 @@ private:
     bool clReady = false;
     bool clDeviceIsGPU = false;
     bool clGLInterop = false;
+    bool clGLInteropAttempted = false;
 
     // Persistent debug buffer (always-on)
     cl_mem debugBuf_ = nullptr;
