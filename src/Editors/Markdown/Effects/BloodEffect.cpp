@@ -33,27 +33,27 @@ void BloodEffect::uploadGlyphSnippetUniforms(GLuint shader, float time) const {
 EffectEmissionConfig BloodEffect::getEmissionConfig() const {
     EffectEmissionConfig cfg;
     cfg.shape = EffectEmissionConfig::Shape::GlyphAlpha;
-    cfg.rate = 10.0f;
-    cfg.velocity = {0, 60};
-    cfg.velocityVar = {5, 15};
-    cfg.lifetime = 2.0f;
+    cfg.rate = 30.0f;         // Higher rate for fluid density
+    cfg.velocity = {0, 50};   // Slightly slower initial (SPH handles flow)
+    cfg.velocityVar = {8, 12};
+    cfg.lifetime = 3.0f;      // Longer life — fluid persists
     cfg.lifetimeVar = 0.5f;
-    cfg.size = 3.0f;
-    cfg.sizeVar = 1.0f;
+    cfg.size = 10.0f;         // Larger — SPH smoothing radius is 25px
+    cfg.sizeVar = 3.0f;
     return cfg;
 }
 
 ParticleSnippets BloodEffect::getParticleSnippets() const {
     ParticleSnippets ps;
-    // Geometry: drip shape (taller when moving) + standard fade-in
+    // Geometry: large round blob for density accumulation pass
     ps.geometry.code = R"({
-    float aspect = 1.0 + abs(life) * 0.3;
-    up.y *= aspect;
-    color.a *= smoothstep(0.0, 0.3, life);
+    size *= 2.0;  // Scale up for density coverage
+    color.a *= smoothstep(0.0, 0.2, life) * 0.5;
 })";
-    // Fragment: slightly tighter core than default
+    // Fragment: gaussian falloff for smooth density blending
     ps.fragment.code = R"({
-    alpha = 1.0 - smoothstep(0.25, 0.5, dist);
+    float r = dist * 2.0;
+    alpha = exp(-r * r * 2.5);
 })";
     return ps;
 }

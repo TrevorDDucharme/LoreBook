@@ -1,6 +1,8 @@
 #include <Editors/Markdown/MarkdownPreview.hpp>
 #include <Editors/Markdown/Effect.hpp>
+#include <Editors/Markdown/Effects/BloodEffect.hpp>
 #include <OpenCLContext.hpp>
+#include <LoreBook_Resources/LoreBook_ResourcesEmbeddedVFS.hpp>
 #include <plog/Log.h>
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -243,6 +245,254 @@ void main() {
 )";
 
 // ────────────────────────────────────────────────────────────────────
+// SPH Fluid Simulation kernel (OpenCL) — with spatial hash grid
+// ────────────────────────────────────────────────────────────────────
+
+static const char* s_sphKernelSource = R"(
+#include "common.cl"
+
+// ═══════════════════════════════════════════════════════════════════
+// Spatial Hash Grid — O(N) neighbor lookup
+// ═══════════════════════════════════════════════════════════════════
+// Grid maps 2D space into cells of size = smoothingRadius.
+// Each cell stores a range [start, start+count) into a sorted
+// particle entry array.  Building the grid is done on CPU (simple
+// for <1000 particles); kernels only read it.
+
+// Grid cell: (start, count) packed as uint2
+// gridEntries[]: particle indices sorted by cell
+
+// Hash a 2D cell coordinate to a flat index with wrapping
+uint cellHash(int cx, int cy, uint tableSize) {
+    // Simple spatial hash (prime mixing)
+    uint h = (uint)((cx * 92837111) ^ (cy * 689287499));
+    return h % tableSize;
+}
+
+// ── SPH kernel functions ──
+
+float poly6_2d(float r2, float h2) {
+    if (r2 >= h2) return 0.0f;
+    float diff = h2 - r2;
+    return diff * diff * diff;
+}
+
+float2 spikyGrad_2d(float2 rij, float r, float h) {
+    if (r >= h || r < 0.001f) return (float2)(0.0f, 0.0f);
+    float diff = h - r;
+    return (diff * diff) * (rij / r);
+}
+
+float viscLaplacian_2d(float r, float h) {
+    if (r >= h) return 0.0f;
+    return (h - r);
+}
+
+// ── Pass 1: Compute density + pressure using spatial hash ──
+__kernel void sphDensityPressure(
+    __global Particle* particles,
+    __global float* density,
+    __global float* pressure,
+    __global const uint2* grid,        // [tableSize] cells: (start, count)
+    __global const uint* gridEntries,  // sorted particle indices
+    const uint count,
+    const uint tableSize,
+    const float smoothingRadius,
+    const float restDensity,
+    const float stiffness,
+    const float particleMass
+) {
+    uint i = get_global_id(0);
+    if (i >= count) return;
+
+    Particle pi = particles[i];
+    if (pi.life <= 0.0f || pi.behaviorID != BEHAVIOR_BLOOD) {
+        density[i] = 0.0f;
+        pressure[i] = 0.0f;
+        return;
+    }
+
+    float h = smoothingRadius;
+    float h2 = h * h;
+    float poly6Norm = 4.0f / (M_PI_F * pown(h, 8));
+    float rho = 0.0f;
+
+    // Grid cell of this particle
+    int cx = (int)floor(pi.pos.x / h);
+    int cy = (int)floor(pi.pos.y / h);
+
+    // Search 3x3 neighborhood
+    for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            uint ch = cellHash(cx + dx, cy + dy, tableSize);
+            uint2 cell = grid[ch];
+            uint start = cell.x;
+            uint cellCount = cell.y;
+            for (uint k = 0; k < cellCount; ++k) {
+                uint j = gridEntries[start + k];
+                if (j >= count) continue;
+                Particle pj = particles[j];
+                if (pj.life <= 0.0f || pj.behaviorID != BEHAVIOR_BLOOD) continue;
+
+                float2 rij = pi.pos - pj.pos;
+                float r2 = dot(rij, rij);
+                rho += particleMass * poly6Norm * poly6_2d(r2, h2);
+            }
+        }
+    }
+
+    density[i] = rho;
+    pressure[i] = max(stiffness * (rho - restDensity), 0.0f);
+}
+
+// ── Pass 2: Pressure + viscosity + cohesion forces ──
+__kernel void sphForces(
+    __global Particle* particles,
+    __global const float* density,
+    __global const float* pressure,
+    __global const uint2* grid,
+    __global const uint* gridEntries,
+    const float deltaTime,
+    const uint count,
+    const uint tableSize,
+    const float smoothingRadius,
+    const float viscosity,
+    const float cohesionStrength,
+    const float particleMass
+) {
+    uint i = get_global_id(0);
+    if (i >= count) return;
+
+    Particle pi = particles[i];
+    if (pi.life <= 0.0f || pi.behaviorID != BEHAVIOR_BLOOD) return;
+
+    float rho_i = density[i];
+    if (rho_i < 0.0001f) return;
+
+    float p_i = pressure[i];
+    float h = smoothingRadius;
+    float h2 = h * h;
+
+    float spikyNorm = -30.0f / (M_PI_F * pown(h, 5));
+    float viscNorm = 20.0f / (3.0f * M_PI_F * pown(h, 5));
+    float poly6Norm = 4.0f / (M_PI_F * pown(h, 8));
+
+    float2 fPressure = (float2)(0.0f);
+    float2 fViscosity = (float2)(0.0f);
+    float2 fCohesion = (float2)(0.0f);
+
+    int cx = (int)floor(pi.pos.x / h);
+    int cy = (int)floor(pi.pos.y / h);
+
+    for (int ddx = -1; ddx <= 1; ++ddx) {
+        for (int ddy = -1; ddy <= 1; ++ddy) {
+            uint ch = cellHash(cx + ddx, cy + ddy, tableSize);
+            uint2 cell = grid[ch];
+            uint start = cell.x;
+            uint cellCount = cell.y;
+            for (uint k = 0; k < cellCount; ++k) {
+                uint j = gridEntries[start + k];
+                if (j == i || j >= count) continue;
+                Particle pj = particles[j];
+                if (pj.life <= 0.0f || pj.behaviorID != BEHAVIOR_BLOOD) continue;
+
+                float rho_j = density[j];
+                if (rho_j < 0.0001f) continue;
+                float p_j = pressure[j];
+
+                float2 rij = pi.pos - pj.pos;
+                float r2 = dot(rij, rij);
+                if (r2 >= h2) continue;
+                float r = sqrt(r2);
+
+                // Pressure force (symmetric)
+                float2 pGrad = spikyNorm * spikyGrad_2d(rij, r, h);
+                fPressure -= particleMass * (p_i / (rho_i * rho_i) + p_j / (rho_j * rho_j)) * pGrad;
+
+                // Viscosity force
+                float vLap = viscNorm * viscLaplacian_2d(r, h);
+                fViscosity += particleMass * (pj.vel - pi.vel) / rho_j * vLap;
+
+                // Cohesion (surface tension)
+                if (r > 0.001f) {
+                    float w = poly6Norm * poly6_2d(r2, h2);
+                    fCohesion -= cohesionStrength * particleMass * (rij / r) * w;
+                }
+            }
+        }
+    }
+
+    fViscosity *= viscosity;
+
+    float2 accel = (fPressure + fViscosity + fCohesion) / rho_i;
+
+    // Stability clamp
+    float accelLen = length(accel);
+    if (accelLen > 800.0f) {
+        accel = accel / accelLen * 800.0f;
+    }
+
+    pi.vel += accel * deltaTime;
+    particles[i] = pi;
+}
+)";
+
+// ────────────────────────────────────────────────────────────────────
+// Blood fluid post-process shader (density field → fluid surface)
+// ────────────────────────────────────────────────────────────────────
+
+static const char* s_bloodFluidFrag = R"(
+#version 330 core
+uniform sampler2D uDensity;
+uniform vec2 uTexelSize;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+void main() {
+    float d = texture(uDensity, v_uv).r;
+
+    // Isosurface threshold — merges nearby blobs into cohesive fluid
+    float threshold = 0.35;
+    float surface = smoothstep(threshold - 0.12, threshold + 0.03, d);
+    if (surface < 0.01) discard;
+
+    // Gradient-based normals from density field
+    float dx = texture(uDensity, v_uv + vec2(uTexelSize.x, 0)).r
+             - texture(uDensity, v_uv - vec2(uTexelSize.x, 0)).r;
+    float dy = texture(uDensity, v_uv + vec2(0, uTexelSize.y)).r
+             - texture(uDensity, v_uv - vec2(0, uTexelSize.y)).r;
+    vec3 normal = normalize(vec3(-dx * 4.0, -dy * 4.0, 0.25));
+
+    // Specular highlights (top-left light) — wet/glossy look
+    vec3 lightDir = normalize(vec3(-0.3, -0.5, 1.0));
+    vec3 viewDir = vec3(0, 0, 1);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfDir), 0.0), 48.0);
+
+    // Fresnel-like rim
+    float rim = 1.0 - max(dot(normal, viewDir), 0.0);
+    rim = pow(rim, 3.0) * 0.3;
+
+    // Blood coloring — deep where thick, brighter at edges
+    float depthFactor = smoothstep(threshold, threshold + 0.6, d);
+    vec3 deepBlood  = vec3(0.30, 0.01, 0.01);
+    vec3 edgeBlood  = vec3(0.65, 0.04, 0.02);
+    vec3 bloodColor = mix(edgeBlood, deepBlood, depthFactor);
+
+    // Subsurface scattering approximation
+    float sss = (1.0 - depthFactor) * 0.15;
+    bloodColor += vec3(0.8, 0.1, 0.05) * sss;
+
+    // Apply specular + rim
+    bloodColor += vec3(1.0, 0.9, 0.85) * spec * 0.6;
+    bloodColor += vec3(0.5, 0.05, 0.02) * rim;
+
+    fragColor = vec4(bloodColor, surface * 0.92);
+}
+)";
+
+// ────────────────────────────────────────────────────────────────────
 // MarkdownPreview implementation
 // ────────────────────────────────────────────────────────────────────
 
@@ -362,6 +612,18 @@ void MarkdownPreview::cleanup() {
     if (m_bloomGlowShader) { glDeleteProgram(m_bloomGlowShader); m_bloomGlowShader = 0; }
     if (m_quadVAO) { glDeleteVertexArrays(1, &m_quadVAO); m_quadVAO = 0; }
     if (m_quadVBO) { glDeleteBuffers(1, &m_quadVBO); m_quadVBO = 0; }
+    
+    // Cleanup SPH fluid resources
+    if (m_sphDensityKernel) { clReleaseKernel(m_sphDensityKernel); m_sphDensityKernel = nullptr; }
+    if (m_sphForcesKernel) { clReleaseKernel(m_sphForcesKernel); m_sphForcesKernel = nullptr; }
+    if (m_sphProgram) { clReleaseProgram(m_sphProgram); m_sphProgram = nullptr; }
+    if (m_clSPHDensity) { OpenCLContext::get().releaseMem(m_clSPHDensity); m_clSPHDensity = nullptr; }
+    if (m_clSPHPressure) { OpenCLContext::get().releaseMem(m_clSPHPressure); m_clSPHPressure = nullptr; }
+    if (m_clSPHGrid) { OpenCLContext::get().releaseMem(m_clSPHGrid); m_clSPHGrid = nullptr; }
+    if (m_clSPHGridEntries) { OpenCLContext::get().releaseMem(m_clSPHGridEntries); m_clSPHGridEntries = nullptr; }
+    if (m_bloodDensityFBO) { glDeleteFramebuffers(1, &m_bloodDensityFBO); m_bloodDensityFBO = 0; }
+    if (m_bloodDensityTex) { glDeleteTextures(1, &m_bloodDensityTex); m_bloodDensityTex = 0; }
+    if (m_bloodFluidShader) { glDeleteProgram(m_bloodFluidShader); m_bloodFluidShader = 0; }
     
     // Clear CPU particle buffers
     m_cpuParticles.clear();
@@ -505,6 +767,33 @@ void MarkdownPreview::initShaders() {
         glEnableVertexAttribArray(1);
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
         glBindVertexArray(0);
+    }
+    
+    // Compile blood fluid post-process shader
+    {
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &s_bloomCompositeVert, nullptr);  // Reuse full-screen quad vert
+        glCompileShader(vs);
+        
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &s_bloodFluidFrag, nullptr);
+        glCompileShader(fs);
+        
+        m_bloodFluidShader = glCreateProgram();
+        glAttachShader(m_bloodFluidShader, vs);
+        glAttachShader(m_bloodFluidShader, fs);
+        glLinkProgram(m_bloodFluidShader);
+        
+        GLint linked;
+        glGetProgramiv(m_bloodFluidShader, GL_LINK_STATUS, &linked);
+        if (!linked) {
+            char log[1024];
+            glGetProgramInfoLog(m_bloodFluidShader, sizeof(log), nullptr, log);
+            PLOG_ERROR << "Blood fluid shader link failed: " << log;
+        }
+        
+        glDeleteShader(vs);
+        glDeleteShader(fs);
     }
 }
 
@@ -651,6 +940,75 @@ void MarkdownPreview::initParticleSystem() {
         PLOG_ERROR << "Failed to create particle buffer: " << err;
         m_clParticleBuffer = nullptr;
     }
+    
+    initSPH();
+}
+
+void MarkdownPreview::initSPH() {
+    auto& cl = OpenCLContext::get();
+    if (!cl.isReady()) return;
+    
+    // Load common.cl for #include replacement
+    std::string commonCL = loadLoreBook_ResourcesEmbeddedFileAsString("Kernels/particles/common.cl");
+    
+    // Replace #include with actual common.cl content
+    std::string fullSource = s_sphKernelSource;
+    size_t includePos = fullSource.find("#include \"common.cl\"");
+    if (includePos != std::string::npos) {
+        fullSource.replace(includePos, 20, commonCL);
+    }
+    
+    const char* src = fullSource.c_str();
+    size_t len = fullSource.size();
+    cl_int err;
+    
+    m_sphProgram = clCreateProgramWithSource(cl.getContext(), 1, &src, &len, &err);
+    if (err != CL_SUCCESS) {
+        PLOG_ERROR << "SPH: clCreateProgramWithSource failed: " << err;
+        return;
+    }
+    
+    cl_device_id dev = cl.getDevice();
+    err = clBuildProgram(m_sphProgram, 1, &dev, "-cl-fast-relaxed-math", nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t logSize;
+        clGetProgramBuildInfo(m_sphProgram, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logSize);
+        std::string log(logSize, '\0');
+        clGetProgramBuildInfo(m_sphProgram, dev, CL_PROGRAM_BUILD_LOG, logSize, &log[0], nullptr);
+        PLOG_ERROR << "SPH kernel build failed: " << log;
+        clReleaseProgram(m_sphProgram);
+        m_sphProgram = nullptr;
+        return;
+    }
+    
+    m_sphDensityKernel = clCreateKernel(m_sphProgram, "sphDensityPressure", &err);
+    if (err != CL_SUCCESS) {
+        PLOG_ERROR << "SPH density kernel failed: " << err;
+        m_sphDensityKernel = nullptr;
+    }
+    
+    m_sphForcesKernel = clCreateKernel(m_sphProgram, "sphForces", &err);
+    if (err != CL_SUCCESS) {
+        PLOG_ERROR << "SPH forces kernel failed: " << err;
+        m_sphForcesKernel = nullptr;
+    }
+    
+    // Allocate density/pressure buffers
+    m_clSPHDensity = cl.createBuffer(CL_MEM_READ_WRITE, MAX_PARTICLES * sizeof(float),
+                                      nullptr, &err, "SPH density");
+    m_clSPHPressure = cl.createBuffer(CL_MEM_READ_WRITE, MAX_PARTICLES * sizeof(float),
+                                       nullptr, &err, "SPH pressure");
+    
+    // Grid buffers — table size is a prime that accommodates sparse spatial cells
+    constexpr uint32_t SPH_GRID_TABLE_SIZE = 4099;
+    m_clSPHGrid = cl.createBuffer(CL_MEM_READ_WRITE,
+                                   SPH_GRID_TABLE_SIZE * sizeof(cl_uint2),
+                                   nullptr, &err, "SPH grid");
+    m_clSPHGridEntries = cl.createBuffer(CL_MEM_READ_WRITE,
+                                          MAX_PARTICLES * sizeof(cl_uint),
+                                          nullptr, &err, "SPH grid entries");
+    
+    PLOG_INFO << "SPH fluid simulation initialized (grid table size: " << SPH_GRID_TABLE_SIZE << ")";
 }
 
 void MarkdownPreview::ensureFBO(int width, int height) {
@@ -773,6 +1131,23 @@ void MarkdownPreview::ensureFBO(int width, int height) {
     
     // Resize collision mask to allocated size
     m_collisionMask.resize(allocWidth, allocHeight);
+    
+    // ── Blood fluid density FBO (full res, R16F for density accumulation) ──
+    if (m_bloodDensityFBO) { glDeleteFramebuffers(1, &m_bloodDensityFBO); m_bloodDensityFBO = 0; }
+    if (m_bloodDensityTex) { glDeleteTextures(1, &m_bloodDensityTex); m_bloodDensityTex = 0; }
+    
+    glGenTextures(1, &m_bloodDensityTex);
+    glBindTexture(GL_TEXTURE_2D, m_bloodDensityTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, allocWidth, allocHeight, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    
+    glGenFramebuffers(1, &m_bloodDensityFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_bloodDensityFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloodDensityTex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 ImVec2 MarkdownPreview::render() {
@@ -890,6 +1265,9 @@ ImVec2 MarkdownPreview::render() {
     
     // 13. Render particles
     renderParticlesFromGPU(mvp);
+    
+    // 13.5. Blood fluid post-process (density → isosurface composite)
+    renderBloodFluid();
     
     // 14. Glow bloom post-process
     renderGlowBloom(batches, mvp);
@@ -1343,6 +1721,127 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         maskH = 1.0f;
     }
     
+    // 2.5. Run SPH fluid passes for blood particles (before behavior kernels)
+    if (m_sphDensityKernel && m_sphForcesKernel && m_clSPHDensity && m_clSPHPressure
+        && m_clSPHGrid && m_clSPHGridEntries) {
+        // Check if any blood particles exist
+        bool hasBlood = false;
+        for (size_t i = 0; i < m_particleCount && !hasBlood; ++i) {
+            if (m_cpuParticles[i].life > 0 && m_cpuParticles[i].behaviorID == 2) hasBlood = true;
+        }
+        
+        if (hasBlood) {
+            // Get SPH params from the BloodEffect instance
+            float sphRadius = 25.0f, restDensity = 1.0f, stiffness = 150.0f;
+            float viscosity = 6.0f, cohesion = 0.3f, mass = 1.0f;
+            
+            for (EffectDef* def : particleEffects) {
+                if (def->effect && def->effect->getBehaviorID() == 2) {
+                    auto* blood = dynamic_cast<BloodEffect*>(def->effect);
+                    if (blood) {
+                        sphRadius = blood->sphSmoothingRadius;
+                        restDensity = blood->sphRestDensity;
+                        stiffness = blood->sphStiffness;
+                        viscosity = blood->sphViscosity;
+                        cohesion = blood->sphCohesion;
+                        mass = blood->sphParticleMass;
+                    }
+                    break;
+                }
+            }
+            
+            // Build spatial hash grid on CPU (fast for <1000 particles)
+            constexpr uint32_t SPH_GRID_TABLE_SIZE = 4099;
+            
+            auto sphCellHash = [](int cx, int cy, uint32_t tableSize) -> uint32_t {
+                uint32_t h = static_cast<uint32_t>((cx * 92837111) ^ (cy * 689287499));
+                return h % tableSize;
+            };
+            
+            // Count particles per cell
+            std::vector<uint32_t> cellCounts(SPH_GRID_TABLE_SIZE, 0);
+            for (size_t i = 0; i < m_particleCount; ++i) {
+                auto& p = m_cpuParticles[i];
+                if (p.life <= 0 || p.behaviorID != 2) continue;
+                int cx = static_cast<int>(std::floor(p.pos.x / sphRadius));
+                int cy = static_cast<int>(std::floor(p.pos.y / sphRadius));
+                cellCounts[sphCellHash(cx, cy, SPH_GRID_TABLE_SIZE)]++;
+            }
+            
+            // Prefix sum → cell start offsets
+            std::vector<cl_uint2> gridCells(SPH_GRID_TABLE_SIZE);
+            uint32_t runningOffset = 0;
+            for (uint32_t c = 0; c < SPH_GRID_TABLE_SIZE; ++c) {
+                gridCells[c] = {{runningOffset, cellCounts[c]}};
+                runningOffset += cellCounts[c];
+            }
+            
+            // Fill sorted entries
+            std::vector<cl_uint> gridEntries(runningOffset > 0 ? runningOffset : 1, 0);
+            std::vector<uint32_t> cellInsert(SPH_GRID_TABLE_SIZE, 0);
+            for (size_t i = 0; i < m_particleCount; ++i) {
+                auto& p = m_cpuParticles[i];
+                if (p.life <= 0 || p.behaviorID != 2) continue;
+                int cx = static_cast<int>(std::floor(p.pos.x / sphRadius));
+                int cy = static_cast<int>(std::floor(p.pos.y / sphRadius));
+                uint32_t ch = sphCellHash(cx, cy, SPH_GRID_TABLE_SIZE);
+                uint32_t slot = gridCells[ch].s[0] + cellInsert[ch]++;
+                if (slot < gridEntries.size()) {
+                    gridEntries[slot] = static_cast<cl_uint>(i);
+                }
+            }
+            
+            // Upload grid to CL
+            clEnqueueWriteBuffer(q, m_clSPHGrid, CL_FALSE, 0,
+                                  SPH_GRID_TABLE_SIZE * sizeof(cl_uint2),
+                                  gridCells.data(), 0, nullptr, nullptr);
+            if (runningOffset > 0) {
+                clEnqueueWriteBuffer(q, m_clSPHGridEntries, CL_FALSE, 0,
+                                      runningOffset * sizeof(cl_uint),
+                                      gridEntries.data(), 0, nullptr, nullptr);
+            }
+            
+            uint32_t tableSize = SPH_GRID_TABLE_SIZE;
+            
+            // Pass 1: density + pressure
+            clSetKernelArg(m_sphDensityKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
+            clSetKernelArg(m_sphDensityKernel, 1, sizeof(cl_mem), &m_clSPHDensity);
+            clSetKernelArg(m_sphDensityKernel, 2, sizeof(cl_mem), &m_clSPHPressure);
+            clSetKernelArg(m_sphDensityKernel, 3, sizeof(cl_mem), &m_clSPHGrid);
+            clSetKernelArg(m_sphDensityKernel, 4, sizeof(cl_mem), &m_clSPHGridEntries);
+            clSetKernelArg(m_sphDensityKernel, 5, sizeof(uint32_t), &count);
+            clSetKernelArg(m_sphDensityKernel, 6, sizeof(uint32_t), &tableSize);
+            clSetKernelArg(m_sphDensityKernel, 7, sizeof(float), &sphRadius);
+            clSetKernelArg(m_sphDensityKernel, 8, sizeof(float), &restDensity);
+            clSetKernelArg(m_sphDensityKernel, 9, sizeof(float), &stiffness);
+            clSetKernelArg(m_sphDensityKernel, 10, sizeof(float), &mass);
+            err = clEnqueueNDRangeKernel(q, m_sphDensityKernel, 1, nullptr, &globalSize,
+                                          nullptr, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) {
+                PLOG_ERROR << "SPH density kernel dispatch failed: " << err;
+            }
+            
+            // Pass 2: forces (implicit serialization on in-order queue)
+            clSetKernelArg(m_sphForcesKernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
+            clSetKernelArg(m_sphForcesKernel, 1, sizeof(cl_mem), &m_clSPHDensity);
+            clSetKernelArg(m_sphForcesKernel, 2, sizeof(cl_mem), &m_clSPHPressure);
+            clSetKernelArg(m_sphForcesKernel, 3, sizeof(cl_mem), &m_clSPHGrid);
+            clSetKernelArg(m_sphForcesKernel, 4, sizeof(cl_mem), &m_clSPHGridEntries);
+            clSetKernelArg(m_sphForcesKernel, 5, sizeof(float), &dt);
+            clSetKernelArg(m_sphForcesKernel, 6, sizeof(uint32_t), &count);
+            clSetKernelArg(m_sphForcesKernel, 7, sizeof(uint32_t), &tableSize);
+            clSetKernelArg(m_sphForcesKernel, 8, sizeof(float), &sphRadius);
+            clSetKernelArg(m_sphForcesKernel, 9, sizeof(float), &viscosity);
+            clSetKernelArg(m_sphForcesKernel, 10, sizeof(float), &cohesion);
+            clSetKernelArg(m_sphForcesKernel, 11, sizeof(float), &mass);
+            err = clEnqueueNDRangeKernel(q, m_sphForcesKernel, 1, nullptr, &globalSize,
+                                          nullptr, 0, nullptr, nullptr);
+            if (err != CL_SUCCESS) {
+                PLOG_ERROR << "SPH forces kernel dispatch failed: " << err;
+            }
+        }
+    }
+    
     // 3. Dispatch each Effect's particle kernel
     // Standard arg order: (particles, collision, dt, scrollY, maskH, time, count)
     // Effect-specific args start at index 7 via bindKernelParams()
@@ -1489,6 +1988,18 @@ void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
     for (auto& [bid, indices] : m_particleBehaviorGroups) {
         if (indices.empty()) continue;
         
+        bool isBlood = (bid == 2 && m_bloodDensityFBO);
+        
+        if (isBlood) {
+            // Render blood particles to density FBO as soft gaussian blobs
+            glBindFramebuffer(GL_FRAMEBUFFER, m_bloodDensityFBO);
+            glViewport(0, 0, m_fboWidth, m_fboHeight);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            // Pure additive blend for density accumulation (no alpha multiply)
+            glBlendFunc(GL_ONE, GL_ONE);
+        }
+        
         GLuint shader = m_particleShader;  // fallback generic shader
         EffectDef* def = nullptr;
         auto it = effectByBehavior.find(bid);
@@ -1511,11 +2022,47 @@ void MarkdownPreview::renderParticlesFromGPU(const glm::mat4& mvp) {
                      indices.data(), GL_DYNAMIC_DRAW);
         glDrawElements(GL_POINTS, static_cast<GLsizei>(indices.size()),
                        GL_UNSIGNED_INT, nullptr);
+        
+        if (isBlood) {
+            // Restore main FBO and normal particle blend
+            glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+            glViewport(0, 0, m_fboWidth, m_fboHeight);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // Back to additive particle blend
+        }
     }
     
     // Restore state
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void MarkdownPreview::renderBloodFluid() {
+    if (!m_bloodFluidShader || !m_bloodDensityFBO || !m_quadVAO ||
+        m_fboWidth <= 0 || m_fboHeight <= 0) return;
+    
+    // Only run if blood particles exist
+    auto it = m_particleBehaviorGroups.find(2);
+    if (it == m_particleBehaviorGroups.end() || it->second.empty()) return;
+    
+    // Composite fluid surface onto main FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+    glViewport(0, 0, m_fboWidth, m_fboHeight);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  // Alpha blend (not additive)
+    glDisable(GL_DEPTH_TEST);
+    
+    glUseProgram(m_bloodFluidShader);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_bloodDensityTex);
+    glUniform1i(glGetUniformLocation(m_bloodFluidShader, "uDensity"), 0);
+    glUniform2f(glGetUniformLocation(m_bloodFluidShader, "uTexelSize"),
+                1.0f / m_fboWidth, 1.0f / m_fboHeight);
+    
+    glBindVertexArray(m_quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    
+    // Restore standard blend
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 

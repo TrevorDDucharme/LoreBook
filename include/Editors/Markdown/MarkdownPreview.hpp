@@ -105,6 +105,21 @@ private:
     GLuint m_quadVAO = 0;              // Full-screen quad for blur/composite
     GLuint m_quadVBO = 0;
     
+    // ── Blood Fluid (SPH + metaball rendering) ──
+    cl_program m_sphProgram = nullptr;
+    cl_kernel m_sphDensityKernel = nullptr;   // Pass 1: density + pressure
+    cl_kernel m_sphForcesKernel = nullptr;    // Pass 2: pressure + viscosity + cohesion
+    cl_mem m_clSPHDensity = nullptr;          // float[MAX_PARTICLES]
+    cl_mem m_clSPHPressure = nullptr;         // float[MAX_PARTICLES]
+    cl_mem m_clSPHGrid = nullptr;             // Spatial hash grid cell starts
+    cl_mem m_clSPHGridEntries = nullptr;      // Spatial hash particle entries
+    GLuint m_bloodDensityFBO = 0;             // FBO for density accumulation
+    GLuint m_bloodDensityTex = 0;             // R16F density texture
+    GLuint m_bloodFluidShader = 0;            // Post-process: density → fluid surface
+    
+    void initSPH();
+    void renderBloodFluid();
+    
     // ── Camera (2.5D perspective) ──
     glm::mat4 m_projection;
     glm::mat4 m_view;
