@@ -13,6 +13,7 @@ __kernel void updateSnow(
     const float time,          // Current time for sine wave
     const float scrollY,       // Document scroll offset
     const float maskHeight,    // Collision mask height in pixels
+    const float maskScale,     // Collision mask scale factor
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -41,8 +42,8 @@ __kernel void updateSnow(
     float2 newPos = p.pos + p.vel * deltaTime;
     
     // Two-point collision: only stick when entering solid from outside
-    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);
-    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);
+    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight, maskScale);
+    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight, maskScale);
     float newCol = sampleCollision(collision, collisionSampler, newMaskPos);
     float curCol = sampleCollision(collision, collisionSampler, curMaskPos);
     

@@ -594,10 +594,11 @@ ComposedKernelSource ShaderCompositor::composeKernel(const std::vector<Effect*>&
         << "    const float scrollY,\n"
         << "    const float maskHeight,\n"
         << "    const float time,\n"
-        << "    const uint count";
+        << "    const uint count,\n"
+        << "    const float maskScale";
 
     // Append each effect's extra args
-    int argIdx = 7;
+    int argIdx = 8;
     for (auto& info : infos) {
         out.effectArgOffsets[info.behaviorID] = argIdx;
         if (!info.snippet.argDecls.empty()) {
@@ -637,8 +638,8 @@ ComposedKernelSource ShaderCompositor::composeKernel(const std::vector<Effect*>&
 
         // Collision check
         src << "    // Collision detection against glyph collision mask\n"
-            << "    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);\n"
-            << "    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);\n"
+            << "    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight, maskScale);\n"
+            << "    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight, maskScale);\n"
             << "    float newCol = sampleCollision(collision, collisionSampler, newMaskPos);\n"
             << "    float curCol = sampleCollision(collision, collisionSampler, curMaskPos);\n\n"
             // Case 1: entering solid from free-space (standard collision)

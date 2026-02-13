@@ -55,18 +55,27 @@ float sampleCollision(__read_only image2d_t collision, sampler_t sampler, float2
     return read_imagef(collision, sampler, pos).x;
 }
 
-// Calculate surface normal from collision mask gradient
-// Normal points AWAY from solid regions (outward from collision surface)
+// Calculate surface normal from collision mask gradient using Sobel 3x3 operator.
+// This produces much smoother normals on curved glyph boundaries compared to
+// a simple 4-sample cross pattern.
+// Normal points AWAY from solid regions (outward from collision surface).
 float2 surfaceNormal(__read_only image2d_t collision, sampler_t sampler, float2 pos) {
-    float step = 1.0f;
-    float left = read_imagef(collision, sampler, pos + (float2)(-step, 0)).x;
-    float right = read_imagef(collision, sampler, pos + (float2)(step, 0)).x;
-    float up = read_imagef(collision, sampler, pos + (float2)(0, -step)).x;
-    float down = read_imagef(collision, sampler, pos + (float2)(0, step)).x;
-    
-    // Gradient points from low to high (into solid), so negate to get
-    // outward-facing normal for proper collision reflection
-    float2 grad = (float2)(left - right, up - down);
+    // Sobel 3x3 kernel samples
+    float tl = read_imagef(collision, sampler, pos + (float2)(-1, -1)).x;
+    float tc = read_imagef(collision, sampler, pos + (float2)( 0, -1)).x;
+    float tr = read_imagef(collision, sampler, pos + (float2)( 1, -1)).x;
+    float ml = read_imagef(collision, sampler, pos + (float2)(-1,  0)).x;
+    float mr = read_imagef(collision, sampler, pos + (float2)( 1,  0)).x;
+    float bl = read_imagef(collision, sampler, pos + (float2)(-1,  1)).x;
+    float bc = read_imagef(collision, sampler, pos + (float2)( 0,  1)).x;
+    float br = read_imagef(collision, sampler, pos + (float2)( 1,  1)).x;
+
+    // Sobel horizontal: gradient in X (positive = increasing rightward)
+    float gx = (tl + 2.0f * ml + bl) - (tr + 2.0f * mr + br);
+    // Sobel vertical: gradient in Y (positive = increasing downward)
+    float gy = (tl + 2.0f * tc + tr) - (bl + 2.0f * bc + br);
+
+    float2 grad = (float2)(gx, gy);
     float len = length(grad);
     return len > 0.001f ? grad / len : (float2)(0, -1);
 }
@@ -83,8 +92,11 @@ __constant sampler_t collisionSampler = CLK_NORMALIZED_COORDS_FALSE |
 
 // Convert document-space position to collision mask texel coordinates.
 // The collision mask is rendered with an ortho projection that flips Y.
+// maskScale accounts for supersampled collision masks (e.g. 2x resolution).
 // Document Y = scrollY maps to texel row maskHeight-1 (top of texture),
-// Document Y = scrollY + maskHeight maps to texel row 0 (bottom of texture).
-float2 docToMask(float2 docPos, float scrollY, float maskHeight) {
-    return (float2)(docPos.x, (scrollY + maskHeight - 1.0f) - docPos.y);
+// Document Y = scrollY + maskHeight/maskScale maps to texel row 0 (bottom).
+float2 docToMask(float2 docPos, float scrollY, float maskHeight, float maskScale) {
+    float2 sp = docPos * maskScale;
+    float sy = scrollY * maskScale;
+    return (float2)(sp.x, (sy + maskHeight - 1.0f) - sp.y);
 }

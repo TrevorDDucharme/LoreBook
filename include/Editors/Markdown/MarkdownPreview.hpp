@@ -131,6 +131,7 @@ private:
     
     // ── Shaders ──
     GLuint m_collisionShader = 0;
+    static constexpr float COLLISION_SCALE = 5.0f;  // 2x supersampled collision mask
     GLuint m_particleShader = 0;
     
     // ── VAO/VBO ──

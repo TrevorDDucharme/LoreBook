@@ -1129,8 +1129,10 @@ void MarkdownPreview::ensureFBO(int width, int height) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     
-    // Resize collision mask to allocated size
-    m_collisionMask.resize(allocWidth, allocHeight);
+    // Resize collision mask at 2x resolution for finer glyph boundary detail
+    m_collisionMask.resize(
+        static_cast<int>(allocWidth * COLLISION_SCALE),
+        static_cast<int>(allocHeight * COLLISION_SCALE));
     
     // ── Blood fluid density FBO (full res, R16F for density accumulation) ──
     if (m_bloodDensityFBO) { glDeleteFramebuffers(1, &m_bloodDensityFBO); m_bloodDensityFBO = 0; }
@@ -1843,13 +1845,14 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
     }
     
     // 3. Dispatch each Effect's particle kernel
-    // Standard arg order: (particles, collision, dt, scrollY, maskH, time, count)
-    // Effect-specific args start at index 7 via bindKernelParams()
+    // Standard arg order: (particles, collision, dt, scrollY, maskH, time, count, maskScale)
+    // Effect-specific args start at index 8 via bindKernelParams()
+    float maskScale = COLLISION_SCALE;
     for (EffectDef* def : particleEffects) {
         cl_kernel kernel = def->effectKernel;
         if (!kernel || !def->effect) continue;
         
-        // Set standard kernel args 0-6
+        // Set standard kernel args 0-7
         clSetKernelArg(kernel, 0, sizeof(cl_mem), &m_clParticleBuffer);
         clSetKernelArg(kernel, 1, sizeof(cl_mem), &collisionImg);
         clSetKernelArg(kernel, 2, sizeof(float), &dt);
@@ -1857,8 +1860,9 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         clSetKernelArg(kernel, 4, sizeof(float), &maskH);
         clSetKernelArg(kernel, 5, sizeof(float), &time);
         clSetKernelArg(kernel, 6, sizeof(uint32_t), &count);
+        clSetKernelArg(kernel, 7, sizeof(float), &maskScale);
         
-        // Let the Effect bind its specific params from arg 7 onward
+        // Let the Effect bind its specific params from arg 8 onward
         KernelParams params;
         params.particleBuffer = m_clParticleBuffer;
         params.collisionImage = collisionImg;
@@ -1868,7 +1872,7 @@ void MarkdownPreview::updateParticlesGPU(float dt) {
         params.time = time;
         params.particleCount = count;
         
-        def->effect->bindKernelSnippetParams(kernel, params, 7);
+        def->effect->bindKernelSnippetParams(kernel, params, 8);
         
         err = clEnqueueNDRangeKernel(q, kernel, 1, nullptr, &globalSize, nullptr, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {

@@ -13,6 +13,7 @@ __kernel void updateElectric(
     const float time,
     const float scrollY,       // Document scroll offset
     const float maskHeight,    // Collision mask height in pixels
+    const float maskScale,     // Collision mask scale factor
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -44,7 +45,7 @@ __kernel void updateElectric(
         for (int i = 0; i < 8; i++) {
             float angle = (float)i * M_PI_F / 4.0f;
             float2 samplePos = p.pos + (float2)(cos(angle), sin(angle)) * nearDist;
-            float2 sampleMask = docToMask(samplePos, scrollY, maskHeight);
+            float2 sampleMask = docToMask(samplePos, scrollY, maskHeight, maskScale);
             float alpha = sampleCollision(collision, collisionSampler, sampleMask);
             if (alpha > 0.1f && alpha < minAlpha) {
                 minAlpha = alpha;

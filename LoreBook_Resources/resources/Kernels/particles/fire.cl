@@ -12,6 +12,7 @@ __kernel void updateFire(
     const float heatDecay,     // How fast particles cool (life drain)
     const float scrollY,       // Document scroll offset
     const float maskHeight,    // Collision mask height in pixels
+    const float maskScale,     // Collision mask scale factor
     const uint count
 ) {
     uint gid = get_global_id(0);
@@ -42,8 +43,8 @@ __kernel void updateFire(
     // Two-point collision check: only bounce when entering solid from outside
     // Particles are emitted from within glyph bounds so they start inside —
     // must allow them to escape.
-    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight);
-    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight);
+    float2 newMaskPos = docToMask(newPos, scrollY, maskHeight, maskScale);
+    float2 curMaskPos = docToMask(p.pos, scrollY, maskHeight, maskScale);
     float newCol = sampleCollision(collision, collisionSampler, newMaskPos);
     float curCol = sampleCollision(collision, collisionSampler, curMaskPos);
     
