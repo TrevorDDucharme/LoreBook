@@ -225,8 +225,8 @@ void PreviewEffectSystem::registerBuiltinEffects() {
     { auto e = std::make_unique<MagicEffect>(); e->color1 = {1,1,0.8f,1}; e->intensity = 1.2f; variant("holy", std::move(e)); }
     { auto e = std::make_unique<MagicEffect>(); e->color1 = {0.3f,0.6f,1,1}; e->riseSpeed = 40.0f; variant("underwater", std::move(e)); }
     
-    // Blood variant
-    { auto e = std::make_unique<BloodEffect>(); e->color1 = {0,1,0,1}; variant("matrix", std::move(e)); }
+    // Blood variant (kept but renamed so general "matrix" preset no longer colors blood green)
+    { auto e = std::make_unique<BloodEffect>(); e->color1 = {0,1,0,1}; variant("matrix_blood", std::move(e)); }
 }
 
 // ────────────────────────────────────────────────────────────────────

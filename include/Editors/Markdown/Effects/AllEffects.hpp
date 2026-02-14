@@ -9,5 +9,8 @@
 #include <Editors/Markdown/Effects/GlowEffect.hpp>
 #include <Editors/Markdown/Effects/BloodEffect.hpp>
 #include <Editors/Markdown/Effects/SmokeEffect.hpp>
+#include <Editors/Markdown/Effects/WaterEffect.hpp>
+#include <Editors/Markdown/Effects/HoneyEffect.hpp>
+#include <Editors/Markdown/Effects/ToxicGooEffect.hpp>
 #include <Editors/Markdown/Effects/MagicEffect.hpp>
 #include <Editors/Markdown/Effects/SimpleEffects.hpp>

@@ -155,6 +155,16 @@ struct PostProcessSnippet {
     bool empty() const { return fragment.empty(); }
 };
 
+// SPHParams - per-fluid SPH parameters for effects that expose fluid behavior
+struct SPHParams {
+    float smoothingRadius = 5.0f;
+    float restDensity = 1.0f;
+    float stiffness = 150.0f;
+    float viscosity = 6.0f;
+    float cohesion = 0.3f;
+    float particleMass = 1.0f;
+};
+
 // ────────────────────────────────────────────────────────────────────
 // Effect - abstract base class for all text effects
 // ────────────────────────────────────────────────────────────────────
@@ -198,6 +208,11 @@ public:
 
     // ── Particle emission config ──
     virtual EffectEmissionConfig getEmissionConfig() const { return {}; }
+    
+    // ── SPH / Fluid API ──
+    // Effects that represent fluids should override these to expose SPH params
+    virtual bool isFluid() const { return false; }
+    virtual SPHParams getSPHParams() const { return SPHParams(); }
     
     // ── Effect Parameters ──
     // Common parameters that can be set at runtime

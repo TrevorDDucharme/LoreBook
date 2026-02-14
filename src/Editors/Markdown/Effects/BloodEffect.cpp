@@ -127,6 +127,17 @@ void BloodEffect::bindKernelSnippetParams(cl_kernel kernel, const KernelParams& 
     clSetKernelArg(kernel, firstArgIndex + 2, sizeof(float), &splatSize);
 }
 
+SPHParams BloodEffect::getSPHParams() const {
+    SPHParams p;
+    p.smoothingRadius = sphSmoothingRadius;
+    p.restDensity = sphRestDensity;
+    p.stiffness = sphStiffness;
+    p.viscosity = sphViscosity;
+    p.cohesion = sphCohesion;
+    p.particleMass = sphParticleMass;
+    return p;
+}
+
 REGISTER_EFFECT(BloodEffect)
 
 } // namespace Markdown

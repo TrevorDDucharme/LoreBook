@@ -12,6 +12,10 @@ public:
     uint32_t getBehaviorID() const override { return 2; }  // BEHAVIOR_BLOOD
     std::unique_ptr<Effect> clone() const override { return std::make_unique<BloodEffect>(*this); }
     
+    // Fluid API
+    bool isFluid() const override { return true; }
+    SPHParams getSPHParams() const override;
+    
     EffectCapabilities getCapabilities() const override;
     EffectEmissionConfig getEmissionConfig() const override;
     

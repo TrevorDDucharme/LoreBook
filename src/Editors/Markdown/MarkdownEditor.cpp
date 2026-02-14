@@ -160,6 +160,9 @@ void MarkdownEditor::generateContextAwareCompletions(const std::string &prefix, 
             {"sparkle", "Sparkle particles"},
             {"snow", "Falling snow particles"},
             {"blood", "Dripping blood effect"},
+            {"water", "Water / liquid fluid"},
+            {"honey", "Thick honey / goo"},
+            {"toxic_goo", "Toxic goo (neon green)"},
             {"ice", "Ice/frost effect"},
             {"magic", "Magical particles"},
             {"ghost", "Ghostly fade effect"},
@@ -245,7 +248,7 @@ void MarkdownEditor::updateSyntaxErrors()
     
     static const std::unordered_set<std::string> validEffectTags = {
         "fire", "electric", "rainbow", "shake", "wave", "glow", "neon",
-        "sparkle", "snow", "blood", "ice", "magic", "ghost", "underwater",
+        "sparkle", "snow", "blood", "water", "honey", "toxic_goo", "ice", "magic", "ghost", "underwater",
         "golden", "toxic", "crystal", "storm", "ethereal", "lava", "frost",
         "void", "holy", "matrix", "disco", "glitch"
     };

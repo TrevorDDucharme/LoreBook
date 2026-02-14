@@ -122,7 +122,7 @@ private:
     GLuint m_quadVAO = 0;              // Full-screen quad for blur/composite
     GLuint m_quadVBO = 0;
     
-    // ── Blood Fluid (SPH + metaball rendering) ──
+    // ── SPH / Fluid (multi-fluid support) ─────────────────────────────────────
     cl_program m_sphProgram = nullptr;
     cl_kernel m_sphDensityKernel = nullptr;   // Pass 1: density + pressure
     cl_kernel m_sphForcesKernel = nullptr;    // Pass 2: pressure + viscosity + cohesion
@@ -130,12 +130,29 @@ private:
     cl_mem m_clSPHPressure = nullptr;         // float[MAX_PARTICLES]
     cl_mem m_clSPHGrid = nullptr;             // Spatial hash grid cell starts
     cl_mem m_clSPHGridEntries = nullptr;      // Spatial hash particle entries
-    GLuint m_bloodDensityFBO = 0;             // FBO for density accumulation
-    GLuint m_bloodDensityTex = 0;             // R16F density texture
-    GLuint m_bloodFluidShader = 0;            // Post-process: density → fluid surface
-    
+
+    // Per-behavior SPH descriptor buffers (host → CL)
+    cl_mem m_clSPHBehaviourFlags = nullptr;   // int[MAX_FLUID_BEHAVIORS] (isFluid)
+    cl_mem m_clSPHParams = nullptr;           // SPHParams[MAX_FLUID_BEHAVIORS]
+
+    // Per-behavior density render targets (R16F) — indexed by behaviorID
+    static constexpr size_t MAX_FLUID_BEHAVIORS = 16;
+    std::array<GLuint, MAX_FLUID_BEHAVIORS> m_fluidDensityFBO = {0};
+    std::array<GLuint, MAX_FLUID_BEHAVIORS> m_fluidDensityTex = {0};
+
+    // Whether different fluid behaviors may interact/mix in SPH kernels
+    bool m_sphAllowMixing = true;
+
+    // Backwards-compatible single 'blood' shader is reused for generic fluids
+    GLuint m_bloodDensityFBO = 0;             // legacy: FBO for density accumulation (behaviorID==2)
+    GLuint m_bloodDensityTex = 0;             // legacy: R16F density texture (behaviorID==2)
+    GLuint m_bloodFluidShader = 0;            // Post-process: density → fluid surface (generic)
+
     void initSPH();
     void renderBloodFluid();
+
+    // Ensure per-behavior density FBO exists (lazy-create)
+    void ensureFluidDensityFBO(uint32_t behaviorID);
     
     // ── Camera (2.5D perspective) ──
     glm::mat4 m_projection;
