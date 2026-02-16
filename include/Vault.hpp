@@ -7,7 +7,6 @@
 #include <imgui.h>
 #include <imgui_stdlib.h>
 #include <plog/Log.h>
-#include "MarkdownText.hpp"
 #include <Editors/Markdown/MarkdownEditor.hpp>
 #include <sqlite3.h>
 #include <unordered_set>
@@ -1622,6 +1621,8 @@ public:
             } catch (...) {
                 PLOGW << "Failed to create LuaScriptManager";
             }
+            // Ensure Vault's internal MarkdownEditor knows its owning Vault
+            vaultMarkdownEditor.setVault(this);
         }
     }
 
@@ -1644,6 +1645,8 @@ public:
         } catch (...) {
             PLOGW << "Failed to create LuaScriptManager";
         }
+        // Ensure Vault's internal MarkdownEditor knows its owning Vault
+        vaultMarkdownEditor.setVault(this);
     }
 
     void loadNodeFiltersFromDB()
@@ -4345,6 +4348,8 @@ public:
     Vault(Vault &&other) noexcept : id(other.id), name(std::move(other.name)), selectedItemID(other.selectedItemID), dbConnection(other.dbConnection), dbBackend(std::move(other.dbBackend))
     {
         other.dbConnection = nullptr;
+        // Make sure the moved/new instance's internal editor points to the correct Vault
+        vaultMarkdownEditor.setVault(this);
     }
     Vault &operator=(Vault &&other) noexcept
     {
@@ -4360,6 +4365,8 @@ public:
             dbConnection = other.dbConnection;
             other.dbConnection = nullptr;
             dbBackend = std::move(other.dbBackend);
+            // Ensure internal editor points to this vault after move-assign
+            vaultMarkdownEditor.setVault(this);
         }
         return *this;
     }

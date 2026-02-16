@@ -1,4 +1,8 @@
 #pragma once
+// Ensure ImGui math operators are available when internal headers are included
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS
+#endif
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <GL/glew.h>

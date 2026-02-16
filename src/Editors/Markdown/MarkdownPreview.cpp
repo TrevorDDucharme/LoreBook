@@ -15,6 +15,7 @@
 #include <cmath>
 #include <chrono>
 #include <sstream>
+#include <unordered_set>
 
 namespace Markdown {
 
@@ -620,7 +621,18 @@ bool MarkdownPreview::init() {
     // Get font atlas texture from ImGui
     ImGuiIO& io = ImGui::GetIO();
     m_fontAtlasTexture = (GLuint)(intptr_t)io.Fonts->TexID;
-    
+
+    // Create a small 1x1 light-gray placeholder texture for remote images
+    if (m_placeholderTex == 0) {
+        unsigned char px[4] = {200, 200, 200, 255};
+        glGenTextures(1, &m_placeholderTex);
+        glBindTexture(GL_TEXTURE_2D, m_placeholderTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
     m_initialized = true;
     PLOG_INFO << "MarkdownPreview initialized";
     return true;
@@ -2053,16 +2065,55 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
             continue;
         }
 
+        // ── ModelViewer (embedded GLB/etc) ─────────────────────────
+        if (widget.type == OverlayWidget::ModelViewer) {
+            const std::string& src = widget.data;
+            ModelViewer* mv = nullptr;
+            if (m_vault) mv = m_vault->getOrCreateModelViewerForSrc(src);
+
+            int projW = (int)widget.nativeSize.x;
+            int projH = (int)widget.nativeSize.y;
+            if (projW <= 0 || projH <= 0) { projW = 400; projH = 300; }
+
+            if (mv) {
+                mv->processPendingUploads();
+                GLuint texID = mv->renderToTexture(projW, projH);
+                if (texID) {
+                    float displayW = widget.size.x;
+                    float displayH = widget.size.y;
+
+                    // Models are rendered into their FBO which is Y-flipped compared to ImGui::Image
+                    glDisable(GL_DEPTH_TEST);
+                    drawTexturedQuad(texID, widget.docPos.x, widget.docPos.y,
+                                     displayW, displayH, 0.0f, 0.0f, 1.0f, 1.0f);
+                    glEnable(GL_DEPTH_TEST);
+
+                    // Register active inline model viewer so overlay can forward input
+                    m_activeModelViewers.push_back({mv, src, widget.docPos, {displayW, displayH}, {(float)projW, (float)projH}});
+                }
+            }
+            continue;
+        }
+
         // ── Image ────────────────────────────────────────────────
         if (widget.type == OverlayWidget::Image) {
             const std::string& src = widget.data;
             GLuint texID = 0;
             int texW = 0, texH = 0;
 
-            // Try vault://Assets/ resolution
-            const std::string assetsPrefix = "vault://Assets/";
-            if (m_vault && src.rfind(assetsPrefix, 0) == 0) {
-                int64_t aid = m_vault->findAttachmentByExternalPath(src);
+            // Determine if this is a remote URL or an existing vault asset
+            bool isRemoteUrl = (src.rfind("http://", 0) == 0 || src.rfind("https://", 0) == 0);
+            int64_t aid = -1;
+
+            if (m_vault) {
+                // Prefer exact lookup (covers both vault:// and previously-cached remote URLs)
+                aid = m_vault->findAttachmentByExternalPath(src);
+
+                // If remote URL and not yet present in vault, add placeholder + async fetch
+                if (aid == -1 && isRemoteUrl) {
+                    aid = m_vault->addAttachmentFromURL(src);
+                }
+
                 if (aid != -1) {
                     std::string key = std::string("vault:assets:") + std::to_string(aid);
                     IconTexture cached = GetDynamicTexture(key);
@@ -2071,14 +2122,22 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
                         texW = cached.width;
                         texH = cached.height;
                     } else {
+                        // If DB blob is present, schedule a background read -> main-thread texture creation
                         auto meta = m_vault->getAttachmentMeta(aid);
-                        if (meta.size > 0) {
-                            auto data = m_vault->getAttachmentData(aid);
-                            if (!data.empty()) {
-                                auto result = LoadTextureFromMemory(key, data);
-                                texID = result.textureID;
-                                texW = result.width;
-                                texH = result.height;
+                        if (meta.size > 0 && meta.mimeType.rfind("image/", 0) == 0) {
+                            static std::unordered_set<int64_t> s_pendingTextureLoads;
+                            if (s_pendingTextureLoads.find(aid) == s_pendingTextureLoads.end()) {
+                                s_pendingTextureLoads.insert(aid);
+                                std::thread([vaultPtr = m_vault, aid, key]() {
+                                    auto data = vaultPtr->getAttachmentData(aid);
+                                    if (!data.empty()) {
+                                        auto dataPtr = std::make_shared<std::vector<uint8_t>>(std::move(data));
+                                        vaultPtr->enqueueMainThreadTask([key, dataPtr, aid]() {
+                                            LoadTextureFromMemory(key, *dataPtr);
+                                            PLOGV << "markdown: loaded image aid=" << aid;
+                                        });
+                                    }
+                                }).detach();
                             }
                         }
                     }
@@ -2089,12 +2148,31 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
                 float displayW = widget.size.x;
                 float displayH = widget.size.y;
 
-                // Maintain aspect ratio if only width or height was specified
-                if (texW > 0 && texH > 0) {
-                    float aspect = (float)texW / (float)texH;
-                    // If using default sizing, fit to actual image aspect
-                    if (widget.nativeSize.x == 300 && widget.nativeSize.y == 200) {
-                        displayH = displayW / aspect;
+                // Prefer the image's natural resolution when the author did not
+                // specify an explicit size (nativeSize==0). Apply preview zoom.
+                if ((widget.nativeSize.x <= 0.0f || widget.nativeSize.y <= 0.0f) && texW > 0 && texH > 0) {
+                    displayW = static_cast<float>(texW) * m_zoomLevel;
+                    displayH = static_cast<float>(texH) * m_zoomLevel;
+                }
+                else if (widget.nativeSize.x > 0.0f || widget.nativeSize.y > 0.0f) {
+                    // Author specified one or both dimensions via ::WxH — honor those
+                    if (widget.nativeSize.x > 0.0f && widget.nativeSize.y > 0.0f) {
+                        displayW = widget.nativeSize.x * m_zoomLevel;
+                        displayH = widget.nativeSize.y * m_zoomLevel;
+                    } else if (texW > 0 && texH > 0) {
+                        // Only one dimension specified: preserve aspect ratio
+                        float aspect = static_cast<float>(texW) / static_cast<float>(texH);
+                        if (widget.nativeSize.x > 0.0f) {
+                            displayW = widget.nativeSize.x * m_zoomLevel;
+                            displayH = displayW / aspect;
+                        } else {
+                            displayH = widget.nativeSize.y * m_zoomLevel;
+                            displayW = displayH * aspect;
+                        }
+                    } else {
+                        // Fallback to reserved layout size if we lack texture info
+                        displayW = widget.size.x;
+                        displayH = widget.size.y;
                     }
                 }
 
@@ -2102,6 +2180,16 @@ void MarkdownPreview::renderEmbeddedContent(const glm::mat4& mvp) {
                 drawTexturedQuad(texID, widget.docPos.x, widget.docPos.y,
                                  displayW, displayH, 0.0f, 0.0f, 1.0f, 1.0f);
                 glEnable(GL_DEPTH_TEST);
+            } else {
+                // No texture yet — draw simple placeholder box (remote image pending or missing)
+                float displayW = widget.size.x;
+                float displayH = widget.size.y;
+                if (m_placeholderTex) {
+                    glDisable(GL_DEPTH_TEST);
+                    drawTexturedQuad(m_placeholderTex, widget.docPos.x, widget.docPos.y,
+                                     displayW, displayH, 0.0f, 0.0f, 1.0f, 1.0f);
+                    glEnable(GL_DEPTH_TEST);
+                }
             }
             continue;
         }
@@ -2875,6 +2963,41 @@ void MarkdownPreview::renderOverlayWidgets(const ImVec2& origin, float scrollY) 
 
         ImGui::EndChild();
         ImGui::PopStyleColor();
+    }
+
+    // Forward mouse input to inline ModelViewer widgets
+    for (size_t mi = 0; mi < m_activeModelViewers.size(); ++mi) {
+        const auto& amv = m_activeModelViewers[mi];
+        ImVec2 mvScreenPos(origin.x + amv.docPos.x, origin.y + amv.docPos.y - scrollY);
+        ImVec2 mvSize(amv.size.x, amv.size.y);
+
+        ImGui::SetCursorScreenPos(mvScreenPos);
+        std::string btnID = "model_viewer_" + std::to_string(mi);
+        ImGui::InvisibleButton(btnID.c_str(), mvSize);
+        ImGui::SetItemAllowOverlap();
+        bool isHover = ImGui::IsItemHovered();
+
+        // Click opens the full ModelViewer window (use public Vault API)
+        if (ImGui::IsItemClicked()) {
+            if (m_vault) {
+                // Vault::openModelFromSrc will create/load the viewer and show its window
+                m_vault->openModelFromSrc(amv.src);
+            }
+        }
+
+        // Forward drag/scroll to ModelViewer — do NOT draw the texture here using
+        // ImGui/ImDrawList. Inline renderers (ModelViewer, LuaCanvas, World) must
+        // be drawn via renderEmbeddedContent's textured-quad path only.
+        if (amv.viewer) {
+            bool changed = amv.viewer->handleInlineInput(mvScreenPos, mvSize);
+            if (changed) {
+                // Update GL uploads so ModelViewer's internal FBO is ready for the
+                // next renderEmbeddedContent pass. We must NOT call ImGui::Image or
+                // AddImage here.
+                amv.viewer->processPendingUploads();
+            }
+            (void)changed; // reserved for future use
+        }
     }
 
     // Forward mouse input to Lua canvas engines

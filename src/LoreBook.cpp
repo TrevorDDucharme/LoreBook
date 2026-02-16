@@ -224,7 +224,7 @@ int main(int argc, char** argv)
 
     // Vault state
     static bool firstDock = true;
-    static bool worldMapOpen = true;
+    static bool worldMapOpen = false;
     std::unique_ptr<Vault> vault;
 
     // Graph view (and chat)
@@ -329,7 +329,6 @@ int main(int argc, char** argv)
 
     // Auto-load a test model into the Character Editor if present (for development)
     if (std::filesystem::exists("./Ursine.glb")) {
-        characterEditor.setOpen(true);
         if (characterEditor.loadModel("./Ursine.glb")) {
             PLOGI << "Auto-loaded test model into Character Editor";
         }
@@ -383,7 +382,6 @@ int main(int argc, char** argv)
             ImGui::DockBuilderDockWindow("Script Editor", dock_main_id);
             ImGui::DockBuilderDockWindow("Resource Explorer", dock_main_id);
             ImGui::DockBuilderDockWindow("API Docs", dock_main_id);
-            ImGui::DockBuilderDockWindow("markdown test", dock_main_id);
             ImGui::DockBuilderDockWindow("Orbital System Editor", dock_main_id);
             
             ImGui::DockBuilderFinish(dockspace_id);
@@ -1309,6 +1307,9 @@ int main(int argc, char** argv)
         orbitalEditor.setVault(vault ? vault.get() : nullptr);
         orbitalEditor.render();
 
+        // Markdown Editor (global) — keep preview/editor connected to the currently-open vault
+        MarkdownEditor::get().setVault(vault ? vault.get() : nullptr);
+
         // Character Editor - connect managers when vault is available and logged in
         if (vault && vault->isOpen() && vault->getCurrentUserID() > 0) {
             sqlite3* currentDb = vault->getDBPublic();
@@ -1337,61 +1338,6 @@ int main(int argc, char** argv)
             }
         }
         characterEditor.render();
-
-        //make sure its in the main viewport so it doesn't get lost when undocked
-        ImGui::SetNextWindowViewport(ImGui::GetMainViewport()->ID);
-        ImGui::Begin("markdown test");
-        // Use MarkdownEditor which encapsulates both editor and preview
-        static MarkdownEditor mdEditor;
-        static bool editorInitialized = false;
-
-        // Wire up script manager from vault when available
-        if (vault) {
-            mdEditor.setScriptManager(vault->getScriptManager());
-            mdEditor.setVault(vault.get());
-        } else {
-            mdEditor.setScriptManager(nullptr);
-            mdEditor.setVault(nullptr);
-        }
-
-        if (!editorInitialized) {
-            // Initialize with some sample content
-            mdEditor.setSrc(R"(# Markdown Editor Test
-
-This is a **markdown editor** with live preview.
-
-- It supports lists
-- **Bold** and *italic* text
-- `Inline code`
-- And more!
-
-<fire>Flaming text</fire>
-```cpp
-// Code block with syntax highlighting
-#include <iostream>
-int main() {
-    std::cout << "Hello, Markdown!" << std::endl;
-    return 0;
-}
-```
-
-)");
-            editorInitialized = true;
-        }
-        
-        // Draw tabs for editor and preview
-        if (ImGui::BeginTabBar("MarkdownTabs")) {
-            if (ImGui::BeginTabItem("Editor")) {
-                mdEditor.drawEditor();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem("Preview")) {
-                mdEditor.drawPreview();
-                ImGui::EndTabItem();
-            }
-            ImGui::EndTabBar();
-        }
-        ImGui::End();
 
         // Rendering
         ImGui::Render();

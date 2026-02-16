@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <string>
+#include <filesystem>
 
 namespace Markdown {
 
@@ -514,23 +515,43 @@ void LayoutEngine::layoutImageSpan(const Span& span) {
             widget.type = OverlayWidget::LuaCanvas;
             widget.data = baseUrl.substr(scriptsPrefix.size());  // script name
         } else {
-            widget.type = OverlayWidget::Image;
-            widget.data = baseUrl;
+            // Detect model file extensions -> inline ModelViewer
+            bool isModel = false;
+            try {
+                std::string ext = std::filesystem::path(baseUrl).extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                static const std::vector<std::string> modelExts = {".obj",".fbx",".gltf",".glb",".ply",".dae",".stl"};
+                for (const auto &me : modelExts) { if (ext == me) { isModel = true; break; } }
+            } catch(...) { }
+
+            if (isModel) {
+                widget.type = OverlayWidget::ModelViewer;
+                widget.data = baseUrl;
+            } else {
+                widget.type = OverlayWidget::Image;
+                widget.data = baseUrl;
+            }
         }
         
-        int w = (urlW > 0) ? urlW : 300;
-        int h = (urlH > 0) ? urlH : 200;
-        
-        float scaledW = static_cast<float>(w) * m_scale;
-        float scaledH = static_cast<float>(h) * m_scale;
-        
+        // Reserve placeholder space for layout (use default reserve size when
+        // no explicit dimensions are provided) but only set nativeSize if the
+        // author specified explicit dimensions via ::WxH.
+        int reserveW = (urlW > 0) ? urlW : 300;
+        int reserveH = (urlH > 0) ? urlH : 200;
+        int nativeW = (urlW > 0) ? urlW : 0;
+        int nativeH = (urlH > 0) ? urlH : 0;
+
+        float scaledW = static_cast<float>(reserveW) * m_scale;
+        float scaledH = static_cast<float>(reserveH) * m_scale;
+
         widget.docPos = {m_curX, m_curY};
         widget.size = {scaledW, scaledH};
-        widget.nativeSize = {static_cast<float>(w), static_cast<float>(h)};
+        // nativeSize==0 signals "unspecified" so renderer may use image's intrinsic size
+        widget.nativeSize = {static_cast<float>(nativeW), static_cast<float>(nativeH)};
         widget.altText = span.title;
         widget.sourceOffset = span.sourceOffset;
         m_outWidgets->push_back(widget);
-        
+
         // Reserve space
         lineBreak();
         m_curY += scaledH;

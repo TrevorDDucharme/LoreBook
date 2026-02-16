@@ -38,6 +38,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE glm::glm)
 #imgui
 find_package(imgui CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE imgui::imgui)
+# Ensure ImGui math operators (ImVec + glm helpers) are available project-wide
+target_compile_definitions(${PROJECT_NAME} PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
 
 #freetype
 find_package(Freetype REQUIRED)

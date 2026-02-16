@@ -38,9 +38,19 @@ struct ModelViewer {
     // Render directly into a provided area (for embedding)
     void renderToRegion(const ImVec2& size);
 
+    // Render the viewer into its internal FBO at the requested resolution and return the
+    // texture ID for the FBO (main-thread only). Useful for embedding the rendered
+    // view into other FBOs (e.g. Markdown preview).
+    unsigned int renderToTexture(int w, int h);
+
     // Process any pending uploads or parse failures that were produced by async parsing
     // This must be called on the main thread each frame (e.g., by the UI loop)
     void processPendingUploads();
+
+    // Handle inline input for an embedded widget. This reads ImGui item state (so the
+    // caller should create an InvisibleButton for the same rect before calling).
+    // Returns true if the viewer camera/transform changed.
+    bool handleInlineInput(const ImVec2& widgetScreenPos, const ImVec2& widgetSize);
 
     // Clear loaded model
     void clear();

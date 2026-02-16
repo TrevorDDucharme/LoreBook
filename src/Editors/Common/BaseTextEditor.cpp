@@ -551,6 +551,9 @@ void BaseTextEditor::handleMouseInput(const ImVec2& origin, const ImVec2& textOr
         }
         editorState.needsScrollToCursor = true;
         editorState.hasFocus = true;
+        // Request ImGui keyboard focus for the next widget cycle so the editor
+        // reliably receives Tab/arrow keys (prevents other widgets stealing input).
+        editorState.wantsFocus = true;
     }
 
     // Drag to select (midpoint-based)
@@ -629,6 +632,24 @@ void BaseTextEditor::handleKeyboardInput()
 {
     ImGuiIO& io = ImGui::GetIO();
     if (!editorState.hasFocus) return;
+
+    // Ensure the editor claims keyboard input and *consumes* navigation
+    // keys (Tab/arrow) so other ImGui widgets drawn later this frame won't
+    // react to them. We capture the input first, handle it below, then the
+    // guard clears the keys on function exit.
+    struct KeyConsumeGuard {
+        ImGuiIO& io;
+        KeyConsumeGuard(ImGuiIO& _io) : io(_io) {}
+        ~KeyConsumeGuard()
+        {
+            io.InputQueueCharacters.clear();
+            io.KeysDown[ImGuiKey_Tab] = false;
+            io.KeysDown[ImGuiKey_LeftArrow] = false;
+            io.KeysDown[ImGuiKey_RightArrow] = false;
+            io.KeysDown[ImGuiKey_UpArrow] = false;
+            io.KeysDown[ImGuiKey_DownArrow] = false;
+        }
+    } keyGuard(io);
 
     io.WantCaptureKeyboard = true;
     io.WantTextInput = true;
@@ -1165,7 +1186,10 @@ void BaseTextEditor::handleKeyboardInput()
             }
         }
         insertTextAtCursor("    ");
+        // Consume Tab for the rest of the frame so no other ImGui widget will
+        // treat it as a navigation key.
         io.InputQueueCharacters.clear();
+        io.KeysDown[ImGuiKey_Tab] = false;
         return;
     }
 
@@ -1518,11 +1542,22 @@ ImVec2 BaseTextEditor::drawEditor()
         return origin;
     }
 
+    // If the editor was clicked we request keyboard focus for the
+    // next widget. Additionally, while the editor has internal focus we
+    // repeatedly request ImGui keyboard focus so navigation (Tab) cannot
+    // move focus away to other widgets.
     if (editorState.wantsFocus)
     {
         ImGui::SetKeyboardFocusHere();
         editorState.wantsFocus = false;
         editorState.hasFocus = true;
+    }
+    if (editorState.hasFocus)
+    {
+        // Ensure the invisible "text area" remains the keyboard-focus target
+        // for the duration of editor focus. This prevents Tab/arrow keys from
+        // being routed to other ImGui widgets drawn later in the frame.
+        ImGui::SetKeyboardFocusHere();
     }
 
     // Draw background

@@ -22,6 +22,7 @@
 class LuaScriptManager;
 class LuaEngine;
 class Vault;
+struct ModelViewer;
 
 namespace Markdown {
 
@@ -108,6 +109,8 @@ private:
     GLuint m_fbo = 0;
     GLuint m_colorTex = 0;
     GLuint m_depthTex = 0;
+    // 1x1 placeholder texture used while remote images download
+    GLuint m_placeholderTex = 0;
     int m_fboWidth = 0;
     int m_fboHeight = 0;
     
@@ -210,6 +213,16 @@ private:
         glm::vec2 nativeSize;  // unscaled FBO resolution
     };
     std::vector<ActiveCanvas> m_activeCanvases;
+
+    // Active model viewer instances (populated by renderEmbeddedContent, consumed by renderOverlayWidgets)
+    struct ActiveModelViewer {
+        ModelViewer* viewer = nullptr; // may be null until created by Vault
+        std::string src;               // original src string (vault://..., http://, file://)
+        glm::vec2 docPos;
+        glm::vec2 size;                // scaled display size
+        glm::vec2 nativeSize;          // unscaled FBO resolution
+    };
+    std::vector<ActiveModelViewer> m_activeModelViewers;
 
     // Active world map instances (populated by renderEmbeddedContent, consumed by renderOverlayWidgets)
     struct ActiveWorldMap {

@@ -704,6 +704,48 @@ void ModelViewer::processPendingUploads(){
     }
 }
 
+// Render model into internal FBO and return the texture ID. Main-thread only.
+unsigned int ModelViewer::renderToTexture(int w, int h) {
+    if (!impl || !impl->hasModel) return 0u;
+    processPendingUploads();
+    impl->drawGL(w > 0 ? w : impl->fbW, h > 0 ? h : impl->fbH);
+    return impl->fboTex;
+}
+
+// Handle inline widget input. Caller should have created an InvisibleButton for the
+// same rectangle so ImGui::IsItemActive()/IsItemHovered() reflect actual item state.
+bool ModelViewer::handleInlineInput(const ImVec2& widgetScreenPos, const ImVec2& widgetSize) {
+    if (!impl || !impl->hasModel) return false;
+    ImGuiIO& io = ImGui::GetIO();
+    bool hovered = io.MousePos.x >= widgetScreenPos.x && io.MousePos.y >= widgetScreenPos.y
+                   && io.MousePos.x <= widgetScreenPos.x + widgetSize.x && io.MousePos.y <= widgetScreenPos.y + widgetSize.y;
+    bool changed = false;
+
+    // Use ImGui item active state when available (caller should have created the item)
+    if (ImGui::IsItemActive()) {
+        ImVec2 delta = io.MouseDelta;
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && !io.KeyCtrl) {
+            impl->yaw += delta.x * 0.2f;
+            impl->pitch += delta.y * 0.2f;
+            changed = true;
+        } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || (ImGui::IsMouseDragging(ImGuiMouseButton_Left) && io.KeyCtrl)) {
+            float s = impl->distance * 0.0025f;
+            impl->panX += delta.x * s;
+            impl->panY += -delta.y * s;
+            changed = true;
+        }
+    }
+
+    // Zoom when hovering
+    if (hovered && io.MouseWheel != 0.0f) {
+        impl->distance *= (1.0f - io.MouseWheel * 0.1f);
+        if (impl->distance < 0.01f) impl->distance = 0.01f;
+        changed = true;
+    }
+
+    return changed;
+}
+
 void ModelViewer::clear(){ if(impl) { impl->hasModel=false; impl->indexCount=0; impl->name.clear(); impl->hasAlbedo = impl->hasNormal = impl->hasMrao = impl->hasEmissive = false; if(impl->albedoTex) { glDeleteTextures(1,&impl->albedoTex); impl->albedoTex=0; } if(impl->normalTex){ glDeleteTextures(1,&impl->normalTex); impl->normalTex=0; } if(impl->mraoTex){ glDeleteTextures(1,&impl->mraoTex); impl->mraoTex=0; } if(impl->emissiveTex){ glDeleteTextures(1,&impl->emissiveTex); impl->emissiveTex=0; }
     // free per-material GL textures
     for(auto &mg : impl->materialGLs){ if(mg.albedo) glDeleteTextures(1,&mg.albedo); if(mg.normal) glDeleteTextures(1,&mg.normal); if(mg.mrao) glDeleteTextures(1,&mg.mrao); if(mg.emissive) glDeleteTextures(1,&mg.emissive); }
