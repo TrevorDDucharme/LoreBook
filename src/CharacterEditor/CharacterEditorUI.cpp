@@ -1066,7 +1066,10 @@ void CharacterEditorUI::renderDebugOverlays() {
         glUniformMatrix4fv(glGetUniformLocation(m_lineShader, "uMVP"), 1, GL_FALSE, glm::value_ptr(mvp));
         
         // Determine which skeleton to use for rendering
+        // Prefer the combined skeleton when IK is active and parts are attached.
         const Skeleton& skeletonToRender = 
+            (m_ikEnabled && m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) ?
+                m_partLibrary->getCombinedSkeleton().skeleton :
             (m_ikEnabled && !m_solvedSkeleton.empty()) ? m_solvedSkeleton :
             (!m_posedSkeleton.empty()) ? m_posedSkeleton :
             model.loadResult.skeleton;
@@ -1289,25 +1292,28 @@ void CharacterEditorUI::renderIKTargets(const glm::mat4& modelMatrix) {
                     pos + glm::vec3(0, std::cos(a2) * radius, std::sin(a2) * radius), color);
         }
         
-        // Draw chain visualization if valid
-        if (ikTarget.chain.isValid() && !m_solvedSkeleton.empty()) {
+        // Draw chain visualization if valid (use the solved skeleton that was updated)
+        const Skeleton& solvedViz = (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) ?
+            m_partLibrary->getCombinedSkeleton().skeleton : m_solvedSkeleton;
+
+        if (ikTarget.chain.isValid() && !solvedViz.empty()) {
             glm::vec4 chainColor = ikTarget.isActive ? glm::vec4(1.0f, 0.8f, 0.0f, 1.0f) : glm::vec4(0.5f, 0.4f, 0.0f, 1.0f);
-            
+
             for (size_t ci = 0; ci < ikTarget.chain.boneIndices.size() - 1; ++ci) {
                 uint32_t boneIdx = ikTarget.chain.boneIndices[ci];
                 uint32_t nextIdx = ikTarget.chain.boneIndices[ci + 1];
-                
-                glm::vec3 p1 = m_solvedSkeleton.getWorldTransform(boneIdx).position;
-                glm::vec3 p2 = m_solvedSkeleton.getWorldTransform(nextIdx).position;
-                
+
+                glm::vec3 p1 = solvedViz.getWorldTransform(boneIdx).position;
+                glm::vec3 p2 = solvedViz.getWorldTransform(nextIdx).position;
+
                 // Thicker line effect
                 addLine(p1, p2, chainColor);
             }
-            
+
             // Draw line from end effector to target
             if (ikTarget.isActive) {
                 uint32_t tipIdx = ikTarget.chain.tipBoneIndex;
-                glm::vec3 effectorPos = m_solvedSkeleton.getWorldTransform(tipIdx).position;
+                glm::vec3 effectorPos = solvedViz.getWorldTransform(tipIdx).position;
                 addLine(effectorPos, pos, glm::vec4(1.0f, 0.0f, 0.5f, 0.5f));
             }
         }
@@ -1752,24 +1758,37 @@ void CharacterEditorUI::renderIKPanel() {
         return;
     }
     
-    // Get current model's skeleton
+    // Get current model's skeleton (use combined skeleton if parts are attached)
     if (m_models.empty() || m_selectedModelIndex < 0 || 
         m_selectedModelIndex >= static_cast<int>(m_models.size())) {
         ImGui::TextDisabled("No model loaded");
         return;
     }
-    
+
     auto& model = m_models[m_selectedModelIndex];
-    const Skeleton& skeleton = model.loadResult.skeleton;
-    
-    if (skeleton.empty()) {
+    const Skeleton* skeletonForUI = &model.loadResult.skeleton;
+    bool usingCombinedSkeleton = false;
+    if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+        skeletonForUI = &m_partLibrary->getCombinedSkeleton().skeleton;
+        usingCombinedSkeleton = true;
+    }
+
+    if (!skeletonForUI || skeletonForUI->empty()) {
         ImGui::TextDisabled("Model has no skeleton");
         return;
     }
     
-    // Copy skeleton for IK modifications if needed
-    if (m_solvedSkeleton.bones.size() != skeleton.bones.size()) {
-        m_solvedSkeleton = skeleton;
+    // Ensure m_solvedSkeleton is sized for the base model skeleton (used for base-model visualizations)
+    if (!usingCombinedSkeleton) {
+        if (m_solvedSkeleton.bones.size() != skeletonForUI->bones.size()) {
+            m_solvedSkeleton = *skeletonForUI;
+        }
+    } else {
+        // Keep m_solvedSkeleton matching the original base skeleton size so base-model meshes
+        // continue to skin correctly even when IK runs on the combined skeleton.
+        if (m_solvedSkeleton.bones.size() != model.loadResult.skeleton.bones.size()) {
+            m_solvedSkeleton = model.loadResult.skeleton;
+        }
     }
     
     // IK Solver settings
@@ -1834,17 +1853,18 @@ void CharacterEditorUI::renderIKPanel() {
             ikTarget.name = nameBuf;
         }
         
-        // Start bone selection (combo box)
+        // Start bone selection (combo box) - show bones from the active skeleton (base or combined)
         if (ImGui::BeginCombo("Start Bone", 
-            ikTarget.startBoneIndex >= 0 ? skeleton.bones[ikTarget.startBoneIndex].name.c_str() : "None")) {
-            for (size_t bi = 0; bi < skeleton.bones.size(); ++bi) {
+            (ikTarget.startBoneIndex >= 0 && ikTarget.startBoneIndex < static_cast<int>(skeletonForUI->bones.size())) ?
+                skeletonForUI->bones[ikTarget.startBoneIndex].name.c_str() : "None")) {
+            for (size_t bi = 0; bi < skeletonForUI->bones.size(); ++bi) {
                 bool selected = (ikTarget.startBoneIndex == static_cast<int>(bi));
-                if (ImGui::Selectable(skeleton.bones[bi].name.c_str(), selected)) {
+                if (ImGui::Selectable(skeletonForUI->bones[bi].name.c_str(), selected)) {
                     ikTarget.startBoneIndex = static_cast<int>(bi);
                     // Rebuild chain if both bones are set
                     if (ikTarget.endBoneIndex >= 0) {
                         ikTarget.chain = FABRIKSolver::buildChain(
-                            skeleton, 
+                            *skeletonForUI, 
                             static_cast<uint32_t>(ikTarget.startBoneIndex),
                             static_cast<uint32_t>(ikTarget.endBoneIndex));
                     }
@@ -1854,17 +1874,18 @@ void CharacterEditorUI::renderIKPanel() {
             ImGui::EndCombo();
         }
         
-        // End bone selection (combo box)
+        // End bone selection (combo box) - show bones from the active skeleton (base or combined)
         if (ImGui::BeginCombo("End Bone", 
-            ikTarget.endBoneIndex >= 0 ? skeleton.bones[ikTarget.endBoneIndex].name.c_str() : "None")) {
-            for (size_t bi = 0; bi < skeleton.bones.size(); ++bi) {
+            (ikTarget.endBoneIndex >= 0 && ikTarget.endBoneIndex < static_cast<int>(skeletonForUI->bones.size())) ?
+                skeletonForUI->bones[ikTarget.endBoneIndex].name.c_str() : "None")) {
+            for (size_t bi = 0; bi < skeletonForUI->bones.size(); ++bi) {
                 bool selected = (ikTarget.endBoneIndex == static_cast<int>(bi));
-                if (ImGui::Selectable(skeleton.bones[bi].name.c_str(), selected)) {
+                if (ImGui::Selectable(skeletonForUI->bones[bi].name.c_str(), selected)) {
                     ikTarget.endBoneIndex = static_cast<int>(bi);
                     // Rebuild chain if both bones are set
                     if (ikTarget.startBoneIndex >= 0) {
                         ikTarget.chain = FABRIKSolver::buildChain(
-                            skeleton, 
+                            *skeletonForUI, 
                             static_cast<uint32_t>(ikTarget.startBoneIndex),
                             static_cast<uint32_t>(ikTarget.endBoneIndex));
                     }
@@ -1893,7 +1914,7 @@ void CharacterEditorUI::renderIKPanel() {
         
         // Quick set target to current end effector position
         if (ikTarget.chain.isValid() && ImGui::Button("Set to End Effector")) {
-            Transform endWorld = skeleton.getWorldTransform(ikTarget.chain.tipBoneIndex);
+            Transform endWorld = skeletonForUI->getWorldTransform(ikTarget.chain.tipBoneIndex);
             ikTarget.target.position = endWorld.position;
         }
         
@@ -1919,14 +1940,41 @@ void CharacterEditorUI::renderIKPanel() {
     
     // Run IK solver for all active chains
     if (m_ikEnabled) {
-        // Reset to original skeleton
-        m_solvedSkeleton = skeleton;
-        
+        Skeleton* targetSkeleton = nullptr;
+        bool solvedOnCombined = false;
+
+        if (m_partLibrary && !m_partLibrary->getCombinedSkeleton().skeleton.empty()) {
+            targetSkeleton = &m_partLibrary->getCombinedSkeleton().skeleton; // operate directly on combined skeleton
+            solvedOnCombined = true;
+        } else {
+            // Reset solved skeleton to base model skeleton
+            m_solvedSkeleton = model.loadResult.skeleton;
+            targetSkeleton = &m_solvedSkeleton;
+        }
+
+        // Run solver on the chosen skeleton
+        PLOGD << "IK target skeleton bones=" << targetSkeleton->bones.size() << " (solvedOnCombined=" << solvedOnCombined << ")";
         for (auto& ikTarget : m_ikTargets) {
             if (ikTarget.isActive && ikTarget.chain.isValid()) {
-                IKSolveResult result = m_ikSolver.solve(m_solvedSkeleton, ikTarget.chain, ikTarget.target);
+                IKSolveResult result = m_ikSolver.solve(*targetSkeleton, ikTarget.chain, ikTarget.target);
                 if (!result.solvedTransforms.empty()) {
-                    FABRIKSolver::applyResult(m_solvedSkeleton, ikTarget.chain, result, ikTarget.blendWeight);
+                    FABRIKSolver::applyResult(*targetSkeleton, ikTarget.chain, result, ikTarget.blendWeight);
+                }
+            }
+        }
+
+        // If we solved on the combined skeleton, copy base-model bone transforms back into m_solvedSkeleton
+        if (solvedOnCombined && m_partLibrary) {
+            PLOGI << "IK solved on combined skeleton - copying base bone transforms into m_solvedSkeleton";
+            const CombinedSkeleton& cs = m_partLibrary->getCombinedSkeleton();
+            if (m_solvedSkeleton.bones.size() != model.loadResult.skeleton.bones.size()) {
+                m_solvedSkeleton = model.loadResult.skeleton;
+            }
+            for (const auto& src : cs.boneSources) {
+                if (src.sourcePartID.empty() && src.sourceBoneIndex < m_solvedSkeleton.bones.size() &&
+                    src.combinedIndex < cs.skeleton.bones.size()) {
+                    m_solvedSkeleton.bones[src.sourceBoneIndex].localTransform =
+                        cs.skeleton.bones[src.combinedIndex].localTransform;
                 }
             }
         }

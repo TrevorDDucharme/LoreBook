@@ -642,12 +642,7 @@ void BaseTextEditor::handleKeyboardInput()
         KeyConsumeGuard(ImGuiIO& _io) : io(_io) {}
         ~KeyConsumeGuard()
         {
-            io.InputQueueCharacters.clear();
-            io.KeysDown[ImGuiKey_Tab] = false;
-            io.KeysDown[ImGuiKey_LeftArrow] = false;
-            io.KeysDown[ImGuiKey_RightArrow] = false;
-            io.KeysDown[ImGuiKey_UpArrow] = false;
-            io.KeysDown[ImGuiKey_DownArrow] = false;
+            io.ClearInputKeys();
         }
     } keyGuard(io);
 
@@ -1188,8 +1183,7 @@ void BaseTextEditor::handleKeyboardInput()
         insertTextAtCursor("    ");
         // Consume Tab for the rest of the frame so no other ImGui widget will
         // treat it as a navigation key.
-        io.InputQueueCharacters.clear();
-        io.KeysDown[ImGuiKey_Tab] = false;
+        io.ClearInputKeys();
         return;
     }
 

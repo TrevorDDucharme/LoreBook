@@ -239,6 +239,11 @@ public:
     // ===== Combined Skeleton =====
     
     /**
+     * @brief Mutable accessor for the combined skeleton (used by IK when parts are attached)
+     */
+    CombinedSkeleton& getCombinedSkeleton() { return m_combinedSkeleton; }
+
+    /**
      * @brief Get the combined skeleton with all attached parts
      */
     const CombinedSkeleton& getCombinedSkeleton() const { return m_combinedSkeleton; }
